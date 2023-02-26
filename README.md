@@ -25,7 +25,7 @@ The code includes the following features and functionalities:
 ## Tasks
 
  - [x] Sahra online trading systems
- - [ ] Modif Securities Orbis trader
+ - [ ] Mofid Securities Orbis trader
  - [ ] Rayan online trading system (Exir)
  - [ ] Agah online trading system
 
