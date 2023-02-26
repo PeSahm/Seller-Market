@@ -10,7 +10,7 @@ This repository contains a Python code for simulating a seller's market situatio
  ## Usage
  To use this code, clone this repository and run the `locustfile.py` script with Locust:
  ```bash
- locust -f locustfile.py
+ `locust -f locustfile.py`
  ```
  This will start the Locust web interface at `http://localhost:8089/`, where you can configure the number of users, spawn rate, and other parameters of the simulation. You can also monitor the performance and results of the simulation in real-time using the web interface.
 ## Features
@@ -21,6 +21,13 @@ The code includes the following features and functionalities:
 -   **Order execution logic:** The simulation executes the orders following a simple matching logic, where the highest price seller's orders are matched with the lowest price buyer's orders, and vice versa, until all orders are executed or there are no more matching orders.
 -   **Metrics and statistics:** The simulation collects and reports various metrics and statistics, such as the number of orders, the execution time, the latency, the response time, the number of failures, etc.
 ## Contributing
+
+## Tasks
+
+ - [x] Sahra online trading systems
+ - [ ] Modif Securities Orbis trader
+ - [ ] Rayan online trading system (Exir)
+ - [ ] Agah online trading system
 
 If you want to contribute to this project, feel free to fork this repository and submit pull requests with your changes and improvements. You can also open issues or suggest new features and functionalities.
 
