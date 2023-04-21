@@ -6,6 +6,7 @@ This repository contains a Python code for simulating a seller's market situatio
   To run this code, you need to have Python 3.x and Locust installed in your system. You can install Locust via pip:
  ```bash 
  pip install locust
+ pip install easyocr
  ```
  ## Usage
  To use this code, clone this repository and run the `locustfile.py` script with Locust:
