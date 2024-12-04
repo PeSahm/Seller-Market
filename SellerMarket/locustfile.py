@@ -1,8 +1,6 @@
 from locust import FastHttpUser, task
 import json
 import requests
-import base64
-import easyocr
 import configparser
 from collections import namedtuple
 
@@ -34,10 +32,19 @@ def on_locust_init(Person: dict):
     # decode captcha image
 
     def decoder(im):
-        binary_data = base64.b64decode(im)
-        reader = easyocr.Reader(['en'], gpu=False)
-        result = reader.readtext(binary_data, detail=0)
+        url = 'https://ocr.liara.run/ocr/by-base64'
+        headers = {
+            'accept': 'text/plain',
+            'Content-Type': 'application/json'
+        }
+        data = {
+            "base64": im
+        }
+        response = requests.post(url, headers=headers, json=data)
+        result = response.text
+        print("captcha is " + response.text)
         return "".join(result)
+        
 
     # get captcha and login
     def get_captcha_and_login(username, password, captcha_url, login_url, decoder):
