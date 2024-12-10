@@ -3,7 +3,7 @@ import json
 import requests
 import configparser
 from collections import namedtuple
-
+from datetime import datetime, timedelta
 
 def on_locust_init(Person: dict):
     # read configuration file
@@ -40,11 +40,13 @@ def on_locust_init(Person: dict):
         data = {
             "base64": im
         }
-        response = requests.post(url, headers=headers, json=data)
-        result = response.text
-        print("captcha is " + response.text)
-        return "".join(result)
-        
+        try:
+            response = requests.post(url, headers=headers, json=data)
+            result = response.text
+            print("captcha is " + response.text)
+            return "".join(result)
+        except requests.RequestException as e:
+            return ""
 
     # get captcha and login
     def get_captcha_and_login(username, password, captcha_url, login_url, decoder):
@@ -65,14 +67,28 @@ def on_locust_init(Person: dict):
         return response
 
     # get access token
-    loginResponse = get_captcha_and_login(
-        username, password, captcha_url, login_url, decoder)
+    def save_token_to_file(username, login_url, token):
+        with open(f"{username}_{login_url.split('//')[1].split('/')[0].replace('.', '_')}.txt", "w") as file:
+            file.write(f"{token}\n{datetime.now()}")
+    
+    def load_token_from_file(username, login_url):
+        try:
+            with open(f"{username}_{login_url.split('//')[1].split('/')[0].replace('.', '_')}.txt", "r") as file:
+                token, timestamp = file.read().split('\n')
+                token_time = datetime.fromisoformat(timestamp)
+                if datetime.now() - token_time < timedelta(hours=2):
+                    return token
+        except (FileNotFoundError, ValueError):
+            return None
+            
+    token = load_token_from_file(username, login_url)
+    if not token:
+        loginResponse = get_captcha_and_login(username, password, captcha_url, login_url, decoder)
+        while not loginResponse.json().get("token"):
+            loginResponse = get_captcha_and_login(username, password, captcha_url, login_url, decoder)
+        token = loginResponse.json().get("token")
+        save_token_to_file(username, login_url, token)           
 
-    while not loginResponse.json().get("token"):
-        loginResponse = get_captcha_and_login(
-            username, password, captcha_url, login_url, decoder)
-
-    token = loginResponse.json().get("token")
     print("login ok ! " + username + " " +
           login_url + "\n")
     result = namedtuple("ABC", "order token data")
