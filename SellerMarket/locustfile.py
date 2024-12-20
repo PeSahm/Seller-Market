@@ -13,11 +13,15 @@ def on_locust_init(Person: dict):
     captcha_url = Person["captcha"]
     login_url = Person['login']
     order_url = Person['order']
+    edit_url = Person['editorder']
+    serialNumber = int(Person['serialnumber']);
+
     Person.pop("username")
     Person.pop("password")
     Person.pop("captcha")
     Person.pop("login")
     Person.pop("order")
+    Person.pop("editorder")
 
     Person["validity"] = int(Person["validity"])
     Person["side"] = int(Person["side"])
@@ -26,6 +30,8 @@ def on_locust_init(Person: dict):
     Person["price"] = int(Person["price"])
     Person["volume"] = int(Person["volume"])
     Person["validityDate"] = None
+    Person["serialNumber"] = int(Person['serialnumber'])
+    Person.pop("serialnumber")
 
     dictionary = json.dumps(Person)
     token = ""
@@ -92,7 +98,8 @@ def on_locust_init(Person: dict):
     print("login ok ! " + username + " " +
           login_url + "\n")
     result = namedtuple("ABC", "order token data")
-    return result(order_url, token, dictionary)
+    url = edit_url if serialNumber >0 else order_url
+    return result(url, token, dictionary)
 
 
 class Mostafa_Ib(FastHttpUser):
@@ -105,7 +112,8 @@ class Mostafa_Ib(FastHttpUser):
 
     @ task
     def Mostafa_Ib_(self):
-
+        print(self.OrderAddress)
+        print(self.JsonData)
         self.client.request(method="Post",
                             url=self.OrderAddress,
                             name=self.fullname(),
