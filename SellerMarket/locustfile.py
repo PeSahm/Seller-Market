@@ -112,8 +112,6 @@ class Mostafa_Ib(FastHttpUser):
 
     @ task
     def Mostafa_Ib_(self):
-        print(self.OrderAddress)
-        print(self.JsonData)
         self.client.request(method="Post",
                             url=self.OrderAddress,
                             name=self.fullname(),
