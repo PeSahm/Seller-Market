@@ -77,7 +77,7 @@ def on_locust_init(Person: dict):
 
     # Send the POST request 2 times and save the responses
     responses = []
-    for _ in range(2):
+    for _ in range(10):
         response = requests.post(draftOrder, json=payload, headers={"authorization": f"Bearer {token}"})
         response_data = response.json()
         responses.append(response_data["id"])

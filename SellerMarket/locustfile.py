@@ -113,7 +113,7 @@ class Mostafa_Ib(FastHttpUser):
     @ task
     def Mostafa_Ib_(self):
         current_time = datetime.now().time()
-        if datetime.strptime("08:44:56", "%H:%M:%S").time() <= current_time <= datetime.strptime("08:45:01","%H:%M:%S").time():
+        if datetime.strptime("08:44:55", "%H:%M:%S").time() <= current_time <= datetime.strptime("08:45:01","%H:%M:%S").time():
             self.client.request(method="Post",
                                 url=self.OrderAddress,
                                 name=self.fullname(),
