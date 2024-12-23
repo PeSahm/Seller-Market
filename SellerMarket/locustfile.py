@@ -112,16 +112,18 @@ class Mostafa_Ib(FastHttpUser):
 
     @ task
     def Mostafa_Ib_(self):
-        self.client.request(method="Post",
-                            url=self.OrderAddress,
-                            name=self.fullname(),
-                            data=self.JsonData,
-                            headers={"authorization": f"Bearer {self.Token}",
-                                     'Content-Type': 'application/json',
-                                     'Accept': 'application/json',
-                                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.5005.61/63 Safari/537.36'
-                                     }
-                            )
+        current_time = datetime.now().time()
+        if datetime.strptime("08:44:56", "%H:%M:%S").time() <= current_time <= datetime.strptime("08:45:01","%H:%M:%S").time():
+            self.client.request(method="Post",
+                                url=self.OrderAddress,
+                                name=self.fullname(),
+                                data=self.JsonData,
+                                headers={"authorization": f"Bearer {self.Token}",
+                                         'Content-Type': 'application/json',
+                                         'Accept': 'application/json',
+                                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.5005.61/63 Safari/537.36'
+                                         }
+                                )
 
 
 config = configparser.ConfigParser()
