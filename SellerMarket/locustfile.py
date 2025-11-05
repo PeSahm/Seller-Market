@@ -1,4 +1,4 @@
-from locust import FastHttpUser, task
+from locust import HttpUser, task
 import json
 import requests
 import configparser
@@ -38,7 +38,7 @@ def on_locust_init(Person: dict):
     # decode captcha image
 
     def decoder(im):
-        url = 'https://ocr.liara.run/ocr/by-base64'
+        url = 'http://localhost:8080/ocr/by-base64'
         headers = {
             'accept': 'text/plain',
             'Content-Type': 'application/json'
@@ -102,7 +102,7 @@ def on_locust_init(Person: dict):
     return result(url, token, dictionary)
 
 
-class Mostafa_Ib(FastHttpUser):
+class Mostafa_Ib(HttpUser):
     abstract = True
 
     def Populate(self, data: str, address: str, token: str):
