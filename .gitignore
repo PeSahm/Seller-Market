@@ -306,6 +306,29 @@ paket-files/
 __pycache__/
 *.pyc
 
+# Sensitive Configuration Files - Stock Trading App
+config.ini
+config.*.ini
+
+# Authentication Token Files - Stock Trading App
+*_identity_*.txt
+*_ephoenix_*.txt
+
+# Python Virtual Environments
+venv/
+ENV/
+env/
+.venv
+
+# Locust Load Testing
+locust-report.html
+locust-exceptions.log
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
 # Cake - Uncomment if you are using it
 # tools/**
 # !tools/packages.config
