@@ -3,3 +3,4 @@ requests>=2.28.0
 python-dotenv>=0.19.0
 flask>=2.0.0
 pytelegrambotapi>=4.0.0
+pytest>=7.0.0

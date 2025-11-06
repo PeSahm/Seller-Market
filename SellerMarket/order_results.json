@@ -1,0 +1,19 @@
+[
+  {
+    "user_id": "123456789",
+    "timestamp": "2025-11-06T17:19:39.301632",
+    "result": {
+      "tracking_number": 123456789,
+      "serial_number": 987654,
+      "state": 1,
+      "state_desc": "Registered",
+      "volume": 170017,
+      "price": 6000.0,
+      "total_amount": 1020000000.0,
+      "fee": 3698325.0,
+      "timestamp": "2025-11-06T17:19:39.301212",
+      "config_name": "test_config"
+    },
+    "source": "local_save"
+  }
+]
