@@ -309,6 +309,8 @@ __pycache__/
 # Sensitive Configuration Files - Stock Trading App
 config.ini
 config.*.ini
+!config.example.ini
+!config.simple.example.ini
 
 # Authentication Token Files - Stock Trading App
 *_identity_*.txt
