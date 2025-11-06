@@ -32,8 +32,22 @@ if "%TELEGRAM_BOT_TOKEN%"=="" (
     exit /b 1
 )
 
+REM Trim trailing spaces from bot token
+for /f "tokens=* delims= " %%a in ("%TELEGRAM_BOT_TOKEN%") do set TELEGRAM_BOT_TOKEN=%%a
+
 echo.
-echo ✅ Bot token configured
+set /p TELEGRAM_USER_ID="Enter your Telegram User ID (send /start to @userinfobot to get it): "
+if "%TELEGRAM_USER_ID%"=="" (
+    echo ❌ Error: User ID is required
+    pause
+    exit /b 1
+)
+
+REM Trim trailing spaces from user ID
+for /f "tokens=* delims= " %%a in ("%TELEGRAM_USER_ID%") do set TELEGRAM_USER_ID=%%a
+
+echo.
+echo ✅ Bot token and user ID configured
 echo.
 
 REM Set other environment variables
@@ -42,6 +56,7 @@ set PYTHONPATH=%CD%\SellerMarket
 
 echo Environment variables set:
 echo   TELEGRAM_BOT_TOKEN=********
+echo   TELEGRAM_USER_ID=%TELEGRAM_USER_ID%
 echo   CONFIG_API_URL=%CONFIG_API_URL%
 echo   PYTHONPATH=%PYTHONPATH%
 echo.
@@ -97,7 +112,15 @@ REM ===============================================
 echo 🤖 STEP 4: Starting Telegram Bot
 echo ================================
 
-start "Telegram Config Bot" cmd /c "cd SellerMarket && set TELEGRAM_BOT_TOKEN=%TELEGRAM_BOT_TOKEN% && set CONFIG_API_URL=%CONFIG_API_URL% && python telegram_config_bot.py"
+REM Create a temporary batch file to start the bot with environment variables
+echo @echo off > SellerMarket\temp_bot_start.bat
+echo set "TELEGRAM_BOT_TOKEN=%TELEGRAM_BOT_TOKEN%" >> SellerMarket\temp_bot_start.bat
+echo set "TELEGRAM_USER_ID=%TELEGRAM_USER_ID%" >> SellerMarket\temp_bot_start.bat
+echo set "CONFIG_API_URL=%CONFIG_API_URL%" >> SellerMarket\temp_bot_start.bat
+echo python telegram_config_bot.py >> SellerMarket\temp_bot_start.bat
+echo pause >> SellerMarket\temp_bot_start.bat
+
+start "Telegram Config Bot" cmd /c "cd SellerMarket && temp_bot_start.bat"
 
 echo ⏳ Waiting for bot to start...
 timeout /t 2 /nobreak > nul
