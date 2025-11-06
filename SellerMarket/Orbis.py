@@ -31,14 +31,14 @@ def on_locust_init(Person: dict):
 
     dictionary = json.dumps(Person)
 
-    def load_token_from_file(username):
+    def load_token_from_file(username1):
         try:
-            with open(f"{username}_Orbis.txt", "r") as file:
-                token, timestamp = file.read().split('\n')
+            with open(f"{username1}_Orbis.txt", "r") as file:
+                token2, timestamp = file.read().split('\n')
                 token_time = datetime.fromisoformat(timestamp)
-                print(token)
+                print(token2)
                 if datetime.now() - token_time < timedelta(hours=2):
-                    return token
+                    return token2
         except (FileNotFoundError, ValueError):
             return None
 
@@ -92,8 +92,8 @@ def on_locust_init(Person: dict):
 
     # Step 2: Calculate when to send the request
     # Desired server time range: 8:44:58 to 8:45:02
-    desired_server_time_start = datetime.strptime("08:44:43.500", "%H:%M:%S.%f").time()
-    desired_server_time_end = datetime.strptime("08:45:00.500", "%H:%M:%S.%f").time()
+    desired_server_time_start = datetime.strptime("08:44:58.450", "%H:%M:%S.%f").time()
+    desired_server_time_end = datetime.strptime("08:45:00.900", "%H:%M:%S.%f").time()
 
     # Convert desired server time to local timestamp
     now = datetime.now()
