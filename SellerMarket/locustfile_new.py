@@ -78,21 +78,19 @@ def send_telegram_notification(message: str):
         message: Message to send
     """
     try:
-        # Read bot token and chat ID from .env or config
-        from dotenv import load_dotenv
-        load_dotenv()
+        # Read bot token and user ID from environment (same as simple_config_bot.py)
+        bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
+        user_id = os.getenv('USER_ID')
         
-        bot_token = os.getenv('BOT_TOKEN')
-        chat_id = os.getenv('CHAT_ID')
-        
-        if not bot_token or not chat_id:
+        if not bot_token or not user_id:
             logger.warning("Telegram credentials not found. Skipping notification.")
+            logger.info("Set TELEGRAM_BOT_TOKEN and USER_ID environment variables to enable notifications.")
             return
         
         # Send message via Telegram API
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         payload = {
-            'chat_id': chat_id,
+            'chat_id': user_id,
             'text': message,
             'parse_mode': 'Markdown'
         }
