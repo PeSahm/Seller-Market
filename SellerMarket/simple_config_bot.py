@@ -8,7 +8,10 @@ import telebot
 import configparser
 import os
 import logging
+import subprocess
+import json
 from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -27,6 +30,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 USER_ID = os.getenv('TELEGRAM_USER_ID')
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.ini')
+SCHEDULER_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'scheduler_config.json')
 
 if not BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN not set")
@@ -296,12 +300,27 @@ def send_help(message):
 /user <username> - Set username
 /pass <password> - Set password
 
+*Manual Execution:*
+/cache - Run cache warmup now
+/trade - Run trading bot now
+/status - Show system status
+
+*Scheduler Management:*
+/schedule - Show scheduled jobs
+/setcache <HH:MM:SS> - Set cache time
+/settrade <HH:MM:SS> - Set trade time
+/enablejob <name> - Enable job
+/disablejob <name> - Disable job
+
 *Example:*
 /list
 /add Account2
 /use Account2
 /broker bbi
-/symbol IRO1FOLD0001
+/cache
+/trade
+/setcache 08:30:00
+/settrade 08:44:30
 """
     bot.reply_to(message, help_text, parse_mode='Markdown')
 
@@ -521,6 +540,350 @@ def handle_unknown(message):
     if not is_authorized(message):
         return
     bot.reply_to(message, "❌ Unknown command. Send /help for available commands.")
+
+# ========================================
+# Manual Execution Commands
+# ========================================
+
+@bot.message_handler(commands=['cache'])
+def run_cache_warmup(message):
+    """Run cache warmup manually"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        bot.reply_to(message, "🔄 Running cache warmup...\nThis may take 30-60 seconds")
+        
+        result = subprocess.run(
+            ['python', 'cache_warmup.py'],
+            cwd=os.path.dirname(__file__),
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        
+        if result.returncode == 0:
+            bot.reply_to(message, f"✅ Cache warmup completed!\n\n```\n{result.stdout[-500:]}\n```", parse_mode='Markdown')
+        else:
+            bot.reply_to(message, f"❌ Cache warmup failed!\n\n```\n{result.stderr[-500:]}\n```", parse_mode='Markdown')
+    
+    except subprocess.TimeoutExpired:
+        bot.reply_to(message, "⏱️ Cache warmup timed out after 2 minutes")
+    except Exception as e:
+        logger.error(f"Error running cache warmup: {e}")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
+@bot.message_handler(commands=['trade'])
+def run_trading(message):
+    """Run trading bot manually"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        bot.reply_to(message, "🚀 Starting trading bot...\nDefault: 10 users, 30 seconds")
+        
+        result = subprocess.run(
+            ['locust', '-f', 'locustfile_new.py', '--headless', '--users', '10', '--spawn-rate', '10', '--run-time', '30s'],
+            cwd=os.path.dirname(__file__),
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode == 0:
+            # Extract summary from output
+            output_lines = result.stdout.split('\n')
+            summary = '\n'.join([line for line in output_lines if 'RPS' in line or 'requests' in line or 'Aggregated' in line])
+            
+            bot.reply_to(message, f"✅ Trading completed!\n\n```\n{summary[-500:]}\n```", parse_mode='Markdown')
+        else:
+            bot.reply_to(message, f"❌ Trading failed!\n\n```\n{result.stderr[-500:]}\n```", parse_mode='Markdown')
+    
+    except subprocess.TimeoutExpired:
+        bot.reply_to(message, "⏱️ Trading timed out after 1 minute")
+    except Exception as e:
+        logger.error(f"Error running trading: {e}")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
+@bot.message_handler(commands=['status'])
+def show_status(message):
+    """Show system status"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        # Check cache status
+        cache_result = subprocess.run(
+            ['python', 'cache_cli.py', 'stats'],
+            cwd=os.path.dirname(__file__),
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        cache_status = cache_result.stdout if cache_result.returncode == 0 else "❌ Cache unavailable"
+        
+        # Check scheduler config
+        scheduler_status = "📅 Not configured"
+        if os.path.exists(SCHEDULER_CONFIG_FILE):
+            with open(SCHEDULER_CONFIG_FILE, 'r') as f:
+                scheduler_config = json.load(f)
+                enabled = scheduler_config.get('enabled', False)
+                jobs = scheduler_config.get('jobs', [])
+                
+                if enabled and jobs:
+                    job_status = []
+                    for job in jobs:
+                        status_icon = "✅" if job.get('enabled') else "⚪"
+                        job_status.append(f"{status_icon} {job['name']}: {job['time']}")
+                    scheduler_status = "📅 *Scheduled Jobs:*\n" + "\n".join(job_status)
+        
+        response = f"""
+📊 *System Status*
+
+{cache_status[:300]}
+
+{scheduler_status}
+
+💻 *Service:* Running
+🤖 *Bot:* Active
+"""
+        bot.reply_to(message, response, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error getting status: {e}")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
+# ========================================
+# Scheduler Management Commands
+# ========================================
+
+@bot.message_handler(commands=['schedule'])
+def show_schedule(message):
+    """Show scheduled jobs"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        if not os.path.exists(SCHEDULER_CONFIG_FILE):
+            bot.reply_to(message, "📅 No scheduler configuration found\n\nUse /setcache and /settrade to configure")
+            return
+        
+        with open(SCHEDULER_CONFIG_FILE, 'r') as f:
+            config = json.load(f)
+        
+        enabled = config.get('enabled', True)
+        jobs = config.get('jobs', [])
+        
+        if not jobs:
+            bot.reply_to(message, "📅 No scheduled jobs configured")
+            return
+        
+        response = f"📅 *Scheduled Jobs* ({'Enabled' if enabled else 'Disabled'})\n\n"
+        
+        for job in jobs:
+            status_icon = "✅" if job.get('enabled') else "⚪"
+            response += f"{status_icon} *{job['name']}*\n"
+            response += f"   ⏰ Time: `{job['time']}`\n"
+            response += f"   📝 Command: `{job['command'][:50]}...`\n\n"
+        
+        response += "\n*Management:*\n"
+        response += "/setcache <HH:MM:SS>\n"
+        response += "/settrade <HH:MM:SS>\n"
+        response += "/enablejob <name>\n"
+        response += "/disablejob <name>"
+        
+        bot.reply_to(message, response, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error showing schedule: {e}")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
+@bot.message_handler(commands=['setcache'])
+def set_cache_time(message):
+    """Set cache warmup time"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /setcache HH:MM:SS\n\nExample: /setcache 08:30:00")
+            return
+        
+        time_str = parts[1]
+        
+        # Validate time format
+        datetime.strptime(time_str, '%H:%M:%S')
+        
+        # Load or create config
+        if os.path.exists(SCHEDULER_CONFIG_FILE):
+            with open(SCHEDULER_CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+        else:
+            config = {"enabled": True, "jobs": []}
+        
+        # Update or add cache job
+        found = False
+        for job in config['jobs']:
+            if job['name'] == 'cache_warmup':
+                job['time'] = time_str
+                found = True
+                break
+        
+        if not found:
+            config['jobs'].append({
+                "name": "cache_warmup",
+                "time": time_str,
+                "command": "python cache_warmup.py",
+                "enabled": True
+            })
+        
+        # Save config
+        with open(SCHEDULER_CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        bot.reply_to(message, f"✅ Cache warmup scheduled for: `{time_str}`", parse_mode='Markdown')
+        
+    except ValueError:
+        bot.reply_to(message, "❌ Invalid time format. Use HH:MM:SS (e.g., 08:30:00)")
+    except Exception as e:
+        logger.error(f"Error setting cache time: {e}")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
+@bot.message_handler(commands=['settrade'])
+def set_trade_time(message):
+    """Set trading time"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /settrade HH:MM:SS\n\nExample: /settrade 08:44:30")
+            return
+        
+        time_str = parts[1]
+        
+        # Validate time format
+        datetime.strptime(time_str, '%H:%M:%S')
+        
+        # Load or create config
+        if os.path.exists(SCHEDULER_CONFIG_FILE):
+            with open(SCHEDULER_CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+        else:
+            config = {"enabled": True, "jobs": []}
+        
+        # Update or add trade job
+        found = False
+        for job in config['jobs']:
+            if job['name'] == 'run_trading':
+                job['time'] = time_str
+                found = True
+                break
+        
+        if not found:
+            config['jobs'].append({
+                "name": "run_trading",
+                "time": time_str,
+                "command": "locust -f locustfile_new.py --headless --users 10 --spawn-rate 10 --run-time 30s",
+                "enabled": True
+            })
+        
+        # Save config
+        with open(SCHEDULER_CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        bot.reply_to(message, f"✅ Trading scheduled for: `{time_str}`", parse_mode='Markdown')
+        
+    except ValueError:
+        bot.reply_to(message, "❌ Invalid time format. Use HH:MM:SS (e.g., 08:44:30)")
+    except Exception as e:
+        logger.error(f"Error setting trade time: {e}")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
+@bot.message_handler(commands=['enablejob'])
+def enable_job(message):
+    """Enable a scheduled job"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /enablejob <job_name>\n\nExample: /enablejob cache_warmup")
+            return
+        
+        job_name = parts[1]
+        
+        if not os.path.exists(SCHEDULER_CONFIG_FILE):
+            bot.reply_to(message, "❌ No scheduler configuration found")
+            return
+        
+        with open(SCHEDULER_CONFIG_FILE, 'r') as f:
+            config = json.load(f)
+        
+        found = False
+        for job in config.get('jobs', []):
+            if job['name'] == job_name:
+                job['enabled'] = True
+                found = True
+                break
+        
+        if not found:
+            bot.reply_to(message, f"❌ Job `{job_name}` not found", parse_mode='Markdown')
+            return
+        
+        with open(SCHEDULER_CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        bot.reply_to(message, f"✅ Job `{job_name}` enabled", parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error enabling job: {e}")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
+@bot.message_handler(commands=['disablejob'])
+def disable_job(message):
+    """Disable a scheduled job"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /disablejob <job_name>\n\nExample: /disablejob cache_warmup")
+            return
+        
+        job_name = parts[1]
+        
+        if not os.path.exists(SCHEDULER_CONFIG_FILE):
+            bot.reply_to(message, "❌ No scheduler configuration found")
+            return
+        
+        with open(SCHEDULER_CONFIG_FILE, 'r') as f:
+            config = json.load(f)
+        
+        found = False
+        for job in config.get('jobs', []):
+            if job['name'] == job_name:
+                job['enabled'] = False
+                found = True
+                break
+        
+        if not found:
+            bot.reply_to(message, f"❌ Job `{job_name}` not found", parse_mode='Markdown')
+            return
+        
+        with open(SCHEDULER_CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        bot.reply_to(message, f"⚪ Job `{job_name}` disabled", parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error disabling job: {e}")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
 
 def main():
     """Start the bot"""
