@@ -674,13 +674,6 @@ def set_password(message):
         logger.error(f"Error setting password: {e}")
         bot.reply_to(message, "❌ Error updating password")
 
-@bot.message_handler(func=lambda m: True)
-def handle_unknown(message):
-    """Handle unknown commands"""
-    if not is_authorized(message):
-        return
-    bot.reply_to(message, "❌ Unknown command. Send /help for available commands.")
-
 # ========================================
 # Manual Execution Commands
 # ========================================
@@ -1131,6 +1124,18 @@ def show_logs(message):
     except Exception as e:
         logger.error(f"Error showing logs: {e}")
         bot.reply_to(message, f"❌ Error: {str(e)}")
+
+# ========================================
+# Catch-all handler for unknown commands
+# THIS MUST BE THE LAST HANDLER!
+# ========================================
+
+@bot.message_handler(func=lambda m: True)
+def handle_unknown(message):
+    """Handle unknown commands"""
+    if not is_authorized(message):
+        return
+    bot.reply_to(message, "❌ Unknown command. Send /help for available commands.")
 
 def main():
     """Start the bot with unlimited auto-restart on errors"""
