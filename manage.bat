@@ -16,6 +16,7 @@ if "%1"=="status" goto :show_status
 if "%1"=="help" goto :show_help
 
 REM No parameter - show menu
+echo Debug: Args are %1 %2 %3
 echo Select an option:
 echo ================
 echo 1. Start all services (API + Bot)
@@ -56,11 +57,26 @@ if %errorlevel% neq 0 (
 
 REM Check if bot token is set
 if "%TELEGRAM_BOT_TOKEN%"=="" (
-    set /p TELEGRAM_BOT_TOKEN="Enter Telegram Bot Token: "
+    if not "%1"=="" (
+        set TELEGRAM_BOT_TOKEN=%1
+    ) else (
+        set /p TELEGRAM_BOT_TOKEN="Enter Telegram Bot Token: "
+    )
+)
+if "%TELEGRAM_USER_ID%"=="" (
+    if not "%2"=="" (
+        set TELEGRAM_USER_ID=%2
+    ) else (
+        set /p TELEGRAM_USER_ID="Enter Telegram User ID: "
+    )
 )
 
+REM Trim trailing spaces
+for /f "tokens=* delims= " %%a in ("%TELEGRAM_BOT_TOKEN%") do set TELEGRAM_BOT_TOKEN=%%a
+for /f "tokens=* delims= " %%a in ("%TELEGRAM_USER_ID%") do set TELEGRAM_USER_ID=%%a
+
 echo Starting Telegram bot...
-start "Telegram Config Bot" cmd /c "set TELEGRAM_BOT_TOKEN=%TELEGRAM_BOT_TOKEN% && set CONFIG_API_URL=http://localhost:5000 && python telegram_config_bot.py"
+start "Telegram Config Bot" cmd /c "cd SellerMarket && set "TELEGRAM_BOT_TOKEN=%TELEGRAM_BOT_TOKEN%" && set "TELEGRAM_USER_ID=%TELEGRAM_USER_ID%" && set "CONFIG_API_URL=http://localhost:5000" && python telegram_config_bot.py && pause"
 
 echo ✅ Services started
 goto :end
@@ -130,18 +146,19 @@ if %errorlevel% neq 0 (
 
 echo.
 echo Running Processes:
-tasklist /fi "WINDOWTITLE eq Config API Server*" | findstr "cmd.exe" > nul
+tasklist /fi "imagename eq python.exe" | findstr "python.exe" > nul
 if %errorlevel% neq 0 (
-    echo ❌ API server not running
+    echo ❌ No Python processes running
 ) else (
-    echo ✅ API server running
+    echo ✅ Python processes running
 )
 
-tasklist /fi "WINDOWTITLE eq Telegram Config Bot*" | findstr "cmd.exe" > nul
+echo Checking API server...
+curl -s http://localhost:5000/health > nul 2>&1
 if %errorlevel% neq 0 (
-    echo ❌ Telegram bot not running
+    echo ❌ API server not responding
 ) else (
-    echo ✅ Telegram bot running
+    echo ✅ API server responding
 )
 
 echo.
