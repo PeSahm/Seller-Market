@@ -200,59 +200,11 @@ echo.
 :SKIP_SCHED
 
 REM ===============================================
-REM Step 5: Install Windows Service (Optional)
+REM Step 5: Setup Complete
 REM ===============================================
 
-echo [6/6] Windows Service Installation...
+echo [6/6] Setup verification...
 echo.
-
-set /p INSTALL_SERVICE="Install as Windows Service? (y/n): "
-
-if /i "%INSTALL_SERVICE%"=="y" (
-    echo.
-    echo This requires Administrator privileges
-    echo The service will:
-    echo   - Start bot automatically on Windows startup
-    echo   - Run scheduler in background
-    echo   - Restart automatically if it crashes
-    echo.
-    
-    REM Check for admin rights
-    net session >nul 2>&1
-    if %errorLevel% neq 0 (
-        echo ⚠️  This script does not have admin rights
-        echo.
-        echo To install service:
-        echo 1. Close this window
-        echo 2. Right-click install_service.bat
-        echo 3. Select "Run as Administrator"
-        echo.
-        pause
-        goto SKIP_SERVICE
-    )
-    
-    REM Install service
-    python trading_service.py install
-    sc config TradingBotService start= auto
-    
-    set /p START_NOW="Start service now? (y/n): "
-    if /i "%START_NOW%"=="y" (
-        net start TradingBotService
-        echo.
-        echo ✅ Service installed and started
-    ) else (
-        echo.
-        echo ✅ Service installed (not started)
-        echo To start: net start TradingBotService
-    )
-) else (
-    echo.
-    echo Skipping service installation
-    echo You can install later by running:
-    echo   install_service.bat (as Administrator)
-)
-
-:SKIP_SERVICE
 
 echo.
 echo.
@@ -288,13 +240,6 @@ if exist "scheduler_config.json" (
     echo ❌ Scheduler NOT configured
 )
 
-sc query TradingBotService >nul 2>&1
-if %errorLevel% equ 0 (
-    echo ✅ Windows service installed
-) else (
-    echo ⚪ Windows service not installed
-)
-
 echo.
 echo 📱 TELEGRAM BOT COMMANDS
 echo ========================
@@ -322,39 +267,62 @@ echo Headless mode:
 echo   locust -f locustfile_new.py --headless --users 10 --spawn-rate 10 --run-time 30s
 echo.
 
-echo 🔧 SERVICE MANAGEMENT
-echo ========================
-echo.
-
-sc query TradingBotService >nul 2>&1
-if %errorLevel% equ 0 (
-    echo Start service:  net start TradingBotService
-    echo Stop service:   net stop TradingBotService
-    echo Check status:   sc query TradingBotService
-    echo View logs:      type logs\trading_service.log
-    echo Uninstall:      uninstall_service.bat
-) else (
-    echo Install service:  install_service.bat (as Admin)
-    echo.
-    echo Or run bot manually:
-    echo   python simple_config_bot.py
-)
-
-echo.
 echo ===============================================
 echo.
 
-set /p TEST_NOW="Test the bot now? (y/n): "
+set /p ADD_STARTUP="Add bot to Windows Startup? (y/n): "
+
+if /i "%ADD_STARTUP%"=="y" (
+    echo.
+    echo Creating startup shortcut...
+    
+    REM Get the full path to the batch file
+    set "BAT_PATH=%~dp0SellerMarket\run_bot.bat"
+    set "STARTUP_FOLDER=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
+    
+    REM Create a simple runner batch file
+    (
+        echo @echo off
+        echo cd /d "%~dp0"
+        echo python simple_config_bot.py
+        echo pause
+    ) > "%~dp0SellerMarket\run_bot.bat"
+    
+    REM Create shortcut
+    powershell -Command "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%STARTUP_FOLDER%\SellerMarket Bot.lnk'); $Shortcut.TargetPath = '%BAT_PATH%'; $Shortcut.WorkingDirectory = '%~dp0SellerMarket'; $Shortcut.Description = 'Seller Market Trading Bot'; $Shortcut.Save()"
+    
+    if %errorLevel% equ 0 (
+        echo ✅ Startup shortcut created successfully!
+        echo    Location: %STARTUP_FOLDER%\SellerMarket Bot.lnk
+        echo.
+        echo The bot will start automatically when you log in to Windows.
+        echo To remove: Delete the shortcut from the Startup folder
+    ) else (
+        echo ❌ Failed to create startup shortcut
+    )
+    echo.
+)
+
+set /p TEST_NOW="Start the bot now? (y/n): "
 
 if /i "%TEST_NOW%"=="y" (
     echo.
-    echo Starting bot in test mode...
-    echo Press Ctrl+C to stop
+    echo Starting Telegram bot...
     echo.
-    echo Send /help to your Telegram bot
+    echo ⚠️  Keep this window open! The bot will run here.
+    echo    Press Ctrl+C to stop the bot
+    echo.
+    echo Send /help to your Telegram bot to test it
     echo.
     pause
     python simple_config_bot.py
+) else (
+    echo.
+    echo To start the bot manually:
+    echo   cd SellerMarket
+    echo   python simple_config_bot.py
+    echo.
+    echo Or double-click: SellerMarket\run_bot.bat
 )
 
 echo.
