@@ -321,14 +321,19 @@ class TestEndToEndFlow(unittest.TestCase):
         }
         
         # Configure mock responses
-        mock_get.side_effect = [mock_captcha_response, mock_buying_power_response]
+        # GET requests: captcha, buying power
+        # POST requests: login, instrument info, order volume
+        mock_get.side_effect = [
+            mock_captcha_response,  # For captcha during first authenticate()
+            mock_buying_power_response,  # For get_buying_power()
+        ]
         mock_post.side_effect = [
-            mock_login_response,
-            mock_instrument_response,
-            mock_volume_response
+            mock_login_response,  # For login during first authenticate()
+            mock_instrument_response,  # For get_instrument_info()
+            mock_volume_response  # For calculate_order_volume()
         ]
         
-        # Create client
+        # Create client (without cache for testing)
         captcha_decoder = Mock(return_value="12345")
         endpoints = BrokerCode.GANJINE.get_endpoints()
         client = EphoenixAPIClient(
@@ -336,17 +341,23 @@ class TestEndToEndFlow(unittest.TestCase):
             username="test_user",
             password="test_pass",
             captcha_decoder=captcha_decoder,
-            endpoints=endpoints
+            endpoints=endpoints,
+            cache=None
         )
         
         # Execute flow
         token = client.authenticate()
         self.assertEqual(token, 'test_token')
         
-        buying_power = client.get_buying_power()
+        # Set token and expiry to avoid re-authentication
+        from datetime import datetime, timedelta
+        client.token = 'test_token'
+        client.token_expiry = datetime.now() + timedelta(hours=2)
+        
+        buying_power = client.get_buying_power(use_cache=False)
         self.assertEqual(buying_power, 10000000)
         
-        instrument_info = client.get_instrument_info('IRO1TEST0001')
+        instrument_info = client.get_instrument_info('IRO1TEST0001', use_cache=False)
         self.assertEqual(instrument_info['max_price'], 1500)
         
         volume = client.calculate_order_volume(
