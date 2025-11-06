@@ -20,21 +20,51 @@ from typing import Dict, Any
 from broker_enum import BrokerCode
 from api_client import EphoenixAPIClient
 from order_tracker import OrderResultTracker, OrderResult
+from cache_manager import TradingCache
 
-# Configure logging
+# Configure logging - truncate log file on each run
+_log_file_path = 'trading_bot.log'
+
+# Truncate the log file at module load
+with open(_log_file_path, 'w', encoding='utf-8') as f:
+    f.write('')  # Clear the file
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('trading_bot.log'),
+        logging.FileHandler(_log_file_path, mode='a', encoding='utf-8'),  # Append mode after truncation
         logging.StreamHandler()
-    ]
+    ],
+    force=True  # Override any existing configuration
 )
 
 logger = logging.getLogger(__name__)
 
+# Store the file handler globally so we can ensure it's always used
+_file_handler = None
+for handler in logging.getLogger().handlers:
+    if isinstance(handler, logging.FileHandler):
+        _file_handler = handler
+        break
+
+# Ensure our logger always uses the file handler
+if _file_handler and _file_handler not in logger.handlers:
+    logger.addHandler(_file_handler)
+    logger.setLevel(logging.INFO)
+
+# Also configure Locust's loggers to use our handlers
+for logger_name in ['locust.main', 'locust.runners', 'locust.user.users', 'locustfile_new']:
+    locust_logger = logging.getLogger(logger_name)
+    locust_logger.setLevel(logging.INFO)
+    # Ensure propagation so it uses root logger's handlers
+    locust_logger.propagate = True
+
 # Global order tracker
 order_tracker = OrderResultTracker()
+
+# Global cache manager
+cache_manager = TradingCache()
 
 
 def decode_captcha(im: str) -> str:
@@ -94,13 +124,14 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
     
     logger.info(f"Broker: {BrokerCode.get_broker_name(broker_code)}")
     
-    # Initialize API client
+    # Initialize API client with cache
     api_client = EphoenixAPIClient(
         broker_code=broker_code,
         username=username,
         password=password,
         captcha_decoder=decode_captcha,
-        endpoints=endpoints
+        endpoints=endpoints,
+        cache=cache_manager
     )
     
     # Step 1: Authenticate
@@ -203,8 +234,11 @@ class TradingUser(HttpUser):
     @task
     def place_order(self):
         """Execute order placement task."""
+        # Get logger with file handler for this task
+        task_logger = logging.getLogger(__name__)
+        
         try:
-            logger.info(f"Placing order for {self.username}@{self.broker_code}")
+            task_logger.info(f"Placing order for {self.username}@{self.broker_code}")
             
             response = self.client.request(
                 method="POST",
@@ -220,15 +254,69 @@ class TradingUser(HttpUser):
             )
             
             if response.status_code == 200:
-                logger.info(f"✓ Order placed successfully for {self.username}@{self.broker_code}")
-                logger.debug(f"Response: {response.text}")
+                task_logger.info(f"✓ Order placed successfully for {self.username}@{self.broker_code}")
+                task_logger.debug(f"Response: {response.text}")
             else:
-                logger.error(f"✗ Order failed for {self.username}@{self.broker_code}: "
+                task_logger.error(f"✗ Order failed for {self.username}@{self.broker_code}: "
                            f"Status {response.status_code}")
-                logger.error(f"Response: {response.text}")
+                task_logger.error(f"Response: {response.text}")
                 
         except Exception as e:
-            logger.error(f"✗ Exception during order placement for {self.username}@{self.broker_code}: {e}")
+            task_logger.error(f"✗ Exception during order placement for {self.username}@{self.broker_code}: {e}")
+
+
+@events.init.add_listener
+def on_locust_init(environment, **kwargs):
+    """
+    Event handler called when Locust initializes.
+    Ensures Locust's loggers write to our log file.
+    """
+    # Get the file handler from root logger
+    root_logger = logging.getLogger()
+    file_handler = None
+    for handler in root_logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            file_handler = handler
+            break
+    
+    if file_handler:
+        # Add file handler to all Locust loggers
+        for logger_name in ['locust.main', 'locust.runners', 'locust.user.users', 
+                           'locust.stats', 'locust.stats_logger', 'locust']:
+            locust_logger = logging.getLogger(logger_name)
+            # Remove existing handlers to avoid duplicates
+            locust_logger.handlers = []
+            # Add our file handler
+            locust_logger.addHandler(file_handler)
+            # Also add stream handler for console output
+            stream_handler = logging.StreamHandler()
+            stream_handler.setFormatter(logging.Formatter('[%(asctime)s] %(name)s/%(levelname)s/%(message)s'))
+            locust_logger.addHandler(stream_handler)
+            locust_logger.setLevel(logging.INFO)
+            locust_logger.propagate = False  # Don't propagate to avoid duplicates
+
+
+@events.test_start.add_listener
+def on_test_start(environment, **kwargs):
+    """
+    Event handler called when load test starts.
+    Additional check to ensure Locust loggers are configured.
+    """
+    # Get the file handler from root logger
+    root_logger = logging.getLogger()
+    file_handler = None
+    for handler in root_logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            file_handler = handler
+            break
+    
+    if file_handler:
+        # Ensure all Locust loggers have our file handler
+        for logger_name in ['locust.main', 'locust.runners', 'locust.user.users']:
+            locust_logger = logging.getLogger(logger_name)
+            if file_handler not in locust_logger.handlers:
+                locust_logger.addHandler(file_handler)
+                locust_logger.setLevel(logging.INFO)
 
 
 @events.test_stop.add_listener
@@ -294,25 +382,50 @@ if not config.sections():
 logger.info(f"Loaded configuration with {len(config.sections())} account(s)")
 
 # Dynamically create user classes for each config section
-for section_name in config.sections():
-    try:
-        section = dict(config[section_name])
-        
-        # Prepare order data
-        order_data = prepare_order_data(section)
-        
-        # Create dynamic user class
-        user_class = type(section_name, (TradingUser,), {})
-        user_class.populate(user_class, order_data)
-        
-        # Register globally
-        globals()[section_name] = user_class
-        
-        logger.info(f"✓ Configured trading user: {section_name}")
-        
-    except Exception as e:
-        logger.error(f"✗ Failed to configure {section_name}: {e}")
-        logger.exception(e)
+def _create_user_classes():
+    """Create user classes in a function scope to avoid variable leakage to globals."""
+    import sys
+    current_module = sys.modules[__name__]
+    user_classes = []
+    
+    for idx, section_name in enumerate(config.sections(), start=1):
+        try:
+            section = dict(config[section_name])
+            
+            # Prepare order data
+            order_data = prepare_order_data(section)
+            
+            # Create unique class name with index to absolutely avoid conflicts
+            base_class_name = section_name.replace('-', '_').replace('.', '_').replace(' ', '_')
+            unique_class_name = f"{base_class_name}_User{idx}"
+            
+            # Create dynamic user class with unique name and set class attributes
+            user_class = type(unique_class_name, (TradingUser,), {
+                'order_url': order_data.order_url,
+                'token': order_data.token,
+                'order_json': order_data.data,
+                'username': order_data.username,
+                'broker_code': order_data.broker_code,
+                'isin': order_data.isin,
+                'api_client': order_data.api_client,
+                '__module__': __name__,  # Explicitly set module
+                '__qualname__': unique_class_name,  # Explicitly set qualified name
+            })
+            
+            # Register as module attribute using setattr instead of globals()
+            setattr(current_module, unique_class_name, user_class)
+            user_classes.append(unique_class_name)
+            
+            logger.info(f"✓ Configured trading user: {unique_class_name}")
+            
+        except Exception as e:
+            logger.error(f"✗ Failed to configure {section_name}: {e}")
+            logger.exception(e)
+    
+    return user_classes
+
+# Create all user classes
+_configured_users = _create_user_classes()
 
 logger.info("\n" + "="*80)
 logger.info("All users configured. Ready to start load test.")
