@@ -19,13 +19,33 @@ A **high-performance automated trading bot** for Iranian stock exchanges (ephoen
 
 ## 🚀 Quick Start
 
+### Option 1: Complete Automated Setup (Recommended)
+
+```bash
+# Clone repository
+git clone https://github.com/MostafaEsmaeili/Seller-Market.git
+cd Seller-Market
+
+# Run complete setup (includes bot token, API server, Telegram bot, and cron jobs)
+complete_setup.bat
+```
+
+This script will:
+- ✅ Install all dependencies
+- ✅ Configure Telegram bot token
+- ✅ Start API server and Telegram bot
+- ✅ Set up Windows scheduled tasks (8:30 AM cache warmup, 8:44 AM trading)
+- ✅ Test the complete system
+
+### Option 2: Manual Setup
+
 ```bash
 # Clone and setup
 git clone https://github.com/MostafaEsmaeili/Seller-Market.git
 cd Seller-Market/SellerMarket
 
 # Install dependencies
-pip install locust requests
+pip install -r requirements.txt
 
 # Configure accounts
 cp config.example.ini config.ini
@@ -37,6 +57,27 @@ python cache_warmup.py
 # Start trading (when market opens)
 locust -f locustfile_new.py
 # Open http://localhost:8089
+```
+
+### Daily Management
+
+Use the management script for daily operations:
+
+```bash
+# Start services
+manage.bat start
+
+# Check system status
+manage.bat status
+
+# Run cache warmup manually
+manage.bat cache
+
+# Run trading manually
+manage.bat trade
+
+# Stop all services
+manage.bat stop
 ```
 
 📖 **[Read QUICKSTART Guide](QUICKSTART.md)** for detailed setup instructions.
