@@ -15,11 +15,17 @@ from pathlib import Path
 from dotenv import load_dotenv
 from typing import List, Dict, Any
 import winreg
+import threading
+from scheduler import JobScheduler
 
 # Load environment variables from .env file
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 if os.path.exists(env_path):
     load_dotenv(env_path)
+
+# Global dict to track running background processes
+running_processes = {}
+process_lock = threading.Lock()
 
 # Configure logging
 logging.basicConfig(
@@ -38,6 +44,14 @@ LOG_FILE = os.path.join(os.path.dirname(__file__), 'trading_bot.log')
 
 if not BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN not set")
+
+# Ensure environment variables are set for subprocesses
+# Locustfile expects TELEGRAM_BOT_TOKEN and USER_ID
+if BOT_TOKEN:
+    os.environ['TELEGRAM_BOT_TOKEN'] = BOT_TOKEN
+if USER_ID:
+    os.environ['USER_ID'] = USER_ID
+    os.environ['TELEGRAM_USER_ID'] = USER_ID  # Keep both for compatibility
 
 # Configure telebot to use requests session with proxy auto-detection
 # This is necessary for Windows services which don't inherit user proxy settings
@@ -78,6 +92,9 @@ else:
     logger.info("No proxy configured - using direct connection")
 
 bot = telebot.TeleBot(BOT_TOKEN)
+
+# Initialize scheduler
+scheduler = JobScheduler(SCHEDULER_CONFIG_FILE)
 
 def is_authorized(message):
     """Check if user is authorized"""
@@ -441,6 +458,7 @@ def send_help(message):
 *Manual Execution:*
 /cache - Run cache warmup now
 /trade - Run trading bot now
+/stop - Stop all running processes
 /status - Show system status
 /results - Show latest trading results
 /logs [lines] - Show recent logs (default: 50)
@@ -692,7 +710,8 @@ def run_cache_warmup(message):
             cwd=os.path.dirname(__file__),
             capture_output=True,
             text=True,
-            timeout=300  # 5 minutes timeout
+            timeout=300,  # 5 minutes timeout
+            env=os.environ.copy()  # Pass environment variables to subprocess
         )
         
         if result.returncode == 0:
@@ -719,11 +738,12 @@ def run_trading(message):
         bot.reply_to(message, "🚀 Starting trading bot...\nDefault: 10 users, 30 seconds run time")
         
         result = subprocess.run(
-            ['locust', '-f', 'locustfile_new.py', '--headless', '--users', '10', '--spawn-rate', '10', '--run-time', '30s'],
+            ['locust', '-f', 'locustfile_new.py', '--headless', '--users', '10', '--spawn-rate', '10', '--run-time', '30s', '--host', 'https://abc.com'],
             cwd=os.path.dirname(__file__),
             capture_output=True,
             text=True,
-            timeout=120  # 2 minutes timeout for trading
+            timeout=120,  # 2 minutes timeout for trading
+            env=os.environ.copy()  # Pass environment variables to subprocess
         )
         
         if result.returncode == 0:
@@ -880,6 +900,9 @@ def set_cache_time(message):
         with open(SCHEDULER_CONFIG_FILE, 'w') as f:
             json.dump(config, f, indent=2)
         
+        # Reload scheduler to apply changes immediately
+        scheduler.reload_config()
+        
         bot.reply_to(message, f"✅ Cache warmup scheduled for: `{time_str}`", parse_mode='Markdown')
         
     except ValueError:
@@ -932,6 +955,9 @@ def set_trade_time(message):
         with open(SCHEDULER_CONFIG_FILE, 'w') as f:
             json.dump(config, f, indent=2)
         
+        # Reload scheduler to apply changes immediately
+        scheduler.reload_config()
+        
         bot.reply_to(message, f"✅ Trading scheduled for: `{time_str}`", parse_mode='Markdown')
         
     except ValueError:
@@ -975,6 +1001,9 @@ def enable_job(message):
         with open(SCHEDULER_CONFIG_FILE, 'w') as f:
             json.dump(config, f, indent=2)
         
+        # Reload scheduler to apply changes immediately
+        scheduler.reload_config()
+        
         bot.reply_to(message, f"✅ Job `{job_name}` enabled", parse_mode='Markdown')
         
     except Exception as e:
@@ -1015,6 +1044,9 @@ def disable_job(message):
         
         with open(SCHEDULER_CONFIG_FILE, 'w') as f:
             json.dump(config, f, indent=2)
+        
+        # Reload scheduler to apply changes immediately
+        scheduler.reload_config()
         
         bot.reply_to(message, f"⚪ Job `{job_name}` disabled", parse_mode='Markdown')
         
@@ -1129,6 +1161,96 @@ def show_logs(message):
         logger.error(f"Error showing logs: {e}")
         bot.reply_to(message, f"❌ Error: {str(e)}")
 
+@bot.message_handler(commands=['stop'])
+def stop_trading(message):
+    """Stop any running trading/cache processes"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        bot.reply_to(message, "🛑 Stopping all trading processes...")
+        
+        killed_count = 0
+        messages = []
+        
+        # First, kill tracked processes
+        with process_lock:
+            for proc_name, proc in list(running_processes.items()):
+                try:
+                    if proc.poll() is None:  # Process is still running
+                        proc.terminate()
+                        proc.wait(timeout=3)
+                        messages.append(f"✅ Stopped {proc_name}")
+                        killed_count += 1
+                except Exception as e:
+                    logger.error(f"Error stopping tracked process {proc_name}: {e}")
+                finally:
+                    running_processes.pop(proc_name, None)
+        
+        # Then, force kill any remaining locust processes
+        import platform
+        if platform.system() == 'Windows':
+            # Kill all locust.exe
+            try:
+                locust_result = subprocess.run(
+                    ['taskkill', '/F', '/IM', 'locust.exe', '/T'],
+                    capture_output=True,
+                    text=True
+                )
+                if 'SUCCESS' in locust_result.stdout or 'terminated' in locust_result.stdout.lower():
+                    messages.append("✅ Killed locust.exe processes")
+                    killed_count += 1
+            except Exception as e:
+                logger.error(f"Error killing locust: {e}")
+            
+            # Kill Python processes running trading scripts
+            try:
+                ps_command = (
+                    'Get-Process python -ErrorAction SilentlyContinue | '
+                    'Where-Object { '
+                    '  $cmd = $_.CommandLine; '
+                    '  $cmd -like "*cache_warmup*" -or '
+                    '  $cmd -like "*locustfile*" -or '
+                    '  $cmd -like "*locust*" '
+                    '} | '
+                    'ForEach-Object { '
+                    '  Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue; '
+                    '  $_.ProcessName '
+                    '}'
+                )
+                python_result = subprocess.run(
+                    ['powershell', '-Command', ps_command],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if python_result.stdout.strip():
+                    messages.append("✅ Killed Python trading processes")
+                    killed_count += 1
+            except Exception as e:
+                logger.error(f"Error killing Python processes: {e}")
+        else:
+            # Linux/Mac: Use pkill
+            try:
+                subprocess.run(['pkill', '-9', '-f', 'locust'], capture_output=True)
+                subprocess.run(['pkill', '-9', '-f', 'cache_warmup'], capture_output=True)
+                subprocess.run(['pkill', '-9', '-f', 'locustfile'], capture_output=True)
+                messages.append("✅ Killed all trading processes")
+                killed_count += 1
+            except Exception as e:
+                logger.error(f"Error killing processes: {e}")
+        
+        # Send result
+        if killed_count == 0:
+            bot.reply_to(message, "ℹ️ No running trading processes found")
+        else:
+            response = "🛑 *Stopped All Processes:*\n\n" + "\n".join(messages)
+            bot.reply_to(message, response, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error stopping processes: {e}")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
 # ========================================
 # Catch-all handler for unknown commands
 # THIS MUST BE THE LAST HANDLER!
@@ -1149,6 +1271,10 @@ def main():
         logger.info(f"Authorized user: {USER_ID}")
     else:
         logger.warning("No USER_ID set - bot accessible to all users!")
+    
+    # Start scheduler in background
+    scheduler.start()
+    logger.info("📅 Background scheduler started")
     
     restart_count = 0
     
@@ -1171,6 +1297,7 @@ def main():
         except KeyboardInterrupt:
             logger.info("Bot stopped by user (Ctrl+C)")
             print("\n\n✅ Bot stopped gracefully")
+            scheduler.stop()
             break
             
         except Exception as e:
