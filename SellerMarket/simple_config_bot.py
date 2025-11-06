@@ -13,6 +13,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
+from typing import List, Dict, Any
+import winreg
 
 # Load environment variables from .env file
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
@@ -31,9 +33,49 @@ BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 USER_ID = os.getenv('TELEGRAM_USER_ID')
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.ini')
 SCHEDULER_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'scheduler_config.json')
+RESULTS_DIR = os.path.join(os.path.dirname(__file__), 'order_results')
+LOG_FILE = os.path.join(os.path.dirname(__file__), 'trading_bot.log')
 
 if not BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN not set")
+
+# Configure telebot to use requests session with proxy auto-detection
+# This is necessary for Windows services which don't inherit user proxy settings
+def get_windows_proxy():
+    """Get Windows system proxy settings from registry"""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                           r'Software\Microsoft\Windows\CurrentVersion\Internet Settings') as key:
+            proxy_enable, _ = winreg.QueryValueEx(key, 'ProxyEnable')
+            if proxy_enable:
+                proxy_server, _ = winreg.QueryValueEx(key, 'ProxyServer')
+                logger.info(f"Found Windows proxy: {proxy_server}")
+                # Format as dict for requests
+                if '=' in proxy_server:
+                    # Protocol-specific proxies
+                    proxies = {}
+                    for item in proxy_server.split(';'):
+                        protocol, address = item.split('=', 1)
+                        proxies[protocol] = f'http://{address}'
+                    return proxies
+                else:
+                    # Single proxy for all protocols
+                    return {
+                        'http': f'http://{proxy_server}',
+                        'https': f'http://{proxy_server}'
+                    }
+    except Exception as e:
+        logger.info(f"No Windows proxy configured: {e}")
+    return None
+
+# Set proxy in telebot if found
+import telebot.apihelper
+proxy_config = get_windows_proxy()
+if proxy_config:
+    telebot.apihelper.proxy = proxy_config
+    logger.info(f"Telegram bot configured with proxy: {proxy_config}")
+else:
+    logger.info("No proxy configured - using direct connection")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -55,6 +97,102 @@ def save_config(config):
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         config.write(f)
     logger.info("Configuration saved")
+
+def get_latest_result_file() -> str:
+    """Get the most recent order result file"""
+    try:
+        if not os.path.exists(RESULTS_DIR):
+            return None
+        
+        files = [f for f in Path(RESULTS_DIR).glob('*.json')]
+        if not files:
+            return None
+        
+        # Sort by modification time, most recent first
+        latest = max(files, key=lambda f: f.stat().st_mtime)
+        return str(latest)
+    except Exception as e:
+        logger.error(f"Error finding latest result: {e}")
+        return None
+
+def format_order_results(result_file: str) -> str:
+    """Format order results for Telegram display"""
+    try:
+        with open(result_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        username = data.get('username', 'Unknown')
+        broker = data.get('broker_code', 'Unknown')
+        timestamp = data.get('timestamp', '')
+        orders = data.get('orders', [])
+        
+        if not orders:
+            return f"📊 *Trading Results* [{username}@{broker}]\n\n⚠️ No orders found"
+        
+        # Calculate summary
+        total_volume = sum(o.get('volume', 0) for o in orders)
+        total_executed = sum(o.get('executed_volume', 0) for o in orders)
+        total_amount = sum(o.get('net_amount', 0) for o in orders)
+        
+        # Format message
+        msg = f"📊 *Trading Results*\n\n"
+        msg += f"👤 Account: `{username}@{broker}`\n"
+        msg += f"🕐 Time: {datetime.fromisoformat(timestamp).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        msg += f"📈 *Summary:*\n"
+        msg += f"  Orders: {len(orders)}\n"
+        msg += f"  Volume: {total_volume:,} shares\n"
+        msg += f"  Executed: {total_executed:,} ({total_executed/total_volume*100:.1f}%)\n" if total_volume > 0 else "  Executed: 0\n"
+        msg += f"  Amount: {total_amount:,.0f} Rials\n\n"
+        
+        # Show first 5 orders
+        msg += f"📋 *Orders:* (showing first 5)\n"
+        for i, order in enumerate(orders[:5], 1):
+            side = "BUY" if order.get('side') == 1 else "SELL"
+            symbol = order.get('symbol', 'N/A')
+            volume = order.get('volume', 0)
+            price = order.get('price', 0)
+            state = order.get('state_desc', 'Unknown')
+            
+            msg += f"{i}. {side} {volume:,} × {symbol} @ {price:,}\n"
+            msg += f"   Status: {state}\n"
+        
+        if len(orders) > 5:
+            msg += f"\n... and {len(orders) - 5} more orders\n"
+        
+        return msg
+        
+    except Exception as e:
+        logger.error(f"Error formatting results: {e}")
+        return f"❌ Error reading results: {str(e)}"
+
+def get_log_tail(lines: int = 50) -> str:
+    """Get last N lines from trading_bot.log"""
+    try:
+        if not os.path.exists(LOG_FILE):
+            return "📝 No log file found"
+        
+        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+            all_lines = f.readlines()
+        
+        if not all_lines:
+            return "📝 Log file is empty"
+        
+        # Get last N lines
+        tail_lines = all_lines[-lines:]
+        
+        # Format for Telegram
+        log_text = ''.join(tail_lines)
+        
+        # Truncate if too long (Telegram limit is 4096 chars)
+        if len(log_text) > 3800:
+            log_text = log_text[-3800:]
+            log_text = "...[truncated]\n" + log_text
+        
+        return f"📝 *Last {len(tail_lines)} lines of trading_bot.log:*\n\n```\n{log_text}\n```"
+        
+    except Exception as e:
+        logger.error(f"Error reading log: {e}")
+        return f"❌ Error reading log: {str(e)}"
 
 def get_active_section(config):
     """Get the first active (non-commented) section"""
@@ -304,6 +442,8 @@ def send_help(message):
 /cache - Run cache warmup now
 /trade - Run trading bot now
 /status - Show system status
+/results - Show latest trading results
+/logs [lines] - Show recent logs (default: 50)
 
 *Scheduler Management:*
 /schedule - Show scheduled jobs
@@ -885,8 +1025,115 @@ def disable_job(message):
         logger.error(f"Error disabling job: {e}")
         bot.reply_to(message, f"❌ Error: {str(e)}")
 
+# ========================================
+# Results and Logs Commands
+# ========================================
+
+@bot.message_handler(commands=['results'])
+def show_results(message):
+    """Show latest trading results"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        latest_file = get_latest_result_file()
+        
+        if not latest_file:
+            # Check if directory exists
+            if not os.path.exists(RESULTS_DIR):
+                bot.reply_to(message, 
+                    "📊 *No Trading Results*\n\n"
+                    "No results found yet.\n\n"
+                    "Results will appear here after you run:\n"
+                    "/trade - Run trading manually\n\n"
+                    "Or after scheduled trading executes.",
+                    parse_mode='Markdown'
+                )
+            else:
+                bot.reply_to(message,
+                    "📊 *No Trading Results*\n\n"
+                    f"Results directory is empty.\n\n"
+                    "This can mean:\n"
+                    "• Trading hasn't run yet today\n"
+                    "• No orders were placed\n"
+                    "• Market was closed\n\n"
+                    "Try:\n"
+                    "/status - Check system\n"
+                    "/logs - View recent activity",
+                    parse_mode='Markdown'
+                )
+            return
+        
+        # Format and send results
+        result_msg = format_order_results(latest_file)
+        bot.reply_to(message, result_msg, parse_mode='Markdown')
+        
+        # Show file info
+        file_path = Path(latest_file)
+        file_time = datetime.fromtimestamp(file_path.stat().st_mtime)
+        bot.send_message(
+            message.chat.id,
+            f"📁 File: `{file_path.name}`\n"
+            f"🕐 Modified: {file_time.strftime('%Y-%m-%d %H:%M:%S')}",
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"Error showing results: {e}")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
+@bot.message_handler(commands=['logs'])
+def show_logs(message):
+    """Show recent log entries"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        parts = message.text.split()
+        lines = 50  # Default
+        
+        if len(parts) > 1:
+            try:
+                lines = int(parts[1])
+                lines = max(10, min(lines, 200))  # Clamp between 10-200
+            except ValueError:
+                bot.reply_to(message, "❌ Invalid number. Using default (50 lines)")
+                lines = 50
+        
+        log_text = get_log_tail(lines)
+        
+        # Send in chunks if needed (Telegram has 4096 char limit)
+        if len(log_text) <= 4096:
+            bot.reply_to(message, log_text, parse_mode='Markdown')
+        else:
+            # Split into chunks
+            chunks = [log_text[i:i+4000] for i in range(0, len(log_text), 4000)]
+            for i, chunk in enumerate(chunks, 1):
+                if i == 1:
+                    bot.reply_to(message, f"Part {i}/{len(chunks)}:\n{chunk}", parse_mode='Markdown')
+                else:
+                    bot.send_message(message.chat.id, f"Part {i}/{len(chunks)}:\n{chunk}", parse_mode='Markdown')
+        
+        # Show file info
+        if os.path.exists(LOG_FILE):
+            file_size = os.path.getsize(LOG_FILE)
+            file_time = datetime.fromtimestamp(os.path.getmtime(LOG_FILE))
+            
+            bot.send_message(
+                message.chat.id,
+                f"📁 *Log File Info:*\n"
+                f"Size: {file_size:,} bytes\n"
+                f"Modified: {file_time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"Use `/logs <number>` to view different amount (10-200)",
+                parse_mode='Markdown'
+            )
+        
+    except Exception as e:
+        logger.error(f"Error showing logs: {e}")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
 def main():
-    """Start the bot"""
+    """Start the bot with unlimited auto-restart on errors"""
     logger.info("Starting Simple Trading Config Bot...")
     logger.info(f"Config file: {CONFIG_FILE}")
     if USER_ID:
@@ -894,13 +1141,40 @@ def main():
     else:
         logger.warning("No USER_ID set - bot accessible to all users!")
     
-    try:
-        logger.info("Bot started. Polling for messages...")
-        bot.infinity_polling()
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Bot error: {e}")
+    restart_count = 0
+    
+    # Infinite restart loop - bot will NEVER give up
+    while True:
+        try:
+            if restart_count > 0:
+                logger.info(f"Bot restart #{restart_count}")
+            
+            logger.info("Bot started. Polling for messages...")
+            
+            # Set longer timeouts and enable auto-restart
+            bot.infinity_polling(
+                timeout=90,           # Request timeout
+                long_polling_timeout=60,  # Long polling timeout  
+                skip_pending=True,    # Skip old messages on restart
+                none_stop=True        # Never stop on errors
+            )
+            
+        except KeyboardInterrupt:
+            logger.info("Bot stopped by user (Ctrl+C)")
+            print("\n\n✅ Bot stopped gracefully")
+            break
+            
+        except Exception as e:
+            restart_count += 1
+            logger.error(f"Bot error (restart #{restart_count}): {e}")
+            logger.info("Restarting in 5 seconds...")
+            
+            # Show error but keep going
+            print(f"\n⚠️  Error: {e}")
+            print(f"🔄 Auto-restarting in 5 seconds... (restart #{restart_count})")
+            
+            import time
+            time.sleep(5)
 
 if __name__ == '__main__':
     main()
