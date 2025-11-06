@@ -5,8 +5,10 @@ Handles authentication, market data fetching, and order operations.
 
 import logging
 import requests
+import time
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
+from cache_manager import TradingCache
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +17,7 @@ class EphoenixAPIClient:
     """Client for interacting with ephoenix.ir trading APIs."""
     
     def __init__(self, broker_code: str, username: str, password: str, 
-                 captcha_decoder, endpoints: dict):
+                 captcha_decoder, endpoints: dict, cache: Optional[TradingCache] = None):
         """
         Initialize API client.
         
@@ -25,6 +27,7 @@ class EphoenixAPIClient:
             password: Trading account password
             captcha_decoder: Function to decode captcha images
             endpoints: Dictionary of API endpoints
+            cache: TradingCache instance (creates new if None)
         """
         self.broker_code = broker_code
         self.username = username
@@ -33,47 +36,40 @@ class EphoenixAPIClient:
         self.endpoints = endpoints
         self.token: Optional[str] = None
         self.token_expiry: Optional[datetime] = None
+        self.cache = cache or TradingCache()
         
         logger.info(f"Initialized API client for broker {broker_code}, user {username}")
     
-    def _get_token_filename(self) -> str:
-        """Get token cache filename."""
-        domain = self.endpoints['login'].split('//')[1].split('/')[0].replace('.', '_')
-        return f"{self.username}_{domain}.txt"
-    
     def _save_token(self, token: str):
-        """Save token to file with timestamp."""
+        """Save authentication token to cache."""
         try:
-            with open(self._get_token_filename(), 'w') as f:
-                f.write(f"{token}\n{datetime.now()}")
+            # Save to cache manager
+            if self.cache:
+                self.cache.save_token(self.username, self.broker_code, token, expiry_hours=1)
+            
             self.token = token
-            self.token_expiry = datetime.now() + timedelta(hours=2)
+            self.token_expiry = datetime.now() + timedelta(hours=1)
             logger.info(f"Token saved for {self.username}")
         except Exception as e:
             logger.error(f"Failed to save token: {e}")
     
     def _load_token(self) -> Optional[str]:
-        """Load token from file if still valid."""
-        try:
-            with open(self._get_token_filename(), 'r') as f:
-                token, timestamp = f.read().split('\n')
-                token_time = datetime.fromisoformat(timestamp)
-                
-                if datetime.now() - token_time < timedelta(hours=2):
-                    self.token = token
-                    self.token_expiry = token_time + timedelta(hours=2)
-                    logger.info(f"Loaded cached token for {self.username}")
-                    return token
-                else:
-                    logger.info(f"Cached token expired for {self.username}")
-        except (FileNotFoundError, ValueError) as e:
-            logger.debug(f"No cached token found: {e}")
+        """Load token from cache if still valid."""
+        # Try cache manager
+        if self.cache:
+            token = self.cache.get_token(self.username, self.broker_code)
+            if token:
+                self.token = token
+                self.token_expiry = datetime.now() + timedelta(hours=1)
+                return token
         
+        logger.debug(f"No cached token found for {self.username}")
         return None
     
     def _fetch_captcha(self) -> Dict[str, str]:
         """Fetch captcha from server."""
         try:
+            time.sleep(1)  # Delay to prevent rate limiting
             response = requests.get(self.endpoints['captcha'])
             response.raise_for_status()
             data = response.json()
@@ -140,7 +136,7 @@ class EphoenixAPIClient:
             return token
         
         # Perform login with retry
-        max_retries = 5
+        max_retries = 100
         for attempt in range(max_retries):
             logger.info(f"Login attempt {attempt + 1}/{max_retries} for {self.username}")
             token = self._login_with_captcha()
@@ -151,13 +147,22 @@ class EphoenixAPIClient:
         
         raise Exception(f"Failed to authenticate after {max_retries} attempts")
     
-    def get_buying_power(self) -> float:
+    def get_buying_power(self, use_cache: bool = True) -> float:
         """
         Get current buying power for the account.
+        
+        Args:
+            use_cache: Whether to use cached value if available
         
         Returns:
             Available buying power in Rials
         """
+        # Try cache first
+        if use_cache and self.cache:
+            cached_bp = self.cache.get_buying_power(self.username, self.broker_code)
+            if cached_bp is not None:
+                return cached_bp
+        
         try:
             token = self.authenticate()
             headers = {
@@ -172,6 +177,10 @@ class EphoenixAPIClient:
             data = response.json()
             buying_power = data.get('buyingPower', 0)
             
+            # Cache the buying power
+            if self.cache:
+                self.cache.save_buying_power(self.username, self.broker_code, buying_power, expiry_minutes=1)
+            
             logger.info(f"Buying power for {self.username}: {buying_power:,.0f} Rials")
             return buying_power
             
@@ -179,16 +188,23 @@ class EphoenixAPIClient:
             logger.error(f"Failed to get buying power: {e}")
             raise
     
-    def get_instrument_info(self, isin: str) -> Dict[str, Any]:
+    def get_instrument_info(self, isin: str, use_cache: bool = True) -> Dict[str, Any]:
         """
         Get instrument information including price limits and max volume.
         
         Args:
             isin: Stock ISIN code
+            use_cache: Whether to use cached value if available
             
         Returns:
             Dictionary with instrument and trading data
         """
+        # Try cache first
+        if use_cache and self.cache:
+            cached_data = self.cache.get_market_data(isin)
+            if cached_data is not None:
+                return cached_data
+        
         try:
             token = self.authenticate()
             headers = {
@@ -217,6 +233,10 @@ class EphoenixAPIClient:
                 'max_volume': instrument_data['i']['maxeq'],
                 'min_volume': instrument_data['i']['mineq'],
             }
+            
+            # Cache the market data
+            if self.cache:
+                self.cache.save_market_data(isin, result, expiry_minutes=5)
             
             logger.info(f"Instrument {isin} ({result['symbol']}): "
                        f"Price range [{result['min_price']}-{result['max_price']}], "
