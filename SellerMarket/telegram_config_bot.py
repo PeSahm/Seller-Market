@@ -17,12 +17,24 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class TradingConfigBot:
-    def __init__(self, token, api_url):
+    def __init__(self, token, api_url, authorized_user_id=None):
         self.bot = telebot.TeleBot(token)
         self.api_url = api_url
+        self.authorized_user_id = authorized_user_id
         self.user_states = {}  # Track user conversation states
         self.setup_handlers()
-        logger.info("TradingConfigBot initialized")
+        logger.info(f"TradingConfigBot initialized for user: {authorized_user_id or 'all users'}")
+
+    def check_authorization(self, message):
+        """Check if user is authorized to use this bot"""
+        user_id = message.from_user.id
+        logger.info(f"Authorization check for user ID: {user_id}")
+        if self.authorized_user_id and str(user_id) != str(self.authorized_user_id):
+            logger.warning(f"Unauthorized access attempt from user ID: {user_id}")
+            self.bot.reply_to(message, "❌ Sorry, this bot is not authorized for your account.")
+            return False
+        logger.info(f"Authorization granted for user ID: {user_id}")
+        return True
 
     def setup_handlers(self):
         """Set up all message and command handlers"""
@@ -30,6 +42,9 @@ class TradingConfigBot:
         @self.bot.message_handler(commands=['start'])
         def send_welcome(message):
             """Welcome message and help"""
+            logger.info(f"Received /start command from user {message.from_user.id}")
+            if not self.check_authorization(message):
+                return
             user_id = message.from_user.id
             welcome_text = """
 🤖 *Trading Bot Configuration Manager*
@@ -61,6 +76,8 @@ Your configurations are stored securely and only accessible by you.
         @self.bot.message_handler(commands=['help'])
         def send_help(message):
             """Show help message"""
+            if not self.check_authorization(message):
+                return
             help_text = """
 📚 *Available Commands*
 
@@ -93,6 +110,8 @@ Your configurations are stored securely and only accessible by you.
         @self.bot.message_handler(commands=['list_configs'])
         def list_configs(message):
             """List all user configurations"""
+            if not self.check_authorization(message):
+                return
             user_id = message.from_user.id
             try:
                 response = requests.get(f"{self.api_url}/config/{user_id}/list")
@@ -123,6 +142,8 @@ Your configurations are stored securely and only accessible by you.
         @self.bot.message_handler(commands=['select_config'])
         def select_config(message):
             """Select active configuration"""
+            if not self.check_authorization(message):
+                return
             user_id = message.from_user.id
             try:
                 # Extract config name from command
@@ -157,6 +178,8 @@ Your configurations are stored securely and only accessible by you.
         @self.bot.message_handler(commands=['get_config'])
         def get_config(message):
             """Show current active configuration"""
+            if not self.check_authorization(message):
+                return
             user_id = message.from_user.id
             try:
                 response = requests.get(f"{self.api_url}/config/{user_id}")
@@ -347,6 +370,8 @@ Your configurations are stored securely and only accessible by you.
         @self.bot.message_handler(commands=['status'])
         def get_status(message):
             """Show system status"""
+            if not self.check_authorization(message):
+                return
             user_id = message.from_user.id
             try:
                 # Check API health
@@ -384,6 +409,7 @@ Your configurations are stored securely and only accessible by you.
         @self.bot.message_handler(func=lambda message: True)
         def handle_text(message):
             """Handle text messages (for credential setup)"""
+            logger.info(f"Received message: '{message.text}' from user {message.from_user.id}")
             user_id = message.from_user.id
             user_state = self.user_states.get(user_id, {})
 
@@ -512,6 +538,7 @@ def main():
     """Main function to run the bot"""
     # Get configuration from environment variables
     telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
+    telegram_user_id = os.getenv('TELEGRAM_USER_ID')
     api_url = os.getenv('CONFIG_API_URL', 'http://localhost:5000')
 
     if not telegram_token:
@@ -521,16 +548,31 @@ def main():
         return
 
     logger.info(f"Starting Trading Config Bot with API URL: {api_url}")
+    if telegram_user_id:
+        logger.info(f"Bot restricted to user ID: {telegram_user_id}")
 
-    bot = TradingConfigBot(telegram_token, api_url)
+    # Test bot token
+    try:
+        test_bot = telebot.TeleBot(telegram_token)
+        bot_info = test_bot.get_me()
+        logger.info(f"Bot authenticated successfully as: @{bot_info.username}")
+    except Exception as e:
+        logger.error(f"Bot token authentication failed: {e}")
+        print("❌ Invalid bot token. Please check your TELEGRAM_BOT_TOKEN")
+        return
+
+    bot = TradingConfigBot(telegram_token, api_url, telegram_user_id)
 
     # Start polling
     try:
+        logger.info("Bot starting polling...")
         bot.start_polling()
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Bot error: {e}")
+        print(f"Bot failed to start: {e}")
+        print("Check your bot token and internet connection")
 
 if __name__ == '__main__':
     main()
