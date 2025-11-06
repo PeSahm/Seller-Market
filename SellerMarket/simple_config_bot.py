@@ -14,7 +14,14 @@ from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 from typing import List, Dict, Any
-import winreg
+import platform
+
+# Windows-specific imports
+if platform.system() == 'Windows':
+    import winreg
+else:
+    winreg = None
+
 import threading
 from scheduler import JobScheduler
 
@@ -57,6 +64,9 @@ if USER_ID:
 # This is necessary for Windows services which don't inherit user proxy settings
 def get_windows_proxy():
     """Get Windows system proxy settings from registry"""
+    if winreg is None:
+        return None  # Not on Windows
+    
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                            r'Software\Microsoft\Windows\CurrentVersion\Internet Settings') as key:

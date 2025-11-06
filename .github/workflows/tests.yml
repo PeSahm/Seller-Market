@@ -35,4 +35,4 @@ jobs:
     - name: Run tests
       run: |
         cd SellerMarket
-        python -m unittest discover -v
+        python -m pytest test_bot_features.py test_integration.py -v
