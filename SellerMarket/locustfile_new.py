@@ -177,13 +177,23 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
     
     # Step 1: Authenticate
     logger.info("Step 1: Authenticating...")
-    token = api_client.authenticate()
-    logger.info("✓ Authentication successful")
+    try:
+        token = api_client.authenticate()
+        logger.info("✓ Authentication successful")
+    except Exception as e:
+        logger.error(f"❌ Authentication failed for {username}@{broker_code}: {e}")
+        if broker_code == 'gs':
+            logger.warning(f"⚠️  GS broker captcha issue - skipping this account")
+        raise  # This will mark the task as failed in Locust
     
     # Step 2: Get buying power
     logger.info("Step 2: Fetching buying power...")
-    buying_power = api_client.get_buying_power()
-    logger.info(f"✓ Buying power: {buying_power:,.0f} Rials")
+    try:
+        buying_power = api_client.get_buying_power()
+        logger.info(f"✓ Buying power: {buying_power:,.0f} Rials")
+    except Exception as e:
+        logger.error(f"❌ Failed to get buying power: {e}")
+        raise
     
     # Step 3: Get instrument information
     logger.info("Step 3: Fetching instrument information...")

@@ -685,23 +685,26 @@ def run_cache_warmup(message):
         return
     
     try:
-        bot.reply_to(message, "🔄 Running cache warmup...\nThis may take 30-60 seconds")
+        bot.reply_to(message, "🔄 Running cache warmup...\nThis may take 2-5 minutes depending on number of accounts")
         
         result = subprocess.run(
             ['python', 'cache_warmup.py'],
             cwd=os.path.dirname(__file__),
             capture_output=True,
             text=True,
-            timeout=120
+            timeout=300  # 5 minutes timeout
         )
         
         if result.returncode == 0:
-            bot.reply_to(message, f"✅ Cache warmup completed!\n\n```\n{result.stdout[-500:]}\n```", parse_mode='Markdown')
+            # Get last 1000 characters of output for better visibility
+            output = result.stdout[-1000:] if result.stdout else "No output"
+            bot.reply_to(message, f"✅ Cache warmup completed successfully!\n\n```\n{output}\n```", parse_mode='Markdown')
         else:
-            bot.reply_to(message, f"❌ Cache warmup failed!\n\n```\n{result.stderr[-500:]}\n```", parse_mode='Markdown')
+            error = result.stderr[-1000:] if result.stderr else "Unknown error"
+            bot.reply_to(message, f"❌ Cache warmup failed!\n\n```\n{error}\n```", parse_mode='Markdown')
     
     except subprocess.TimeoutExpired:
-        bot.reply_to(message, "⏱️ Cache warmup timed out after 2 minutes")
+        bot.reply_to(message, "⏱️ Cache warmup is taking longer than expected (>5 minutes).\n\nIt may still be running in the background. Check logs with /logs command.")
     except Exception as e:
         logger.error(f"Error running cache warmup: {e}")
         bot.reply_to(message, f"❌ Error: {str(e)}")
@@ -713,14 +716,14 @@ def run_trading(message):
         return
     
     try:
-        bot.reply_to(message, "🚀 Starting trading bot...\nDefault: 10 users, 30 seconds")
+        bot.reply_to(message, "🚀 Starting trading bot...\nDefault: 10 users, 30 seconds run time")
         
         result = subprocess.run(
             ['locust', '-f', 'locustfile_new.py', '--headless', '--users', '10', '--spawn-rate', '10', '--run-time', '30s'],
             cwd=os.path.dirname(__file__),
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=120  # 2 minutes timeout for trading
         )
         
         if result.returncode == 0:
@@ -728,12 +731,13 @@ def run_trading(message):
             output_lines = result.stdout.split('\n')
             summary = '\n'.join([line for line in output_lines if 'RPS' in line or 'requests' in line or 'Aggregated' in line])
             
-            bot.reply_to(message, f"✅ Trading completed!\n\n```\n{summary[-500:]}\n```", parse_mode='Markdown')
+            bot.reply_to(message, f"✅ Trading completed!\n\n```\n{summary[-1000:]}\n```", parse_mode='Markdown')
         else:
-            bot.reply_to(message, f"❌ Trading failed!\n\n```\n{result.stderr[-500:]}\n```", parse_mode='Markdown')
+            error = result.stderr[-1000:] if result.stderr else "Unknown error"
+            bot.reply_to(message, f"❌ Trading failed!\n\n```\n{error}\n```", parse_mode='Markdown')
     
     except subprocess.TimeoutExpired:
-        bot.reply_to(message, "⏱️ Trading timed out after 1 minute")
+        bot.reply_to(message, "⏱️ Trading is taking longer than expected (>2 minutes).\n\nIt may still be running. Check /logs for details.")
     except Exception as e:
         logger.error(f"Error running trading: {e}")
         bot.reply_to(message, f"❌ Error: {str(e)}")

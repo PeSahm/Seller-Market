@@ -69,19 +69,22 @@ class EphoenixAPIClient:
     def _fetch_captcha(self) -> Dict[str, str]:
         """Fetch captcha from server."""
         try:
-            time.sleep(1)  # Delay to prevent rate limiting
-            response = requests.get(self.endpoints['captcha'])
+            # GS broker needs extra delay due to stricter rate limiting
+            delay = 3 if self.broker_code == 'gs' else 1
+            time.sleep(delay)
+            
+            response = requests.get(self.endpoints['captcha'], timeout=10)
             response.raise_for_status()
             data = response.json()
             
-            logger.debug(f"Fetched captcha for {self.username}")
+            logger.debug(f"Fetched captcha for {self.username}@{self.broker_code}")
             return {
                 'captcha_byte_data': data['captchaByteData'],
                 'salt': data['salt'],
                 'hashed_captcha': data['hashedCaptcha']
             }
         except Exception as e:
-            logger.error(f"Failed to fetch captcha: {e}")
+            logger.error(f"Failed to fetch captcha for {self.username}@{self.broker_code}: {e}")
             raise
     
     def _login_with_captcha(self) -> Optional[str]:
@@ -90,7 +93,15 @@ class EphoenixAPIClient:
             captcha_data = self._fetch_captcha()
             captcha_value = self.captcha_decoder(captcha_data['captcha_byte_data'])
             
+            if not captcha_value:
+                logger.warning(f"Captcha decoder returned empty value for {self.username}@{self.broker_code}")
+                return None
+            
             logger.debug(f"Decoded captcha: {captcha_value}")
+            
+            # GS broker needs extra delay between captcha fetch and login
+            if self.broker_code == 'gs':
+                time.sleep(2)
             
             login_data = {
                 "loginName": self.username,
@@ -102,19 +113,19 @@ class EphoenixAPIClient:
                 }
             }
             
-            response = requests.post(self.endpoints['login'], json=login_data)
+            response = requests.post(self.endpoints['login'], json=login_data, timeout=10)
             response.raise_for_status()
             
             token = response.json().get('token')
             if token:
-                logger.info(f"Login successful for {self.username}")
+                logger.info(f"Login successful for {self.username}@{self.broker_code}")
                 return token
             else:
-                logger.warning(f"Login response missing token for {self.username}")
+                logger.warning(f"Login response missing token for {self.username}@{self.broker_code}")
                 return None
                 
         except Exception as e:
-            logger.error(f"Login failed for {self.username}: {e}")
+            logger.error(f"Login failed for {self.username}@{self.broker_code}: {e}")
             return None
     
     def authenticate(self) -> str:
