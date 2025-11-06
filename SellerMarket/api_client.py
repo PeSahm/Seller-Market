@@ -70,7 +70,7 @@ class EphoenixAPIClient:
         """Fetch captcha from server."""
         try:
             # GS broker needs extra delay due to stricter rate limiting
-            delay = 3 if self.broker_code == 'gs' else 1
+            delay = 1 if self.broker_code == 'gs' else 1
             time.sleep(delay)
             
             response = requests.get(self.endpoints['captcha'], timeout=10)
