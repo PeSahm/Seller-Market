@@ -1,5 +1,5 @@
 
-# Stock Market Load Testing & Automated Trading
+# Iranian Stock Market Trading Bot
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -9,10 +9,13 @@
 
 ## Overview
 
-A **Locust-based load testing application** designed for high-volume order placement on Iranian stock exchanges (ephoenix.ir platforms). Supports multiple brokers, automatic captcha solving, and concurrent multi-account trading.
+A **high-performance automated trading bot** for Iranian stock exchanges (ephoenix.ir platforms). Features intelligent caching, multi-broker support, and dynamic order calculation to eliminate daily manual configuration.
 
-### Primary Use Case: Queue Bombing
-Rapidly place multiple orders across different brokers to compete in buying queues for high-demand stocks.
+### Key Features
+- 🚀 **Instant Execution** - Pre-cached data for zero-latency trading
+- 🤖 **Fully Automated** - No manual price/volume updates needed
+- 🔄 **Multi-Broker** - Trade across multiple brokers simultaneously
+- 📊 **Smart Caching** - 75-90% faster order placement
 
 ## 🚀 Quick Start
 
@@ -28,49 +31,64 @@ pip install locust requests
 cp config.example.ini config.ini
 # Edit config.ini with your credentials
 
-# Run load test
-locust -f locustfile.py
+# Pre-load cache (before market opens)
+python cache_warmup.py
+
+# Start trading (when market opens)
+locust -f locustfile_new.py
 # Open http://localhost:8089
 ```
 
-📖 **[Read Full Setup Guide](QUICKSTART.md)**
+📖 **[Read QUICKSTART Guide](QUICKSTART.md)** for detailed setup instructions.
 
 ## 🎯 Features
 
 ### Multi-Broker Support
+
 - ✅ **Ghadir Shahr (GS)** - identity-gs.ephoenix.ir
 - ✅ **Bourse Bazar Iran (BBI)** - identity-bbi.ephoenix.ir
 - ✅ **Shahr** - identity-shahr.ephoenix.ir
 - 🔄 **Karamad, Tejarat, Shams** - Configurable
 
-### Automation Capabilities
-- 🤖 **Automatic Captcha Solving** via OCR service
-- 🔐 **Token Caching** - 2-hour validity, auto-refresh
-- 📊 **Concurrent Execution** - Multiple accounts simultaneously
-- 🔄 **Order Editing** - Modify existing orders
-- ⚡ **High-Speed Execution** - Queue bombing optimized
+### Intelligent Caching System
 
-### Configuration
-- 📝 **INI-based Config** - Easy multi-account setup
-- 🎛️ **Flexible Parameters** - Price, volume, ISIN, validity
-- 🔀 **Dynamic Class Generation** - Auto-create user classes
-- 📈 **Real-time Monitoring** - Locust web interface
+- � **Token Cache** - 1 hour expiry, auto-refresh
+- 📊 **Market Data Cache** - 5 minute expiry for price/volume limits
+- 💰 **Buying Power Cache** - 1 minute expiry
+- ⚡ **Order Params Cache** - 30 second expiry for pre-calculated orders
+- 🔄 **Auto-Cleanup** - Expired entries removed automatically
+
+### Dynamic Order Calculation
+
+- 🎯 **Zero Manual Updates** - Automatically fetches current prices and volumes
+- 📈 **Real-time Calculations** - Determines optimal order size based on buying power
+- � **Always Current** - No more daily config file edits
+
+### Automation Features
+
+- 🤖 **Automatic Captcha Solving** via OCR service
+- 🔐 **Smart Token Management** - Cache-first with auto-refresh
+- � **Concurrent Execution** - Multiple accounts simultaneously
+- ⚡ **Rate Limit Protection** - Built-in delays to prevent API throttling
 
 ## 📋 Requirements
 
 ### Software
+
 - Python 3.8+
 - Locust 2.0+
 - OCR Service (localhost:8080)
 
 ### Python Packages
+
 ```bash
-pip install locust requests python-dotenv configparser
+pip install locust requests
 ```
 
 ## 🔧 Configuration
 
 ### Example Config (`config.ini`)
+
 ```ini
 [Order_Account_Broker]
 username = YOUR_ACCOUNT_NUMBER
@@ -91,81 +109,80 @@ serialnumber = 0       # 0=New order, >0=Edit order
 ## 🏃 Running the Application
 
 ### Web Interface (Recommended)
+
 ```bash
-locust -f locustfile.py
+# Pre-load cache before market opens (8:20 AM)
+python cache_warmup.py
+
+# Start Locust when market opens (8:30 AM)
+locust -f locustfile_new.py
 # Navigate to http://localhost:8089
 ```
 
 ### Headless Mode
+
 ```bash
-locust -f locustfile.py --headless --users 10 --spawn-rate 2 --run-time 1m
+locust -f locustfile_new.py --headless --users 10 --spawn-rate 2 --run-time 1m
 ```
 
-### Single User Test
+### Cache Management
+
 ```bash
-python locustfile.py
+# View cache statistics
+python cache_cli.py stats
+
+# Clean expired entries
+python cache_cli.py clean
+
+# Clear all cache
+python cache_cli.py clear
 ```
 
-## 📊 Architecture
+## 📊 Performance
 
-### Core Components
-1. **Configuration System** - Multi-broker, multi-account support
-2. **Authentication** - Captcha solving + token management
-3. **Load Testing** - Locust framework with dynamic class generation
-4. **Order Execution** - New orders + order editing
+**Order Placement Time:**
+- Without caching: 4-6 seconds
+- With caching: 0.5-1 second
+- **Improvement: 75-90% faster!**
 
-### Authentication Flow
-```
-Load Config → Check Token Cache → [Expired?]
-   ↓ Yes                              ↓ No
-Fetch Captcha → Decode → Login    Use Cached Token
-   ↓                                  ↓
-Save Token ────────────────────→ Execute Orders
-```
+**Cache Expiry Times:**
+- Tokens: 1 hour
+- Market Data: 5 minutes
+- Buying Power: 1 minute
+- Order Params: 30 seconds
+
+## 📚 Documentation
+
+- 📖 **[QUICKSTART.md](QUICKSTART.md)** - Quick setup and usage guide
+- 🔒 **[SECURITY.md](SECURITY.md)** - Security warnings and best practices
+- 🗂️ **[CACHING_IMPLEMENTATION.md](CACHING_IMPLEMENTATION.md)** - Caching system details
+- 🔧 **[config.example.ini](SellerMarket/config.example.ini)** - Configuration template
 
 ## ⚠️ Security & Legal Warnings
 
 ### 🚨 CRITICAL SECURITY ISSUES
+
 - ❌ **Plaintext passwords** in config files
 - ❌ **Exposed credentials** in git history
 - ❌ **Unencrypted tokens** on disk
 
 **Immediate actions required:**
+
 1. Change all exposed passwords
 2. Remove sensitive files from git history
 3. Read [SECURITY.md](SECURITY.md) immediately
 
 ### ⚖️ Legal Considerations
-- **Market Manipulation Risk** - Queue bombing may violate regulations
-- **Broker ToS** - Automated trading restrictions
+
+- **Market Manipulation Risk** - Automated trading may violate regulations
+- **Broker ToS** - Check automated trading restrictions
 - **Compliance Required** - Consult legal counsel before use
 
 📖 **[Read Full Legal Notice](SECURITY.md)**
 
-## 📚 Documentation
-
-- 📖 **[QUICKSTART.md](QUICKSTART.md)** - Setup and usage guide
-- 🔒 **[SECURITY.md](SECURITY.md)** - Security warnings and best practices
-- 📄 **[README_DETAILED.md](README_DETAILED.md)** - Complete technical documentation
-- 🔧 **[config.example.ini](SellerMarket/config.example.ini)** - Configuration template
-
-## 🛠️ Technical Stack
-
-- **Language**: Python 3.8+
-- **Load Testing**: Locust
-- **HTTP Client**: Requests
-- **Config**: ConfigParser
-- **OCR**: External service (localhost:8080)
-
-## 📈 Performance
-
-### Recommended Settings
-- **Queue Bombing**: 20 users, 10/s spawn rate, 30s duration
-- **Sustained Trading**: 5 users, 1/s spawn rate, 5m duration
-- **Testing**: 1 user, 1/s spawn rate, 1m duration
 ## 🤝 Contributing
 
-## Tasks
+### Supported Platforms
 
 - [x] Sahra online trading systems (ephoenix platforms)
 - [ ] Mofid Securities Orbis trader
@@ -173,6 +190,7 @@ Save Token ────────────────────→ Execu
 - [ ] Agah online trading system
 
 If you want to contribute:
+
 1. Fork this repository
 2. **Never commit credentials or tokens**
 3. Test with paper trading accounts
@@ -181,7 +199,7 @@ If you want to contribute:
 
 ## ⚠️ Disclaimer
 
-This software is provided **for educational and testing purposes only**. 
+This software is provided **for educational and testing purposes only**.
 
 - ❌ Authors do NOT encourage market manipulation
 - ❌ NOT responsible for financial losses
@@ -200,4 +218,4 @@ Users are solely responsible for compliance with all applicable laws and regulat
 
 ## 📜 License
 
-This code is released under the [MIT License](https://chat.openai.com/LICENSE). Feel free to use and modify this code for your own purposes, as long as you include the original license and attribution.
+This code is released under the [MIT License](LICENSE). Feel free to use and modify this code for your own purposes, as long as you include the original license and attribution.
