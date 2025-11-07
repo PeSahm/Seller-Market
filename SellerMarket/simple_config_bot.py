@@ -567,7 +567,7 @@ def set_broker(message):
             return
         
         broker = parts[1].lower()
-        valid_brokers = ['gs', 'bbi', 'shahr', 'karamad', 'tejarat', 'shams']
+        valid_brokers = ['gs', 'bbi', 'shahr', 'karamad', 'tejarat', 'shahr']
         
         if broker not in valid_brokers:
             bot.reply_to(message, f"❌ Invalid broker. Valid: {', '.join(valid_brokers)}")
@@ -589,7 +589,7 @@ def set_broker(message):
             'shahr': 'Shahr',
             'karamad': 'Karamad',
             'tejarat': 'Tejarat',
-            'shams': 'Shams'
+            'shahr': 'Shahr'
         }
         
         bot.reply_to(message, f"✅ Broker set to: *{broker_names.get(broker, broker)}*", parse_mode='Markdown')
