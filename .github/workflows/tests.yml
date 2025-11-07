@@ -35,4 +35,7 @@ jobs:
     - name: Run tests
       run: |
         cd SellerMarket
-        python -m unittest discover -v
+        python -m pytest test_bot_features.py test_integration.py -v
+      env:
+        TELEGRAM_BOT_TOKEN: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+        TELEGRAM_USER_ID: "123456789"

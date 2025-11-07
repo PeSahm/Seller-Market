@@ -52,7 +52,7 @@ def decode_captcha(im: str) -> str:
         Decoded captcha text
     """
     import requests
-    url = 'http://localhost:8080/ocr/by-base64'
+    url = 'http://localhost:8080/ocr/captcha-easy-base64'
     headers = {
         'accept': 'text/plain',
         'Content-Type': 'application/json'
@@ -111,21 +111,35 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
         
         # Step 1: Authenticate and cache token
         logger.info("Step 1: Authenticating and caching token...")
-        token = api_client.authenticate()
-        logger.info(f"✓ Token cached (expires in 1 hour)")
+        try:
+            token = api_client.authenticate()
+            logger.info("✓ Token cached (expires in 2 hours)")
+        except Exception as e:
+            logger.error(f"❌ Authentication failed for {username}@{broker_code}: {e}")
+            if broker_code == 'gs':
+                logger.warning(f"⚠️  GS broker captcha can be tricky - this account will be skipped but others will continue")
+            return False
         
         # Step 2: Fetch and cache buying power
         logger.info("Step 2: Fetching and caching buying power...")
-        buying_power = api_client.get_buying_power(use_cache=False)  # Force fresh fetch
-        logger.info(f"✓ Buying power cached: {buying_power:,.0f} Rials (expires in 1 minute)")
+        try:
+            buying_power = api_client.get_buying_power(use_cache=False)  # Force fresh fetch
+            logger.info(f"✓ Buying power cached: {buying_power:,.0f} Rials (expires in 2 hours)")
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch buying power: {e}")
+            return False
         
         # Step 3: Fetch and cache instrument information
         logger.info("Step 3: Fetching and caching instrument information...")
-        instrument_info = api_client.get_instrument_info(isin, use_cache=False)  # Force fresh fetch
-        logger.info(f"✓ Instrument info cached: {instrument_info['title']} ({instrument_info['symbol']})")
-        logger.info(f"  - Price range: [{instrument_info['min_price']:,} - {instrument_info['max_price']:,}]")
-        logger.info(f"  - Volume range: [{instrument_info['min_volume']:,} - {instrument_info['max_volume']:,}]")
-        logger.info(f"  - Cache expires in 5 minutes")
+        try:
+            instrument_info = api_client.get_instrument_info(isin, use_cache=False)  # Force fresh fetch
+            logger.info(f"✓ Instrument info cached: {instrument_info['title']} ({instrument_info['symbol']})")
+            logger.info(f"  - Price range: [{instrument_info['min_price']:,} - {instrument_info['max_price']:,}]")
+            logger.info(f"  - Volume range: [{instrument_info['min_volume']:,} - {instrument_info['max_volume']:,}]")
+            logger.info(f"  - Cache expires in 2 hours")
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch instrument info: {e}")
+            return False
         
         # Step 4: Determine price and pre-calculate order parameters
         logger.info("Step 4: Pre-calculating order parameters...")
@@ -162,16 +176,17 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
             price=price,
             volume=volume,
             buying_power=buying_power,
-            max_allowed_volume=max_volume,
-            expiry_seconds=30
+            max_allowed_volume=max_volume
         )
-        logger.info(f"✓ Order parameters cached (expires in 30 seconds)")
+        logger.info(f"✓ Order parameters cached (expires in 2 hours)")
         
         logger.info(f"\n✓✓✓ Cache warmup successful for {username}@{broker_code} ✓✓✓\n")
         return True
         
     except Exception as e:
-        logger.error(f"Failed to warm up cache for {username}@{broker_code}: {e}")
+        logger.error(f"❌ Failed to warm up cache for {username}@{broker_code}: {e}")
+        if broker_code == 'gs':
+            logger.warning(f"⚠️  GS broker has stricter rate limiting - retry manually if needed")
         return False
 
 

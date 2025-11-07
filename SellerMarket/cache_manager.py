@@ -201,14 +201,14 @@ class TradingCache:
     # Market Data Cache
     
     def save_market_data(self, isin: str, market_data: Dict[str, Any], 
-                        expiry_minutes: int = 5):
+                        expiry_minutes: int = 120):
         """
         Save market data to cache.
         
         Args:
             isin: Stock ISIN code
             market_data: Market data dictionary
-            expiry_minutes: Cache validity in minutes (default 5)
+            expiry_minutes: Cache validity in minutes (default 120 = 2 hours)
         """
         now = datetime.now()
         cached_data = CachedMarketData(
@@ -265,7 +265,7 @@ class TradingCache:
     # Buying Power Cache
     
     def save_buying_power(self, username: str, broker_code: str, 
-                         buying_power: float, expiry_minutes: int = 1):
+                         buying_power: float, expiry_minutes: int = 120):
         """
         Save buying power to cache.
         
@@ -273,7 +273,7 @@ class TradingCache:
             username: Account username
             broker_code: Broker code
             buying_power: Available buying power
-            expiry_minutes: Cache validity in minutes (default 1)
+            expiry_minutes: Cache validity in minutes (default 120 = 2 hours)
         """
         now = datetime.now()
         cached_bp = CachedBuyingPower(
@@ -320,7 +320,7 @@ class TradingCache:
     
     def save_order_params(self, username: str, broker_code: str, isin: str, 
                          side: int, price: float, volume: int, buying_power: float,
-                         max_allowed_volume: int, expiry_seconds: int = 30):
+                         max_allowed_volume: int, expiry_seconds: int = 7200):
         """
         Save calculated order parameters to cache.
         
@@ -333,7 +333,7 @@ class TradingCache:
             volume: Calculated volume
             buying_power: Buying power used
             max_allowed_volume: Maximum allowed volume
-            expiry_seconds: Cache validity in seconds (default 30)
+            expiry_seconds: Cache validity in seconds (default 7200 = 2 hours)
         """
         now = datetime.now()
         cached_params = CachedOrderParams(

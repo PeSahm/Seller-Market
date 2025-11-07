@@ -16,6 +16,9 @@ import configparser
 import logging
 from collections import namedtuple
 from typing import Dict, Any
+import os
+from datetime import datetime
+from pathlib import Path
 
 from broker_enum import BrokerCode
 from api_client import EphoenixAPIClient
@@ -67,6 +70,42 @@ order_tracker = OrderResultTracker()
 cache_manager = TradingCache()
 
 
+def send_telegram_notification(message: str):
+    """
+    Send a notification to Telegram bot.
+    
+    Args:
+        message: Message to send
+    """
+    try:
+        # Read bot token and user ID from environment (same as simple_config_bot.py)
+        bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
+        telegram_user_id = os.getenv('TELEGRAM_USER_ID') or os.getenv('USER_ID')  # Fallback for backwards compatibility
+        
+        if not bot_token or not telegram_user_id:
+            logger.warning("Telegram credentials not found. Skipping notification.")
+            logger.info("Set TELEGRAM_BOT_TOKEN and TELEGRAM_USER_ID environment variables to enable notifications.")
+            return
+        
+        # Send message via Telegram API
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = {
+            'chat_id': telegram_user_id,
+            'text': message,
+            'parse_mode': 'Markdown'
+        }
+        
+        response = requests.post(url, json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            logger.info("✓ Telegram notification sent successfully")
+        else:
+            logger.warning(f"Failed to send Telegram notification: {response.status_code}")
+            
+    except Exception as e:
+        logger.error(f"Error sending Telegram notification: {e}")
+
+
 def decode_captcha(im: str) -> str:
     """
     Decode captcha image using OCR service.
@@ -77,7 +116,7 @@ def decode_captcha(im: str) -> str:
     Returns:
         Decoded captcha text
     """
-    url = 'http://localhost:8080/ocr/by-base64'
+    url = 'http://localhost:8080/ocr/captcha-easy-base64'
     headers = {
         'accept': 'text/plain',
         'Content-Type': 'application/json'
@@ -136,13 +175,23 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
     
     # Step 1: Authenticate
     logger.info("Step 1: Authenticating...")
-    token = api_client.authenticate()
-    logger.info("✓ Authentication successful")
+    try:
+        token = api_client.authenticate()
+        logger.info("✓ Authentication successful")
+    except Exception as e:
+        logger.error(f"❌ Authentication failed for {username}@{broker_code}: {e}")
+        if broker_code == 'gs':
+            logger.warning(f"⚠️  GS broker captcha issue - skipping this account")
+        raise  # This will mark the task as failed in Locust
     
     # Step 2: Get buying power
     logger.info("Step 2: Fetching buying power...")
-    buying_power = api_client.get_buying_power()
-    logger.info(f"✓ Buying power: {buying_power:,.0f} Rials")
+    try:
+        buying_power = api_client.get_buying_power()
+        logger.info(f"✓ Buying power: {buying_power:,.0f} Rials")
+    except Exception as e:
+        logger.error(f"❌ Failed to get buying power: {e}")
+        raise
     
     # Step 3: Get instrument information
     logger.info("Step 3: Fetching instrument information...")
@@ -329,6 +378,12 @@ def on_test_stop(environment, **kwargs):
     logger.info("TEST STOPPED - Fetching order results...")
     logger.info("="*80 + "\n")
     
+    total_orders = 0
+    total_executed = 0
+    total_volume = 0
+    accounts_processed = 0
+    notification_lines = []
+    
     # Get all user classes
     for section_name in config.sections():
         section = dict(config[section_name])
@@ -362,12 +417,57 @@ def on_test_stop(environment, **kwargs):
             summary = order_tracker.get_summary_report(username, broker_code)
             logger.info(summary)
             
+            # Collect stats for notification
+            accounts_processed += 1
+            total_orders += len(orders)
+            for order in orders:
+                total_volume += order.volume
+                if order.is_executed():
+                    total_executed += 1
+            
         except Exception as e:
             logger.error(f"Failed to fetch orders for {username}@{broker_code}: {e}")
+            notification_lines.append(f"❌ {username}@{broker_code}: Error")
     
     logger.info("\n" + "="*80)
     logger.info("Order results saved. Check 'order_results' directory for details.")
     logger.info("="*80 + "\n")
+    
+    # Send Telegram notification
+    try:
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        if total_orders == 0:
+            # No orders found
+            notification = (
+                f"📊 *Trading Completed*\n"
+                f"⏰ {timestamp}\n\n"
+                f"⚠️ *No Orders Found*\n\n"
+                f"Accounts checked: {accounts_processed}\n\n"
+                f"Possible reasons:\n"
+                f"• Market is closed\n"
+                f"• Orders failed to place\n"
+                f"• Rate limit exceeded\n\n"
+                f"Use /logs to check details"
+            )
+        else:
+            # Orders found
+            exec_percent = (total_executed / total_orders * 100) if total_orders > 0 else 0
+            
+            notification = (
+                f"📊 *Trading Completed*\n"
+                f"⏰ {timestamp}\n\n"
+                f"✅ Orders Placed: {total_orders}\n"
+                f"⚡ Executed: {total_executed}/{total_orders} ({exec_percent:.1f}%)\n"
+                f"📈 Total Volume: {total_volume:,} shares\n"
+                f"👥 Accounts: {accounts_processed}\n\n"
+                f"Use /results to view details"
+            )
+        
+        send_telegram_notification(notification)
+        
+    except Exception as e:
+        logger.error(f"Failed to send summary notification: {e}")
 
 
 # Load configuration

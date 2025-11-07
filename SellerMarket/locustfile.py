@@ -38,7 +38,7 @@ def on_locust_init(Person: dict):
     # decode captcha image
 
     def decoder(im):
-        url = 'http://localhost:8080/ocr/by-base64'
+        url = 'http://localhost:8080/ocr/captcha-easy-base64'
         headers = {
             'accept': 'text/plain',
             'Content-Type': 'application/json'

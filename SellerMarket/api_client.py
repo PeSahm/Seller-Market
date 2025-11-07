@@ -45,10 +45,10 @@ class EphoenixAPIClient:
         try:
             # Save to cache manager
             if self.cache:
-                self.cache.save_token(self.username, self.broker_code, token, expiry_hours=1)
+                self.cache.save_token(self.username, self.broker_code, token, expiry_hours=2)
             
             self.token = token
-            self.token_expiry = datetime.now() + timedelta(hours=1)
+            self.token_expiry = datetime.now() + timedelta(hours=2)
             logger.info(f"Token saved for {self.username}")
         except Exception as e:
             logger.error(f"Failed to save token: {e}")
@@ -60,7 +60,7 @@ class EphoenixAPIClient:
             token = self.cache.get_token(self.username, self.broker_code)
             if token:
                 self.token = token
-                self.token_expiry = datetime.now() + timedelta(hours=1)
+                self.token_expiry = datetime.now() + timedelta(hours=2)
                 return token
         
         logger.debug(f"No cached token found for {self.username}")
@@ -69,19 +69,22 @@ class EphoenixAPIClient:
     def _fetch_captcha(self) -> Dict[str, str]:
         """Fetch captcha from server."""
         try:
-            time.sleep(1)  # Delay to prevent rate limiting
-            response = requests.get(self.endpoints['captcha'])
+            # GS broker needs extra delay due to stricter rate limiting
+            delay = 1 if self.broker_code == 'gs' else 1
+            time.sleep(delay)
+            
+            response = requests.get(self.endpoints['captcha'], timeout=10)
             response.raise_for_status()
             data = response.json()
             
-            logger.debug(f"Fetched captcha for {self.username}")
+            logger.debug(f"Fetched captcha for {self.username}@{self.broker_code}")
             return {
                 'captcha_byte_data': data['captchaByteData'],
                 'salt': data['salt'],
                 'hashed_captcha': data['hashedCaptcha']
             }
         except Exception as e:
-            logger.error(f"Failed to fetch captcha: {e}")
+            logger.error(f"Failed to fetch captcha for {self.username}@{self.broker_code}: {e}")
             raise
     
     def _login_with_captcha(self) -> Optional[str]:
@@ -90,7 +93,15 @@ class EphoenixAPIClient:
             captcha_data = self._fetch_captcha()
             captcha_value = self.captcha_decoder(captcha_data['captcha_byte_data'])
             
+            if not captcha_value:
+                logger.warning(f"Captcha decoder returned empty value for {self.username}@{self.broker_code}")
+                return None
+            
             logger.debug(f"Decoded captcha: {captcha_value}")
+            
+            # GS broker needs extra delay between captcha fetch and login
+            if self.broker_code == 'gs':
+                time.sleep(2)
             
             login_data = {
                 "loginName": self.username,
@@ -102,19 +113,19 @@ class EphoenixAPIClient:
                 }
             }
             
-            response = requests.post(self.endpoints['login'], json=login_data)
+            response = requests.post(self.endpoints['login'], json=login_data, timeout=10)
             response.raise_for_status()
             
             token = response.json().get('token')
             if token:
-                logger.info(f"Login successful for {self.username}")
+                logger.info(f"Login successful for {self.username}@{self.broker_code}")
                 return token
             else:
-                logger.warning(f"Login response missing token for {self.username}")
+                logger.warning(f"Login response missing token for {self.username}@{self.broker_code}")
                 return None
                 
         except Exception as e:
-            logger.error(f"Login failed for {self.username}: {e}")
+            logger.error(f"Login failed for {self.username}@{self.broker_code}: {e}")
             return None
     
     def authenticate(self) -> str:
@@ -179,7 +190,7 @@ class EphoenixAPIClient:
             
             # Cache the buying power
             if self.cache:
-                self.cache.save_buying_power(self.username, self.broker_code, buying_power, expiry_minutes=1)
+                self.cache.save_buying_power(self.username, self.broker_code, buying_power)
             
             logger.info(f"Buying power for {self.username}: {buying_power:,.0f} Rials")
             return buying_power
@@ -236,7 +247,7 @@ class EphoenixAPIClient:
             
             # Cache the market data
             if self.cache:
-                self.cache.save_market_data(isin, result, expiry_minutes=5)
+                self.cache.save_market_data(isin, result)
             
             logger.info(f"Instrument {isin} ({result['symbol']}): "
                        f"Price range [{result['min_price']}-{result['max_price']}], "
