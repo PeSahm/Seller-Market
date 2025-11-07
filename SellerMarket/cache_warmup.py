@@ -27,6 +27,7 @@ from datetime import datetime
 from broker_enum import BrokerCode
 from api_client import EphoenixAPIClient
 from cache_manager import TradingCache
+from captcha_utils import decode_captcha
 
 # Configure logging - truncate log file on each run
 logging.basicConfig(
@@ -39,36 +40,6 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
-
-
-def decode_captcha(im: str) -> str:
-    """
-    Decode captcha image using OCR service.
-    
-    Args:
-        im: Base64 encoded image
-        
-    Returns:
-        Decoded captcha text
-    """
-    import requests
-    url = 'http://localhost:8080/ocr/captcha-easy-base64'
-    headers = {
-        'accept': 'text/plain',
-        'Content-Type': 'application/json'
-    }
-    data = {"base64": im}
-    
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        result = response.text.strip()
-        # Remove quotes if the response includes them
-        if result.startswith('"') and result.endswith('"'):
-            result = result[1:-1]
-        return result
-    except requests.RequestException as e:
-        logger.error(f"Captcha decoding failed: {e}")
-        return ""
 
 
 def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
