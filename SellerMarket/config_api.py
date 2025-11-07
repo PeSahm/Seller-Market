@@ -113,9 +113,15 @@ class ConfigManager:
         if user_id not in self.configs:
             self.configs[user_id] = {}
 
+        # Validate that the config_name exists for this user
+        if config_name not in self.configs[user_id] or config_name == 'active_config':
+            logger.warning(f"Config '{config_name}' does not exist for user {user_id}")
+            return False
+
         self.configs[user_id]['active_config'] = config_name
         self.save_configs()
         logger.info(f"Set active config to {config_name} for user {user_id}")
+        return True
 
     def list_configs(self, user_id):
         """List all configurations for a user"""
@@ -243,7 +249,9 @@ def update_specific_config(user_id, config_name):
 @app.route('/config/<user_id>/active/<config_name>', methods=['POST'])
 def set_active_config(user_id, config_name):
     """Set active configuration for a user"""
-    config_manager.set_active_config(user_id, config_name)
+    success = config_manager.set_active_config(user_id, config_name)
+    if not success:
+        return jsonify({'error': f'Configuration "{config_name}" does not exist for user {user_id}'}), 400
     return jsonify({'status': 'success'})
 
 @app.route('/config/<user_id>/list', methods=['GET'])
