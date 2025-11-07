@@ -42,43 +42,41 @@ def load_locust_config() -> Dict[str, Any]:
             'host': 'https://abc.com'
         }
 
-def build_locust_command_from_config(base_command: str) -> str:
+def build_locust_command_from_config(base_command: str) -> List[str]:
     """
-    Builds a complete Locust CLI command by appending configured parameters from locust_config.json to a base locust invocation.
+    Builds a complete Locust CLI command as a list of arguments by appending configured parameters from locust_config.json to a base locust invocation.
     
     Parameters:
         base_command (str): The base command string (e.g. "locust -f locustfile.py --headless"); if it does not start with "locust", it is returned unchanged.
     
     Returns:
-        full_command (str): The combined command including any of `--users`, `--spawn-rate`, `--run-time`, and `--host` present in the Locust config.
+        full_command_args (List[str]): The combined command arguments including any of `--users`, `--spawn-rate`, `--run-time`, and `--host` present in the Locust config.
     """
     locust_config = load_locust_config()
     
     # Parse base command to check if it's a locust command
     parts = shlex.split(base_command)
     if not parts or parts[0] != 'locust':
-        return base_command
+        return shlex.split(base_command) if isinstance(base_command, str) else base_command
     
-    # Build additional parameters from config
-    additional_params = []
+    # Start with base command parts
+    command_args = parts.copy()
     
+    # Build additional parameters from config as separate list elements
     if 'users' in locust_config:
-        additional_params.append(f"--users {locust_config['users']}")
+        command_args.extend(['--users', str(locust_config['users'])])
     
     if 'spawn_rate' in locust_config:
-        additional_params.append(f"--spawn-rate {locust_config['spawn_rate']}")
+        command_args.extend(['--spawn-rate', str(locust_config['spawn_rate'])])
     
     if 'run_time' in locust_config:
-        additional_params.append(f"--run-time {locust_config['run_time']}")
+        command_args.extend(['--run-time', str(locust_config['run_time'])])
     
     if 'host' in locust_config:
-        additional_params.append(f"--host {locust_config['host']}")
+        command_args.extend(['--host', str(locust_config['host'])])
     
-    # Combine base command with additional parameters
-    full_command = f"{base_command} {' '.join(additional_params)}"
-    
-    logger.info(f"Built Locust command from config: {full_command}")
-    return full_command
+    logger.info(f"Built Locust command from config: {shlex.join(command_args)}")
+    return command_args
 
 class JobScheduler:
     """Simple job scheduler that runs in a background thread"""
@@ -169,20 +167,24 @@ class JobScheduler:
             if isinstance(command, str) and command.strip().startswith('locust'):
                 command = build_locust_command_from_config(command)
             
-            logger.info(f"⏰ Executing scheduled job: {job_name}")
-            logger.info(f"   Command: {command}")
-            
-            # Validate and parse command
-            allowed_binaries = {'python', 'locust'}  # Whitelist of allowed executables
-            
+            # Convert command to list format for logging and validation
             if isinstance(command, str):
+                command_for_logging = command
                 try:
                     parsed_command = shlex.split(command)
                 except ValueError as e:
                     logger.error(f"❌ Invalid command syntax for job '{job_name}': {e}")
                     return
             else:
+                # command is already a list from build_locust_command_from_config
                 parsed_command = command
+                command_for_logging = shlex.join(command)
+            
+            logger.info(f"⏰ Executing scheduled job: {job_name}")
+            logger.info(f"   Command: {command_for_logging}")
+            
+            # Validate and parse command
+            allowed_binaries = {'python', 'locust'}  # Whitelist of allowed executables
             
             if not parsed_command:
                 logger.error(f"❌ Empty command for job '{job_name}'")

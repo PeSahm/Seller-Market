@@ -5,6 +5,7 @@ Test script to verify scheduler correctly loads Locust config
 
 from scheduler import JobScheduler, build_locust_command_from_config, load_locust_config
 import json
+import shlex
 
 def test_locust_config_loading():
     """Test that locust_config.json is loaded correctly"""
@@ -33,16 +34,34 @@ def test_command_building():
     print("="*80)
     
     base_command = "locust -f locustfile_new.py --headless"
-    full_command = build_locust_command_from_config(base_command)
+    full_command_args = build_locust_command_from_config(base_command)
     
     print(f"\nBase command: {base_command}")
-    print(f"Full command: {full_command}")
+    print(f"Full command args: {full_command_args}")
+    print(f"Full command string: {shlex.join(full_command_args)}")
     
-    # Verify that the command contains expected parameters
-    assert '--users' in full_command
-    assert '--spawn-rate' in full_command
-    assert '--run-time' in full_command
-    assert '--host' in full_command
+    # Verify that the command args contain expected parameters
+    assert '--users' in full_command_args
+    assert '--spawn-rate' in full_command_args
+    assert '--run-time' in full_command_args
+    assert '--host' in full_command_args
+    
+    # Verify that each parameter is a separate element
+    users_index = full_command_args.index('--users')
+    assert users_index + 1 < len(full_command_args)
+    assert full_command_args[users_index + 1] == '10'  # Should be string
+    
+    spawn_rate_index = full_command_args.index('--spawn-rate')
+    assert spawn_rate_index + 1 < len(full_command_args)
+    assert full_command_args[spawn_rate_index + 1] == '10'
+    
+    run_time_index = full_command_args.index('--run-time')
+    assert run_time_index + 1 < len(full_command_args)
+    assert full_command_args[run_time_index + 1] == '30s'
+    
+    host_index = full_command_args.index('--host')
+    assert host_index + 1 < len(full_command_args)
+    assert full_command_args[host_index + 1] == 'https://abc.com'
     print("\n✅ Command built successfully")
 
 def test_scheduler_integration():
@@ -72,8 +91,9 @@ def test_scheduler_integration():
     print(f"  Base Command: {run_trading_job['command']}")
     
     # Build full command
-    full_command = build_locust_command_from_config(run_trading_job['command'])
-    print(f"  Full Command: {full_command}")
+    full_command_args = build_locust_command_from_config(run_trading_job['command'])
+    print(f"  Full Command Args: {full_command_args}")
+    print(f"  Full Command String: {shlex.join(full_command_args)}")
     
     # Verify the base command is simple (no hardcoded params)
     assert '--users' not in run_trading_job['command'], "Command should not have hardcoded --users"
@@ -81,10 +101,10 @@ def test_scheduler_integration():
     assert '--run-time' not in run_trading_job['command'], "Command should not have hardcoded --run-time"
     
     # Verify the full command has all params
-    assert '--users' in full_command
-    assert '--spawn-rate' in full_command
-    assert '--run-time' in full_command
-    assert '--host' in full_command
+    assert '--users' in full_command_args
+    assert '--spawn-rate' in full_command_args
+    assert '--run-time' in full_command_args
+    assert '--host' in full_command_args
     
     print("\n✅ Scheduler integration working correctly")
 
@@ -95,12 +115,15 @@ def test_non_locust_commands():
     print("="*80)
     
     python_command = "python cache_warmup.py"
-    result = build_locust_command_from_config(python_command)
+    result_args = build_locust_command_from_config(python_command)
     
     print(f"\nOriginal command: {python_command}")
-    print(f"Processed command: {result}")
+    print(f"Processed command args: {result_args}")
+    print(f"Processed command string: {shlex.join(result_args)}")
     
-    assert result == python_command, "Non-locust commands should not be modified"
+    # For non-locust commands, should return the parsed command as list
+    expected_args = shlex.split(python_command)
+    assert result_args == expected_args, f"Expected {expected_args}, got {result_args}"
     print("\n✅ Non-locust commands preserved correctly")
 
 if __name__ == '__main__':
