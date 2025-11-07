@@ -16,7 +16,14 @@ class TestBotHelperFunctions(unittest.TestCase):
     """Test helper functions for bot commands."""
 
     def setUp(self):
-        """Set up test fixtures."""
+        """
+        Create temporary test fixtures used by the test case.
+        
+        Creates a temporary directory and within it:
+        - `results_dir` (Path): a directory named "order_results" for result files.
+        - `log_file` (Path): a path for a temporary log file named "trading_bot.log".
+        These attributes are attached to the test instance for use by tests and cleaned up in tearDown.
+        """
         self.temp_dir = tempfile.mkdtemp()
         self.results_dir = Path(self.temp_dir) / "order_results"
         self.results_dir.mkdir(exist_ok=True)
@@ -249,7 +256,13 @@ class TestBotCommands(unittest.TestCase):
     """Test bot command handler logic."""
 
     def setUp(self):
-        """Set up test fixtures."""
+        """
+        Prepare isolated temporary directories used by the tests.
+        
+        Creates a temporary directory and an "order_results" subdirectory, assigning their paths to attributes on self:
+        - temp_dir: absolute path of the created temporary directory (str)
+        - results_dir: Path object pointing to the "order_results" subdirectory
+        """
         self.temp_dir = tempfile.mkdtemp()
         self.results_dir = Path(self.temp_dir) / "order_results"
         self.results_dir.mkdir(exist_ok=True)
@@ -364,7 +377,11 @@ class TestSchedulerConfig(unittest.TestCase):
     """Test scheduler configuration structure."""
 
     def setUp(self):
-        """Set up test fixtures."""
+        """
+        Create a temporary directory and a scheduler configuration file path for the test.
+        
+        Sets self.temp_dir to the temporary directory path and self.config_file to the Path of "scheduler_config.json" inside that directory.
+        """
         self.temp_dir = tempfile.mkdtemp()
         self.config_file = Path(self.temp_dir) / "scheduler_config.json"
         

@@ -43,13 +43,13 @@ logger = logging.getLogger(__name__)
 
 def decode_captcha(im: str) -> str:
     """
-    Decode captcha image using OCR service.
+    Decode a base64-encoded captcha image using the local OCR HTTP service.
     
-    Args:
-        im: Base64 encoded image
-        
+    Parameters:
+        im (str): Base64-encoded image data to be sent to the OCR endpoint.
+    
     Returns:
-        Decoded captcha text
+        str: Decoded captcha text; returns an empty string if the OCR request fails or an error occurs.
     """
     import requests
     url = 'http://localhost:8080/ocr/captcha-easy-base64'
@@ -70,14 +70,16 @@ def decode_captcha(im: str) -> str:
 
 def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
     """
-    Warm up cache for a single account.
+    Warm up and cache authentication, buying power, instrument information, and pre-calculated order parameters for a single account.
     
-    Args:
-        config_section: Configuration section for the account
-        cache: Cache manager instance
-        
+    Performs authentication, fetches buying power and instrument info (forcing fresh fetches), computes an order volume constrained by instrument limits, and saves the resulting order parameters to the provided cache.
+    
+    Parameters:
+        config_section (Dict[str, str]): Account configuration with keys: `username`, `broker` (broker code), `password`, `isin`, and `side` (integer; 1 for buy, otherwise sell).
+        cache (TradingCache): Shared cache manager where tokens, market data, buying power, and order parameters will be stored.
+    
     Returns:
-        True if successful, False otherwise
+        bool: `True` if all warmup steps completed and order parameters were cached, `False` otherwise.
     """
     username = config_section['username']
     broker_code = config_section['broker']

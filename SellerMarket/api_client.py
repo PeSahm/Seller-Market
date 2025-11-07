@@ -41,7 +41,15 @@ class EphoenixAPIClient:
         logger.info(f"Initialized API client for broker {broker_code}, user {username}")
     
     def _save_token(self, token: str):
-        """Save authentication token to cache."""
+        """
+        Save the provided authentication token for later use.
+        
+        Parameters:
+            token (str): JWT or bearer token string to persist.
+        
+        This stores the token in the optional cache (if available) and updates the client's in-memory
+        token and token expiry to two hours from now.
+        """
         try:
             # Save to cache manager
             if self.cache:
@@ -54,7 +62,16 @@ class EphoenixAPIClient:
             logger.error(f"Failed to save token: {e}")
     
     def _load_token(self) -> Optional[str]:
-        """Load token from cache if still valid."""
+        """
+        Retrieve a cached authentication token and update in-memory token state.
+        
+        If a cached token exists for the configured username and broker_code, sets
+        self.token to that value and self.token_expiry to two hours from now, then
+        returns the token. If no cached token is found, returns None.
+        
+        Returns:
+            token (str | None): The cached token string if found, `None` otherwise.
+        """
         # Try cache manager
         if self.cache:
             token = self.cache.get_token(self.username, self.broker_code)
@@ -67,7 +84,15 @@ class EphoenixAPIClient:
         return None
     
     def _fetch_captcha(self) -> Dict[str, str]:
-        """Fetch captcha from server."""
+        """
+        Fetch a captcha payload from the server for the configured user and broker.
+        
+        Returns:
+            dict: A mapping containing:
+                - captcha_byte_data (str): the captcha image data (as returned by the server).
+                - salt (str): the salt value associated with the captcha.
+                - hashed_captcha (str): the server-provided hashed captcha.
+        """
         try:
             # GS broker needs extra delay due to stricter rate limiting
             delay = 1 if self.broker_code == 'gs' else 1
@@ -88,7 +113,14 @@ class EphoenixAPIClient:
             raise
     
     def _login_with_captcha(self) -> Optional[str]:
-        """Perform login with captcha."""
+        """
+        Attempt to authenticate using a decoded captcha and return the obtained JWT token.
+        
+        Attempts to fetch and decode a captcha, submit credentials and captcha to the login endpoint, and extract the token from the response. May wait briefly for broker 'gs' before submitting. Returns `None` when captcha decoding fails, the response lacks a token, or an error occurs.
+        
+        Returns:
+            token (str): The authentication token when login succeeds, `None` otherwise.
+        """
         try:
             captcha_data = self._fetch_captcha()
             captcha_value = self.captcha_decoder(captcha_data['captcha_byte_data'])
@@ -130,11 +162,15 @@ class EphoenixAPIClient:
     
     def authenticate(self) -> str:
         """
-        Authenticate and get valid token.
-        Uses cached token if available, otherwise performs login.
+        Ensure a valid authentication token is available for API requests.
+        
+        Checks the in-memory token and its expiry, attempts to load a cached token, and if none are valid performs repeated captcha-based login attempts until a token is obtained.
         
         Returns:
-            Valid JWT token
+            token (str): JWT authentication token.
+        
+        Raises:
+            Exception: If authentication fails after 100 attempts.
         """
         # Check if we have a valid cached token
         if self.token and self.token_expiry and datetime.now() < self.token_expiry:
@@ -160,13 +196,13 @@ class EphoenixAPIClient:
     
     def get_buying_power(self, use_cache: bool = True) -> float:
         """
-        Get current buying power for the account.
+        Retrieve the account's available buying power.
         
-        Args:
-            use_cache: Whether to use cached value if available
+        Parameters:
+            use_cache (bool): If True, return a cached value when available.
         
         Returns:
-            Available buying power in Rials
+            Available buying power in Rials.
         """
         # Try cache first
         if use_cache and self.cache:
@@ -201,14 +237,26 @@ class EphoenixAPIClient:
     
     def get_instrument_info(self, isin: str, use_cache: bool = True) -> Dict[str, Any]:
         """
-        Get instrument information including price limits and max volume.
+        Retrieve market metadata for the given ISIN, including price limits, last traded price, and allowed volume.
         
-        Args:
-            isin: Stock ISIN code
-            use_cache: Whether to use cached value if available
-            
+        Parameters:
+            isin (str): The instrument's ISIN code to query.
+            use_cache (bool): If True, return cached market data when available.
+        
         Returns:
-            Dictionary with instrument and trading data
+            dict: A dictionary containing:
+                - isin (str): The queried ISIN.
+                - symbol (str): The instrument symbol.
+                - title (str): The instrument title/name.
+                - max_price (number): The maximum allowed price (price ceiling).
+                - min_price (number): The minimum allowed price (price floor).
+                - last_price (number): The most recent traded price.
+                - max_volume (int): The maximum allowed order volume.
+                - min_volume (int): The minimum allowed order volume.
+        
+        Raises:
+            ValueError: If the API returns no data for the provided ISIN.
+            Exception: Propagates unexpected errors from network or parsing failures.
         """
         # Try cache first
         if use_cache and self.cache:

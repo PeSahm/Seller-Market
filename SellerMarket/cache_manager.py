@@ -203,13 +203,14 @@ class TradingCache:
     def save_market_data(self, isin: str, market_data: Dict[str, Any], 
                         expiry_minutes: int = 120):
         """
-        Save market data to cache.
-        
-        Args:
-            isin: Stock ISIN code
-            market_data: Market data dictionary
-            expiry_minutes: Cache validity in minutes (default 120 = 2 hours)
-        """
+                        Cache market data for the specified ISIN.
+                        
+                        Parameters:
+                            isin (str): The security's ISIN code used as the cache key.
+                            market_data (Dict[str, Any]): Dictionary with market fields required for caching. Expected keys:
+                                `symbol`, `title`, `max_price`, `min_price`, `last_price`, `max_volume`, `min_volume`.
+                            expiry_minutes (int): Number of minutes the cached entry remains valid (default 120).
+                        """
         now = datetime.now()
         cached_data = CachedMarketData(
             isin=isin,
@@ -267,14 +268,16 @@ class TradingCache:
     def save_buying_power(self, username: str, broker_code: str, 
                          buying_power: float, expiry_minutes: int = 120):
         """
-        Save buying power to cache.
-        
-        Args:
-            username: Account username
-            broker_code: Broker code
-            buying_power: Available buying power
-            expiry_minutes: Cache validity in minutes (default 120 = 2 hours)
-        """
+                         Cache the available buying power for a given username and broker.
+                         
+                         Stores buying power with creation and expiry timestamps under the BUYING_POWER cache using the key "<username>_<broker_code>".
+                         
+                         Parameters:
+                             username (str): Account username.
+                             broker_code (str): Broker identifier.
+                             buying_power (float): Available buying power to cache.
+                             expiry_minutes (int): Cache validity in minutes (default 120).
+                         """
         now = datetime.now()
         cached_bp = CachedBuyingPower(
             username=username,

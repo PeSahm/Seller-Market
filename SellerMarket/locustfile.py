@@ -7,6 +7,28 @@ from datetime import datetime, timedelta
 
 def on_locust_init(Person: dict):
     # read configuration file
+    """
+    Prepare a Locust user configuration from the provided Person dictionary, obtain or refresh an authentication token (including captcha decoding), and return the request URL, token, and serialized user data.
+    
+    Parameters:
+        Person (dict): Input configuration containing at least the following keys:
+            - username, password: credentials used to authenticate.
+            - captcha, login: URLs for fetching captcha data and performing login.
+            - order, editorder: target URLs for placing or editing an order.
+            - serialnumber: numeric string; when > 0 the editorder URL is selected.
+            - validity, side, accounttype, price, volume: numeric fields (strings in input) that will be converted to integers.
+          Additional keys present in Person are preserved and serialized as part of returned data.
+    
+    Returns:
+        namedtuple: A tuple-like object with fields (order, token, data):
+            - order (str): selected target URL (editorder if serialnumber > 0, otherwise order).
+            - token (str): access token obtained from the login response or loaded from a cache file.
+            - data (str): JSON string of the modified Person dictionary (with numeric conversions and removed auth fields).
+    
+    Side effects:
+        - May perform HTTP requests to the captcha decoding service (http://localhost:8080/ocr/captcha-easy-base64), the captcha provider, and the login endpoint.
+        - Saves or loads a token cache file named "{username}_{host}.txt" with a timestamp; cached tokens younger than 2 hours are reused.
+    """
     print(Person["username"])
     username = Person["username"]
     password = Person["password"]
@@ -38,6 +60,15 @@ def on_locust_init(Person: dict):
     # decode captcha image
 
     def decoder(im):
+        """
+        Decode a base64-encoded captcha image by sending it to a local OCR service.
+        
+        Parameters:
+            im (str): Base64-encoded image data for the captcha.
+        
+        Returns:
+            decoded (str): The OCR-decoded captcha string, or an empty string if the request fails or the service is unreachable.
+        """
         url = 'http://localhost:8080/ocr/captcha-easy-base64'
         headers = {
             'accept': 'text/plain',

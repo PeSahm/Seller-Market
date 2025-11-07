@@ -72,10 +72,12 @@ cache_manager = TradingCache()
 
 def send_telegram_notification(message: str):
     """
-    Send a notification to Telegram bot.
+    Send a Markdown-formatted message to a configured Telegram chat via a bot.
     
-    Args:
-        message: Message to send
+    Reads TELEGRAM_BOT_TOKEN and USER_ID from the environment; if either is missing the function returns without sending. Attempts to POST the message to Telegram's sendMessage API and logs success for HTTP 200 or a warning for other response codes. Any exceptions raised during the request are caught and logged.
+    
+    Parameters:
+        message (str): The message text to send; Markdown formatting is supported by Telegram.
     """
     try:
         # Read bot token and user ID from environment (same as simple_config_bot.py)
@@ -108,13 +110,13 @@ def send_telegram_notification(message: str):
 
 def decode_captcha(im: str) -> str:
     """
-    Decode captcha image using OCR service.
+    Decode a base64-encoded captcha image using the local OCR service.
     
-    Args:
-        im: Base64 encoded image
-        
+    Parameters:
+        im (str): Base64-encoded image data representing the captcha.
+    
     Returns:
-        Decoded captcha text
+        Decoded captcha text, or an empty string if decoding failed.
     """
     url = 'http://localhost:8080/ocr/captcha-easy-base64'
     headers = {
@@ -135,13 +137,28 @@ def decode_captcha(im: str) -> str:
 
 def prepare_order_data(config_section: dict) -> Dict[str, Any]:
     """
-    Prepare order data with dynamic price and volume calculation.
+    Build and return a complete OrderData structure containing the order payload, endpoint, authentication token, and prepared API client for the given account configuration.
     
-    Args:
-        config_section: Configuration section from INI file
-        
+    Parameters:
+        config_section (dict): Mapping with account configuration. Required keys:
+            - username (str): Account username.
+            - password (str): Account password.
+            - broker (str): Broker code (validated).
+            - isin (str): Instrument ISIN.
+            - side (str|int): Order side; numeric string or int where 1 = buy, otherwise = sell.
+    
     Returns:
-        Dictionary with order URL, token, and data
+        OrderData: namedtuple with fields:
+            - order_url (str): Broker order endpoint URL.
+            - token (str): Authentication token returned by the API client.
+            - data (str): JSON-serialized order payload (price, volume, side, etc.).
+            - username (str): Account username from config.
+            - broker_code (str): Broker code from config.
+            - isin (str): Instrument ISIN from config.
+            - api_client (EphoenixAPIClient): Initialized and authenticated API client instance.
+    
+    Raises:
+        ValueError: If the provided broker code is invalid.
     """
     username = config_section['username']
     password = config_section['password']
@@ -371,8 +388,13 @@ def on_test_start(environment, **kwargs):
 @events.test_stop.add_listener
 def on_test_stop(environment, **kwargs):
     """
-    Event handler called when load test stops.
-    Fetches and saves order results for all users.
+    Handle test stop: fetch open orders for configured accounts, save results, aggregate statistics, and send a Telegram summary.
+    
+    Iterates all configured accounts, creates an API client for each, retrieves open orders, converts and stores them via the global order_tracker, and logs a per-account summary. Aggregates totals (orders, executed orders, total volume, accounts processed) and writes detailed results to the order_results directory. After processing all accounts, sends a Telegram notification summarizing the outcome (either a "no orders found" message or totals and execution percentage). Logs any per-account errors and any failures when sending the notification.
+    
+    Parameters:
+        environment: The Locust test environment object (used by event handler callbacks).
+        **kwargs: Additional keyword arguments passed by the Locust event system (ignored by this handler).
     """
     logger.info("\n" + "="*80)
     logger.info("TEST STOPPED - Fetching order results...")

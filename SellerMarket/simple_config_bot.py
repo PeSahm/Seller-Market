@@ -51,7 +51,12 @@ LOG_FILE = os.path.join(os.path.dirname(__file__), 'trading_bot.log')
 
 # Validate environment variables only when running the bot (not when importing for tests)
 def validate_environment():
-    """Validate required environment variables"""
+    """
+    Ensure required environment variables for the Telegram bot are present.
+    
+    Raises:
+        ValueError: if `TELEGRAM_BOT_TOKEN` is not set or if `TELEGRAM_USER_ID` is not set.
+    """
     if not BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN not set")
     if not USER_ID:
@@ -68,7 +73,18 @@ if USER_ID:
 # Configure telebot to use requests session with proxy auto-detection
 # This is necessary for Windows services which don't inherit user proxy settings
 def get_windows_proxy():
-    """Get Windows system proxy settings from registry"""
+    """
+    Retrieve Windows Internet proxy settings from the registry.
+    
+    Reads the current user's Internet Settings registry key and, if a system proxy is enabled,
+    returns a dictionary formatted for use with HTTP client libraries (e.g., requests).
+    The dictionary will either contain protocol-specific mappings (e.g., {'http': 'http://host:port', 'https': 'http://host:port'})
+    or protocol keys parsed from a protocol-specific ProxyServer value (e.g., {'http': 'http://host:port', 'ftp': 'http://host:port'}).
+    
+    Returns:
+        dict or None: A proxies dictionary suitable for passing to HTTP clients when a proxy is configured;
+        `None` if not running on Windows, no proxy is enabled, or the proxy settings cannot be read.
+    """
     if winreg is None:
         return None  # Not on Windows
     
@@ -118,26 +134,55 @@ else:
 scheduler = JobScheduler(SCHEDULER_CONFIG_FILE)
 
 def is_authorized(message):
-    """Check if user is authorized"""
+    """
+    Verify that the incoming Telegram message originates from the configured authorized user.
+    
+    If the sender does not match USER_ID, replies to the message with "❌ Unauthorized" and returns False.
+    
+    Parameters:
+        message: Telegram message object to check (expects a `from_user.id` attribute).
+    
+    Returns:
+        `True` if the message sender matches `USER_ID`, `False` otherwise.
+    """
     if USER_ID and str(message.from_user.id) != str(USER_ID):
         bot.reply_to(message, "❌ Unauthorized")
         return False
     return True
 
 def read_config():
-    """Read current config.ini"""
+    """
+    Load and return the application's INI configuration.
+    
+    Reads CONFIG_FILE and returns a populated configparser.ConfigParser. If the file does not exist or is empty, an empty ConfigParser is returned.
+     
+    Returns:
+        config (configparser.ConfigParser): Parsed configuration for CONFIG_FILE.
+    """
     config = configparser.ConfigParser()
     config.read(CONFIG_FILE, encoding='utf-8')
     return config
 
 def save_config(config):
-    """Save config.ini"""
+    """
+    Persist the provided ConfigParser to the module's CONFIG_FILE (config.ini).
+    
+    Parameters:
+        config (configparser.ConfigParser): Configuration object whose contents will be written to the config file.
+    """
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         config.write(f)
     logger.info("Configuration saved")
 
 def get_latest_result_file() -> str:
-    """Get the most recent order result file"""
+    """
+    Return the path to the most recently modified JSON result file.
+    
+    Searches the RESULTS_DIR for files with a .json extension and selects the one with the latest modification time.
+    
+    Returns:
+    	str or None: Path to the latest JSON result file as a string, or `None` if the results directory does not exist, no JSON files are found, or an error occurs.
+    """
     try:
         if not os.path.exists(RESULTS_DIR):
             return None
@@ -154,7 +199,17 @@ def get_latest_result_file() -> str:
         return None
 
 def format_order_results(result_file: str) -> str:
-    """Format order results for Telegram display"""
+    """
+    Create a Telegram-formatted summary of trading results from a JSON result file.
+    
+    Reads the specified JSON file and builds a message that includes account and broker, timestamp, a summary (number of orders, total volume, executed volume with percentage, and total amount), and a listing of up to the first five orders with side, symbol, volume, price, and status. If no orders are present, returns a short "No orders found" message. On error, returns an error string describing the failure.
+    
+    Parameters:
+        result_file (str): Path to the JSON file containing trading results.
+    
+    Returns:
+        str: A Markdown-formatted message suitable for Telegram containing the results summary and order details, or an error message if reading or formatting fails.
+    """
     try:
         with open(result_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -204,7 +259,19 @@ def format_order_results(result_file: str) -> str:
         return f"❌ Error reading results: {str(e)}"
 
 def get_log_tail(lines: int = 50) -> str:
-    """Get last N lines from trading_bot.log"""
+    """
+    Return a Telegram-formatted string containing the last `lines` lines of the log file.
+    
+    Parameters:
+        lines (int): Number of lines from the end of the log to include (default 50).
+    
+    Returns:
+        str: A message formatted for Telegram containing:
+            - a header with the count of returned lines and the filename,
+            - the log tail inside a Markdown code block,
+            - a truncated view if the log content exceeds ~3800 characters,
+            - or a short informational/error message if the log file is missing, empty, or unreadable.
+    """
     try:
         if not os.path.exists(LOG_FILE):
             return "📝 No log file found"
@@ -233,14 +300,34 @@ def get_log_tail(lines: int = 50) -> str:
         return f"❌ Error reading log: {str(e)}"
 
 def get_active_section(config):
-    """Get the first active (non-commented) section"""
+    """
+    Get the first non-commented section name from the given ConfigParser.
+    
+    Parameters:
+        config (configparser.ConfigParser): Parsed INI configuration to inspect.
+    
+    Returns:
+        str or None: The name of the first section that does not start with `#` or `;`, or `None` if no such section exists.
+    """
     for section in config.sections():
         if not section.startswith('#') and not section.startswith(';'):
             return section
     return None
 
 def set_active_section(config_file, section_name):
-    """Make a section active by uncommenting it and commenting others"""
+    """
+    Activate a named INI section by uncommenting its keys and commenting out all other sections.
+    
+    Parameters:
+        config_file (str): Path to the INI file to modify.
+        section_name (str): The section name to activate.
+    
+    Description:
+        The function rewrites the file so that the specified section header is uncommented (e.g. "[section]")
+        and all other section headers are commented (prefixed with ';'). Within the activated section,
+        any key lines that were commented are uncommented. The file is updated in place.
+    
+    """
     with open(config_file, 'r', encoding='utf-8') as f:
         lines = f.readlines()
     
@@ -285,7 +372,14 @@ def set_active_section(config_file, section_name):
 
 @bot.message_handler(commands=['list'])
 def list_configs(message):
-    """List all available configurations"""
+    """
+    Send a Telegram reply listing all configuration sections and indicating which one is active.
+    
+    Reads the configuration file (including commented section headers), formats each section with an active marker, and replies to the user with the list and guidance to switch using `/use <name>`. Requires the sender to be authorized; on error sends an error reply and logs the failure.
+    
+    Parameters:
+        message: The Telegram message object that triggered the command; used to determine the sender and to send the reply.
+    """
     if not is_authorized(message):
         return
     
@@ -324,7 +418,14 @@ def list_configs(message):
 
 @bot.message_handler(commands=['use'])
 def use_config(message):
-    """Switch to a different configuration"""
+    """
+    Switch the bot's active configuration to the section named in the message.
+    
+    Expects the message text to be "/use <config_name>" and replies to the sender with success or error feedback. Requires an authorized user; if the named section exists in the config file (including commented sections), that section is made active in the config by uncommenting it and commenting other sections. If the section is missing or an error occurs, an explanatory reply is sent.
+     
+    Parameters:
+        message: Telegram message object containing the command text (e.g., "/use my_config").
+    """
     if not is_authorized(message):
         return
     
@@ -364,7 +465,14 @@ def use_config(message):
 
 @bot.message_handler(commands=['add'])
 def add_config(message):
-    """Add a new configuration"""
+    """
+    Create a new configuration section in the INI file and append default keys.
+    
+    Adds a new section named by the first argument of the incoming Telegram command to CONFIG_FILE with default keys: username, password, broker, isin, and side. If the named section already exists (commented or uncommented), the function replies that the config exists. On success it confirms creation and suggests how to activate the new section. On error it logs and notifies the user.
+    
+    Parameters:
+    	message: Telegram message object containing the `/add <config_name>` command; the second token is used as the new section name.
+    """
     if not is_authorized(message):
         return
     
@@ -401,7 +509,14 @@ def add_config(message):
 
 @bot.message_handler(commands=['remove'])
 def remove_config(message):
-    """Remove a configuration"""
+    """
+    Remove a named configuration section from the persistent config file and notify the user.
+    
+    Expects the incoming Telegram `message` to contain the command and the target config name (e.g. `/remove myconfig`). If the section exists it is removed from CONFIG_FILE and the bot replies with a confirmation; on error or if the section is missing the bot replies with an appropriate error or usage message. This action requires an authorized user and logs the removal or any errors.
+     
+    Parameters:
+        message (telebot.types.Message): Telegram message invoking the command with the config name.
+    """
     if not is_authorized(message):
         return
     
@@ -455,7 +570,14 @@ def remove_config(message):
 
 @bot.message_handler(commands=['start', 'help'])
 def send_help(message):
-    """Show help message"""
+    """
+    Send the bot's instructional help text to the requesting user.
+    
+    The message lists available commands for configuration management, manual execution, scheduler management, and examples. This handler requires the sender to be authorized and replies using Markdown formatting.
+    
+    Parameters:
+        message (telebot.types.Message): Incoming Telegram message to which the help text will be replied.
+    """
     if not is_authorized(message):
         return
     
@@ -505,7 +627,14 @@ def send_help(message):
 
 @bot.message_handler(commands=['show'])
 def show_config(message):
-    """Show current configuration"""
+    """
+    Send the currently active configuration to the user as a formatted Telegram message.
+    
+    Replies to the invoking message with the active INI section name and its fields: username, masked password (asterisks), broker, symbol (isin), and side (displayed as "Buy" for '1' and "Sell" otherwise). If no active section exists or a read error occurs, sends an appropriate error reply.
+    
+    Parameters:
+        message: The Telegram message object that triggered the command; used to reply to the user.
+    """
     if not is_authorized(message):
         return
     
@@ -535,7 +664,14 @@ def show_config(message):
 
 @bot.message_handler(commands=['broker'])
 def set_broker(message):
-    """Set broker"""
+    """
+    Set the active configuration's broker code.
+    
+    Updates the currently active INI section's `broker` value based on the broker code provided in the incoming Telegram message (e.g. "/broker gs"). Valid broker codes are: gs, bbi, shahr, karamad, tejarat, shams. Replies to the user with confirmation or an error message if the input is invalid or no active configuration exists.
+    
+    Parameters:
+        message: The Telegram message object containing the command text (expected format: "/broker <code>").
+    """
     if not is_authorized(message):
         return
     
@@ -579,7 +715,14 @@ def set_broker(message):
 
 @bot.message_handler(commands=['symbol'])
 def set_symbol(message):
-    """Set stock symbol"""
+    """
+    Update the active configuration's ISIN (stock symbol) to the value provided in the command.
+    
+    If no active configuration exists or the command format is invalid, the function sends an explanatory reply. On success it sends a confirmation message showing the new ISIN.
+    
+    Parameters:
+        message: Telegram message object containing the command text in the form "/symbol <ISIN>" (e.g., "/symbol IRO1MHRN0001").
+    """
     if not is_authorized(message):
         return
     
@@ -609,7 +752,14 @@ def set_symbol(message):
 
 @bot.message_handler(commands=['side'])
 def set_side(message):
-    """Set trade side"""
+    """
+    Set the active configuration's trade side to buy or sell based on the command argument.
+    
+    Updates the active config section's `side` value to '1' (BUY) or '2' (SELL), persists the change to the config file, and sends a confirmation or error message back to the user via the bot. The command expects the message text in the form "/side <1|2>".
+    
+    Parameters:
+        message: Telegram message object whose `text` should contain the command and a side argument ("/side 1" or "/side 2").
+    """
     if not is_authorized(message):
         return
     
@@ -643,7 +793,11 @@ def set_side(message):
 
 @bot.message_handler(commands=['user'])
 def set_username(message):
-    """Set username"""
+    """
+    Update the active configuration's `username` value from a Telegram /user command and confirm the change.
+    
+    Expects `message.text` to contain "/user <username>". If an active config section exists, writes the new username to the config file and sends a confirmation message. Attempts to delete the user's original message containing the username for security; if deletion fails, the update still proceeds. Replies with usage guidance or an error message on failure.
+    """
     if not is_authorized(message):
         return
     
@@ -679,7 +833,11 @@ def set_username(message):
 
 @bot.message_handler(commands=['pass'])
 def set_password(message):
-    """Set password"""
+    """
+    Update the active configuration's password from a Telegram command and confirm the change.
+    
+    Reads the password argument from the incoming `message`, sets it in the currently active INI section, persists the configuration, attempts to delete the user's message containing the password for security, and replies with success or error feedback.
+    """
     if not is_authorized(message):
         return
     
@@ -719,7 +877,16 @@ def set_password(message):
 
 @bot.message_handler(commands=['cache'])
 def run_cache_warmup(message):
-    """Run cache warmup manually"""
+    """
+    Trigger a manual cache warmup and report progress and results to the user.
+    
+    Runs the cache warmup script and sends Telegram replies indicating start, success, failure, or timeout.
+    On success or failure the function includes up to the last 1000 characters of the subprocess output or error in the reply.
+    If the operation exceeds the configured timeout (5 minutes), a timeout notice is sent and the warmup may continue running in the background.
+    
+    Parameters:
+        message: Telegram message object used to reply to the requesting user.
+    """
     if not is_authorized(message):
         return
     
@@ -751,7 +918,14 @@ def run_cache_warmup(message):
 
 @bot.message_handler(commands=['trade'])
 def run_trading(message):
-    """Run trading bot manually"""
+    """
+    Manually triggers a short, headless trading run using Locust and reports the result to the sender.
+    
+    This handler validates the sender, starts a Locust subprocess with a preset configuration (10 users, 30s run), captures its output, and sends a concise summary or error message back to the Telegram message thread. Timeouts and subprocess errors are handled and reported to the user.
+    
+    Parameters:
+        message: Telegram message object used for authorization and to send reply messages.
+    """
     if not is_authorized(message):
         return
     
@@ -785,7 +959,14 @@ def run_trading(message):
 
 @bot.message_handler(commands=['status'])
 def show_status(message):
-    """Show system status"""
+    """
+    Send a concise system status report to the user and reply with cached service and scheduler information.
+    
+    Replies to the provided Telegram message with a summary of cache health, configured scheduled jobs (if any), and basic service/bot state. If an error occurs while gathering status, sends an error message back to the user.
+    
+    Parameters:
+        message: The incoming Telegram message object used to validate authorization and send the reply.
+    """
     if not is_authorized(message):
         return
     
@@ -838,7 +1019,14 @@ def show_status(message):
 
 @bot.message_handler(commands=['schedule'])
 def show_schedule(message):
-    """Show scheduled jobs"""
+    """
+    Display the configured scheduler and its jobs to the requesting Telegram user.
+    
+    Reads the scheduler configuration file and replies to the provided Telegram message with a formatted list of scheduled jobs, showing each job's enabled state, name, scheduled time, and a truncated command. If no scheduler configuration or no jobs are found, replies with guidance on how to configure scheduling. On error, logs the exception and sends an error reply.
+    
+    Parameters:
+        message: The incoming Telegram message object to which the bot will send the reply.
+    """
     if not is_authorized(message):
         return
     
@@ -879,7 +1067,14 @@ def show_schedule(message):
 
 @bot.message_handler(commands=['setcache'])
 def set_cache_time(message):
-    """Set cache warmup time"""
+    """
+    Schedule or update the cache warmup job time in the scheduler configuration.
+    
+    Validates the provided time (HH:MM:SS), adds or updates a job named "cache_warmup" in the scheduler config file, saves the change, and reloads the scheduler so the new time takes effect. Replies to the originating Telegram message with a confirmation on success or an error message on failure.
+    
+    Parameters:
+        message: Telegram message object containing the command text; the expected format is "/setcache HH:MM:SS" where the second token is the target time.
+    """
     if not is_authorized(message):
         return
     
@@ -934,7 +1129,14 @@ def set_cache_time(message):
 
 @bot.message_handler(commands=['settrade'])
 def set_trade_time(message):
-    """Set trading time"""
+    """
+    Schedule or update the trading job time from a `/settrade HH:MM:SS` command message.
+    
+    Validates that the provided time is in HH:MM:SS format, updates or adds a `run_trading` job in the scheduler configuration file, saves the file, reloads the scheduler to apply changes immediately, and replies to the user with a confirmation or error message.
+    
+    Parameters:
+        message: Telegram message object containing the `/settrade` command and target time (e.g., `/settrade 08:44:30`).
+    """
     if not is_authorized(message):
         return
     
@@ -989,7 +1191,14 @@ def set_trade_time(message):
 
 @bot.message_handler(commands=['enablejob'])
 def enable_job(message):
-    """Enable a scheduled job"""
+    """
+    Enable a scheduled job by name and notify the user of the result.
+    
+    This handler expects the incoming Telegram message to contain the command and a job name (usage: `/enablejob <job_name>`). It sets the named job's `enabled` flag to `true` in the scheduler configuration file, persists the change, reloads the scheduler so changes take effect immediately, and replies to the sender with success or error messages. If the scheduler configuration file or the named job is missing, an explanatory reply is sent.
+    
+    Parameters:
+        message: Incoming Telegram message containing the `/enablejob` command and the target job name.
+    """
     if not is_authorized(message):
         return
     
@@ -1033,7 +1242,17 @@ def enable_job(message):
 
 @bot.message_handler(commands=['disablejob'])
 def disable_job(message):
-    """Disable a scheduled job"""
+    """
+    Disable a scheduler job specified by name from the incoming Telegram command.
+    
+    Parses the job name from message.text (usage: /disablejob <job_name>), sets that job's "enabled" field to False in the scheduler configuration file, writes the updated config, reloads the in-process scheduler to apply changes immediately, and replies to the user with a confirmation or error message. Requires an authorized user; if the scheduler config or the named job is missing, a user-facing error reply is sent.
+    
+    Parameters:
+        message (telebot.types.Message): Telegram message containing the command and job name (e.g. "/disablejob cache_warmup").
+    
+    Returns:
+        None
+    """
     if not is_authorized(message):
         return
     
@@ -1081,7 +1300,14 @@ def disable_job(message):
 
 @bot.message_handler(commands=['results'])
 def show_results(message):
-    """Show latest trading results"""
+    """
+    Show the latest trading results to the authorized Telegram user.
+    
+    Reads the most recent result file from the results directory and sends a formatted summary plus file metadata to the chat. If no result file is found, sends a helpful message explaining possible reasons and guidance. Requires the sender to be authorized; replies are posted using the bot.
+    
+    Parameters:
+        message: The incoming Telegram message object that triggered this command; used to determine the chat and to reply.
+    """
     if not is_authorized(message):
         return
     
@@ -1134,7 +1360,14 @@ def show_results(message):
 
 @bot.message_handler(commands=['logs'])
 def show_logs(message):
-    """Show recent log entries"""
+    """
+    Display recent lines from the application log to the authorized Telegram user.
+    
+    Parses an optional integer argument from the triggering message (e.g., "/logs 100") to specify how many lines to show. Defaults to 50 lines and is clamped to the range 10–200. If the rendered output exceeds Telegram's message size limits, the output is split into multiple messages. After sending log contents, the command also sends the log file's size and last modification time when the log file exists. Requires the sender to be authorized; replies with an error message on invalid input or on internal failure.
+    
+    Parameters:
+        message: Telegram message object that invoked the command (message.text may include an optional line count).
+    """
     if not is_authorized(message):
         return
     
@@ -1184,7 +1417,16 @@ def show_logs(message):
 
 @bot.message_handler(commands=['stop'])
 def stop_trading(message):
-    """Stop any running trading/cache processes"""
+    """
+    Stop all running trading and cache processes and report the result to the user.
+    
+    Attempts to terminate any tracked subprocesses, then force-kills remaining platform-specific
+    trading processes (Locust and cache_warmup). Sends a Telegram reply to the triggering message
+    with a summary of actions taken.
+    
+    Parameters:
+        message: The Telegram message object that triggered this command; used to reply to the user.
+    """
     if not is_authorized(message):
         return
     
@@ -1279,13 +1521,22 @@ def stop_trading(message):
 
 @bot.message_handler(func=lambda m: True)
 def handle_unknown(message):
-    """Handle unknown commands"""
+    """
+    Reply to the sender indicating the command is unrecognized and suggest using /help.
+    
+    Parameters:
+        message: Telegram message object representing the incoming unknown command; ignored if the sender is not authorized.
+    """
     if not is_authorized(message):
         return
     bot.reply_to(message, "❌ Unknown command. Send /help for available commands.")
 
 def main():
-    """Start the bot with unlimited auto-restart on errors"""
+    """
+    Start the Telegram bot, run the background scheduler, and maintain an automatic restart loop on errors.
+    
+    Validates required environment variables and logs startup information, starts the scheduler in the background, then enters a persistent polling loop that auto-restarts the bot after unexpected exceptions. On KeyboardInterrupt the scheduler is stopped and the function exits gracefully.
+    """
     # Validate environment variables before starting
     validate_environment()
     
