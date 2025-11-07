@@ -15,6 +15,63 @@ from typing import List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
+def load_locust_config() -> Dict[str, Any]:
+    """
+    Load Locust configuration from locust_config.json.
+    Returns default values if file is not found or invalid.
+    """
+    locust_config_file = os.path.join(os.path.dirname(__file__), 'locust_config.json')
+    try:
+        with open(locust_config_file, 'r') as f:
+            config = json.load(f)
+        return config.get('locust', {})
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        logger.warning(f"Could not load locust_config.json: {e}. Using defaults.")
+        return {
+            'users': 10,
+            'spawn_rate': 10,
+            'run_time': '30s',
+            'host': 'https://abc.com'
+        }
+
+def build_locust_command_from_config(base_command: str) -> str:
+    """
+    Build a complete Locust command by adding parameters from locust_config.json.
+    
+    Args:
+        base_command: Base command like "locust -f locustfile_new.py --headless"
+        
+    Returns:
+        Complete command with parameters from locust_config.json
+    """
+    locust_config = load_locust_config()
+    
+    # Parse base command to check if it's a locust command
+    parts = shlex.split(base_command)
+    if not parts or parts[0] != 'locust':
+        return base_command
+    
+    # Build additional parameters from config
+    additional_params = []
+    
+    if 'users' in locust_config:
+        additional_params.append(f"--users {locust_config['users']}")
+    
+    if 'spawn_rate' in locust_config:
+        additional_params.append(f"--spawn-rate {locust_config['spawn_rate']}")
+    
+    if 'run_time' in locust_config:
+        additional_params.append(f"--run-time {locust_config['run_time']}")
+    
+    if 'host' in locust_config:
+        additional_params.append(f"--host {locust_config['host']}")
+    
+    # Combine base command with additional parameters
+    full_command = f"{base_command} {' '.join(additional_params)}"
+    
+    logger.info(f"Built Locust command from config: {full_command}")
+    return full_command
+
 class JobScheduler:
     """Simple job scheduler that runs in a background thread"""
     
@@ -85,6 +142,10 @@ class JobScheduler:
         try:
             job_name = job['name']
             command = job['command']
+            
+            # If this is a locust command, build full command from locust_config.json
+            if isinstance(command, str) and command.strip().startswith('locust'):
+                command = build_locust_command_from_config(command)
             
             logger.info(f"⏰ Executing scheduled job: {job_name}")
             logger.info(f"   Command: {command}")
