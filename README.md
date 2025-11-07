@@ -160,7 +160,7 @@ Edit via Telegram bot or directly in JSON file.
 
 ## 🏃 Running the Bot
 
-### Start the Bot
+## Option 1: Automated Mode
 
 ```cmd
 cd SellerMarket
@@ -173,7 +173,7 @@ python simple_config_bot.py
 - ✅ Show restart count and status
 - ✅ Accept Telegram commands
 
-### Manual Trading
+## Option 2: Manual Mode
 
 ```cmd
 # Pre-load cache before market opens
@@ -187,7 +187,7 @@ locust -f locustfile_new.py
 locust -f locustfile_new.py --headless --users 10 --spawn-rate 10 --run-time 30s
 ```
 
-### Via Telegram
+## Option 3: Telegram Control
 
 ```bash
 /cache    # Run cache warmup
