@@ -232,6 +232,23 @@ def get_log_tail(lines: int = 50) -> str:
         logger.error(f"Error reading log: {e}")
         return f"❌ Error reading log: {str(e)}"
 
+def get_locust_config():
+    """Load locust configuration from locust_config.json"""
+    locust_config_file = os.path.join(os.path.dirname(__file__), 'locust_config.json')
+    try:
+        with open(locust_config_file, 'r') as f:
+            config = json.load(f)
+        return config.get('locust', {})
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        logger.warning(f"Could not load locust config: {e}. Using defaults.")
+        return {
+            'users': 10,
+            'spawn_rate': 10,
+            'run_time': '30s',
+            'host': 'https://abc.com',
+            'html_report': 'report.html'
+        }
+
 def get_active_section(config):
     """Get the first active (non-commented) section"""
     for section in config.sections():
@@ -756,10 +773,16 @@ def run_trading(message):
         return
     
     try:
-        bot.reply_to(message, "🚀 Starting trading bot...\nDefault: 10 users, 30 seconds run time")
+        locust_config = get_locust_config()
+        users = locust_config.get('users', 10)
+        spawn_rate = locust_config.get('spawn_rate', 10)
+        run_time = locust_config.get('run_time', '30s')
+        host = locust_config.get('host', 'https://abc.com')
+        
+        bot.reply_to(message, f"🚀 Starting trading bot...\nUsers: {users}, Spawn rate: {spawn_rate}, Run time: {run_time}")
         
         result = subprocess.run(
-            ['locust', '-f', 'locustfile_new.py', '--headless', '--users', '10', '--spawn-rate', '10', '--run-time', '30s', '--host', 'https://abc.com'],
+            ['locust', '-f', 'locustfile_new.py', '--headless', '--users', str(users), '--spawn-rate', str(spawn_rate), '--run-time', run_time, '--host', host],
             cwd=os.path.dirname(__file__),
             capture_output=True,
             text=True,
@@ -965,10 +988,16 @@ def set_trade_time(message):
                 break
         
         if not found:
+            locust_config = get_locust_config()
+            users = locust_config.get('users', 10)
+            spawn_rate = locust_config.get('spawn_rate', 10)
+            run_time = locust_config.get('run_time', '30s')
+            host = locust_config.get('host', 'https://abc.com')
+            
             config['jobs'].append({
                 "name": "run_trading",
                 "time": time_str,
-                "command": "locust -f locustfile_new.py --headless --users 10 --spawn-rate 10 --run-time 30s",
+                "command": f"locust -f locustfile_new.py --headless --users {users} --spawn-rate {spawn_rate} --run-time {run_time} --host {host}",
                 "enabled": True
             })
         
