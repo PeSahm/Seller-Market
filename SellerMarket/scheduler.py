@@ -8,6 +8,7 @@ import os
 import time
 import subprocess
 import logging
+import shlex
 from datetime import datetime, timedelta
 from threading import Thread, Event
 from typing import List, Dict, Any
@@ -88,15 +89,37 @@ class JobScheduler:
             logger.info(f"⏰ Executing scheduled job: {job_name}")
             logger.info(f"   Command: {command}")
             
+            # Validate and parse command
+            allowed_binaries = {'python', 'locust'}  # Whitelist of allowed executables
+            
+            if isinstance(command, str):
+                try:
+                    parsed_command = shlex.split(command)
+                except ValueError as e:
+                    logger.error(f"❌ Invalid command syntax for job '{job_name}': {e}")
+                    return
+            else:
+                parsed_command = command
+            
+            if not parsed_command:
+                logger.error(f"❌ Empty command for job '{job_name}'")
+                return
+            
+            # Validate executable is in whitelist
+            executable = parsed_command[0]
+            if executable not in allowed_binaries:
+                logger.error(f"❌ Command '{executable}' not in allowed binaries for job '{job_name}'")
+                return
+            
             # Mark as executed
             now = datetime.now()
             job_key = f"{job_name}_{now.date().isoformat()}"
             self.executed_today[job_key] = now
             
-            # Execute command with current environment variables
+            # Execute command with current environment variables (shell=False for security)
             result = subprocess.run(
-                command,
-                shell=True,
+                parsed_command,
+                shell=False,
                 cwd=os.path.dirname(__file__),
                 capture_output=True,
                 text=True,
