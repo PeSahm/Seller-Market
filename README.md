@@ -73,6 +73,7 @@ This single script will:
 ## 🎯 Telegram Bot Commands
 
 ### Configuration Management
+
 | Command | Description | Example |
 |---------|-------------|---------|
 | `/list` | List all configurations | `/list` |
@@ -82,6 +83,7 @@ This single script will:
 | `/show` | Display current config | `/show` |
 
 ### Config Updates
+
 | Command | Description | Example |
 |---------|-------------|---------|
 | `/broker <code>` | Set broker (gs/bbi/shahr) | `/broker gs` |
@@ -91,6 +93,7 @@ This single script will:
 | `/pass <password>` | Set password (auto-deleted) | `/pass MyPass123` |
 
 ### Manual Execution
+
 | Command | Description |
 |---------|-------------|
 | `/cache` | Run cache warmup now |
@@ -100,6 +103,7 @@ This single script will:
 | `/logs [lines]` | View recent log entries (default: 50) |
 
 ### Scheduler Management
+
 | Command | Description | Example |
 |---------|-------------|---------|
 | `/schedule` | Show scheduled jobs | `/schedule` |
