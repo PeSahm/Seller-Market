@@ -266,6 +266,7 @@ echo.
 echo Headless mode:
 echo   locust -f locustfile_new.py --headless --users 10 --spawn-rate 10 --run-time 30s
 echo.
+echo NOTE: Locust parameters can be configured in locust_config.json
 
 echo ===============================================
 echo.

@@ -158,6 +158,22 @@ side = 2
 
 Edit via Telegram bot or directly in JSON file.
 
+### Locust Config (`locust_config.json`)
+
+```json
+{
+  "locust": {
+    "users": 10,
+    "spawn_rate": 10,
+    "run_time": "30s",
+    "host": "https://abc.com",
+    "html_report": "report.html"
+  }
+}
+```
+
+**Note:** The `host` parameter is required by Locust CLI even when tasks use absolute URLs. The placeholder URL is ignored by the actual trading tasks, which get their URLs from `broker_enum.py`. This satisfies Locust's framework requirement without affecting the actual API endpoints used.
+
 ## 🏃 Running the Bot
 
 ## Option 1: Automated Mode

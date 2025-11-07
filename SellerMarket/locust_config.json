@@ -1,0 +1,9 @@
+{
+  "locust": {
+    "users": 10,
+    "spawn_rate": 10,
+    "run_time": "30s",
+    "host": "https://abc.com",
+    "html_report": "report.html"
+  }
+}
