@@ -49,7 +49,7 @@ This single script will:
 - **Ghadir Shahr (GS)** - identity-gs.ephoenix.ir
 - **Bourse Bazar Iran (BBI)** - identity-bbi.ephoenix.ir
 - **Shahr** - identity-shahr.ephoenix.ir
-- **Karamad, Tejarat, Shams** - Configurable
+- **Karamad, Tejarat, Ebb** - Configurable
 
 ### 🎯 Dynamic Order Calculation
 - Zero manual price/volume updates
