@@ -17,8 +17,16 @@ logger = logging.getLogger(__name__)
 
 def load_locust_config() -> Dict[str, Any]:
     """
-    Load Locust configuration from locust_config.json.
-    Returns default values if file is not found or invalid.
+    Load Locust configuration from a locust_config.json file located next to this module.
+    
+    Attempts to read the file and return the value of the top-level "locust" key as a dict. If the file is missing or contains invalid JSON, logs a warning and returns default Locust parameters.
+    
+    Returns:
+        dict: A mapping of Locust parameters. Expected keys include:
+            - "users" (int): number of users, default 10
+            - "spawn_rate" (int): spawn rate, default 10
+            - "run_time" (str): run time string, default "30s"
+            - "host" (str): target host URL, default "https://abc.com"
     """
     locust_config_file = os.path.join(os.path.dirname(__file__), 'locust_config.json')
     try:
@@ -36,13 +44,13 @@ def load_locust_config() -> Dict[str, Any]:
 
 def build_locust_command_from_config(base_command: str) -> str:
     """
-    Build a complete Locust command by adding parameters from locust_config.json.
+    Builds a complete Locust CLI command by appending configured parameters from locust_config.json to a base locust invocation.
     
-    Args:
-        base_command: Base command like "locust -f locustfile_new.py --headless"
-        
+    Parameters:
+        base_command (str): The base command string (e.g. "locust -f locustfile.py --headless"); if it does not start with "locust", it is returned unchanged.
+    
     Returns:
-        Complete command with parameters from locust_config.json
+        full_command (str): The combined command including any of `--users`, `--spawn-rate`, `--run-time`, and `--host` present in the Locust config.
     """
     locust_config = load_locust_config()
     
@@ -138,7 +146,21 @@ class JobScheduler:
             return False
     
     def execute_job(self, job: Dict[str, Any]):
-        """Execute a scheduled job"""
+        """
+        Run a scheduled job command if it meets validation and record its execution for today.
+        
+        This method accepts a job mapping with keys "name" and "command", optionally rewrites Locust commands using locust configuration, validates that the command is non-empty and the executable is in a small whitelist, records the job as executed for the current date to prevent duplicate runs, and executes the command as a subprocess with a 10-minute timeout. Outcomes (success, failure, timeout, or validation errors) are logged. Any exceptions during execution are caught and logged; the method does not raise.
+        
+        Parameters:
+            job (Dict[str, Any]): Job definition containing:
+                - "name" (str): Human-readable job name used in logs and as part of the once-per-day key.
+                - "command" (str | Sequence[str]): Command to execute; if a string beginning with "locust", the command may be expanded from locust_config.json.
+        
+        Side effects:
+            - Updates self.executed_today to mark the job as run for today's date.
+            - Spawns a subprocess to run the validated command.
+            - Writes informational, debug, and error logs describing validation and execution results.
+        """
         try:
             job_name = job['name']
             command = job['command']

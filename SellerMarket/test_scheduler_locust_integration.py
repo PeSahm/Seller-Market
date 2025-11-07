@@ -23,7 +23,11 @@ def test_locust_config_loading():
     print("\n✅ Locust config loaded successfully")
 
 def test_command_building():
-    """Test that Locust command is built correctly"""
+    """
+    Verify that a base Locust CLI command is augmented with configured Locust parameters.
+    
+    Asserts that the resulting command includes the flags `--users`, `--spawn-rate`, `--run-time`, and `--host`.
+    """
     print("\n" + "="*80)
     print("Testing Locust Command Building")
     print("="*80)
