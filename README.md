@@ -387,8 +387,6 @@ This single script will:- 🚀 **Instant Execution** - Pre-cached data for zero-
 
 - ✅ Configure scheduler (cache @ 8:30 AM, trade @ 8:44:30 AM)
 
-- ✅ Install as Windows service (optional)## 🚀 Quick Start
-
 - ✅ Test the system
 
 ### Option 1: Complete Automated Setup (Recommended)
@@ -831,8 +829,6 @@ python cache_cli.py clear tokens📖 **[Read Full Legal Notice](SECURITY.md)**
 
 - ✅ **.env storage** - Sensitive data not in gitThis software is provided **for educational and testing purposes only**.
 
-- ✅ **Encrypted service** - Windows service runs under system account
-
 - ⚠️ **Note:** Credentials in `config.ini` are plain text - secure your file system!- ❌ Authors do NOT encourage market manipulation
 
 - ❌ NOT responsible for financial losses
@@ -924,9 +920,6 @@ Seller-Market/
 ├── LICENSE                           # MIT License
 └── SellerMarket/
     ├── simple_config_bot.py          # Telegram bot
-    ├── trading_service.py            # Windows service wrapper
-    ├── install_service.bat           # Install service (as Admin)
-    ├── uninstall_service.bat         # Uninstall service (as Admin)
     ├── config.ini                    # Trading accounts config
     ├── scheduler_config.json         # Scheduler configuration
     ├── cache_manager.py              # Caching system
