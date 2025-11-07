@@ -165,3 +165,22 @@ class JobScheduler:
             self.stop_event.set()
             self.thread.join(timeout=5)
             logger.info("📅 Scheduler stopped")
+    
+    def reload_config(self):
+        """
+        Force the scheduler to pick up configuration changes.
+        
+        This method clears the executed_today cache for jobs that haven't run yet today,
+        allowing the scheduler loop to immediately pick up new job configurations
+        without requiring a restart.
+        
+        The run loop already rereads the config file on each iteration (every 10 seconds),
+        so this method just ensures that execution tracking is up-to-date.
+        """
+        today = datetime.now().date().isoformat()
+        # Keep only jobs that were already executed today
+        self.executed_today = {
+            k: v for k, v in self.executed_today.items()
+            if k.endswith(today)
+        }
+        logger.info("📅 Scheduler configuration reloaded, execution cache refreshed")
