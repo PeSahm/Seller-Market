@@ -45,10 +45,10 @@ class EphoenixAPIClient:
         try:
             # Save to cache manager
             if self.cache:
-                self.cache.save_token(self.username, self.broker_code, token, expiry_hours=1)
+                self.cache.save_token(self.username, self.broker_code, token, expiry_hours=2)
             
             self.token = token
-            self.token_expiry = datetime.now() + timedelta(hours=1)
+            self.token_expiry = datetime.now() + timedelta(hours=2)
             logger.info(f"Token saved for {self.username}")
         except Exception as e:
             logger.error(f"Failed to save token: {e}")
@@ -60,7 +60,7 @@ class EphoenixAPIClient:
             token = self.cache.get_token(self.username, self.broker_code)
             if token:
                 self.token = token
-                self.token_expiry = datetime.now() + timedelta(hours=1)
+                self.token_expiry = datetime.now() + timedelta(hours=2)
                 return token
         
         logger.debug(f"No cached token found for {self.username}")
@@ -190,7 +190,7 @@ class EphoenixAPIClient:
             
             # Cache the buying power
             if self.cache:
-                self.cache.save_buying_power(self.username, self.broker_code, buying_power, expiry_minutes=1)
+                self.cache.save_buying_power(self.username, self.broker_code, buying_power)
             
             logger.info(f"Buying power for {self.username}: {buying_power:,.0f} Rials")
             return buying_power
@@ -247,7 +247,7 @@ class EphoenixAPIClient:
             
             # Cache the market data
             if self.cache:
-                self.cache.save_market_data(isin, result, expiry_minutes=5)
+                self.cache.save_market_data(isin, result)
             
             logger.info(f"Instrument {isin} ({result['symbol']}): "
                        f"Price range [{result['min_price']}-{result['max_price']}], "
