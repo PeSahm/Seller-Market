@@ -113,7 +113,7 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
         logger.info("Step 1: Authenticating and caching token...")
         try:
             token = api_client.authenticate()
-            logger.info(f"✓ Token cached (expires in 1 hour)")
+            logger.info("✓ Token cached (expires in 2 hours)")
         except Exception as e:
             logger.error(f"❌ Authentication failed for {username}@{broker_code}: {e}")
             if broker_code == 'gs':
