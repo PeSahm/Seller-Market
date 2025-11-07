@@ -112,7 +112,6 @@ class EphoenixAPIClient:
                     "value": captcha_value
                 }
             }
-            
             response = requests.post(self.endpoints['login'], json=login_data, timeout=10)
             response.raise_for_status()
             

@@ -24,6 +24,7 @@ from broker_enum import BrokerCode
 from api_client import EphoenixAPIClient
 from order_tracker import OrderResultTracker, OrderResult
 from cache_manager import TradingCache
+from captcha_utils import decode_captcha
 
 # Configure logging - truncate log file on each run
 _log_file_path = 'trading_bot.log'
@@ -104,33 +105,6 @@ def send_telegram_notification(message: str):
             
     except Exception as e:
         logger.error(f"Error sending Telegram notification: {e}")
-
-
-def decode_captcha(im: str) -> str:
-    """
-    Decode captcha image using OCR service.
-    
-    Args:
-        im: Base64 encoded image
-        
-    Returns:
-        Decoded captcha text
-    """
-    url = 'http://localhost:8080/ocr/captcha-easy-base64'
-    headers = {
-        'accept': 'text/plain',
-        'Content-Type': 'application/json'
-    }
-    data = {"base64": im}
-    
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        result = response.text
-        logger.debug(f"Captcha decoded: {result}")
-        return "".join(result)
-    except requests.RequestException as e:
-        logger.error(f"Captcha decoding failed: {e}")
-        return ""
 
 
 def prepare_order_data(config_section: dict) -> Dict[str, Any]:
