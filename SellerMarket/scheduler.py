@@ -58,7 +58,12 @@ class JobScheduler:
             window_end = (job_datetime + timedelta(seconds=30)).time()
             
             # Check if current time is within window
-            in_window = window_start <= current_time <= window_end
+            if window_start <= window_end:
+                # Normal case: window doesn't cross midnight
+                in_window = window_start <= current_time <= window_end
+            else:
+                # Midnight crossing case: window spans midnight
+                in_window = current_time >= window_start or current_time <= window_end
             
             if not in_window:
                 return False
