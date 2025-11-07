@@ -36,3 +36,6 @@ jobs:
       run: |
         cd SellerMarket
         python -m pytest test_bot_features.py test_integration.py -v
+      env:
+        TELEGRAM_BOT_TOKEN: dummy_token_for_tests
+        TELEGRAM_USER_ID: "123456789"

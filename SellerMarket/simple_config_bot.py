@@ -49,8 +49,13 @@ SCHEDULER_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'scheduler_confi
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), 'order_results')
 LOG_FILE = os.path.join(os.path.dirname(__file__), 'trading_bot.log')
 
-if not BOT_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN not set")
+# Validate environment variables only when running the bot (not when importing for tests)
+def validate_environment():
+    """Validate required environment variables"""
+    if not BOT_TOKEN:
+        raise ValueError("TELEGRAM_BOT_TOKEN not set")
+    if not USER_ID:
+        raise ValueError("TELEGRAM_USER_ID not set")
 
 # Ensure environment variables are set for subprocesses
 # Locustfile expects TELEGRAM_BOT_TOKEN and USER_ID
@@ -1275,6 +1280,9 @@ def handle_unknown(message):
 
 def main():
     """Start the bot with unlimited auto-restart on errors"""
+    # Validate environment variables before starting
+    validate_environment()
+    
     logger.info("Starting Simple Trading Config Bot...")
     logger.info(f"Config file: {CONFIG_FILE}")
     if USER_ID:
