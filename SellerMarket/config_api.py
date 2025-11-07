@@ -271,7 +271,9 @@ def get_results(user_id):
 def add_result(user_id):
     """Add a new order result for a user"""
     result = request.json
-    result_entry = config_manager.add_order_result(user_id, result)
+    if not result:
+        return jsonify({'status': 'error', 'message': 'Invalid or empty payload'}), 400
+    config_manager.add_order_result(user_id, result)
     return jsonify({'status': 'success', 'id': len(config_manager.results) - 1})
 
 @app.route('/migrate/<user_id>', methods=['POST'])
