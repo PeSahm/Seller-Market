@@ -111,7 +111,9 @@ class JobScheduler:
                 logger.error(f"❌ Command '{executable}' not in allowed binaries for job '{job_name}'")
                 return
             
-            # Mark as executed
+            # Mark job as executed BEFORE running to prevent multiple attempts on the same day.
+            # This is intentional: scheduled jobs (cache warmup, trading) should only run once per day
+            # regardless of success/failure. Failures are logged but don't trigger retries.
             now = datetime.now()
             job_key = f"{job_name}_{now.date().isoformat()}"
             self.executed_today[job_key] = now
