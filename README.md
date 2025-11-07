@@ -189,7 +189,7 @@ locust -f locustfile_new.py --headless --users 10 --spawn-rate 10 --run-time 30s
 
 ### Via Telegram
 
-```
+```bash
 /cache    # Run cache warmup
 /trade    # Start trading
 /status   # Check status
@@ -263,7 +263,7 @@ python cache_warmup.py          # Manual warmup
 
 ## 📁 File Structure
 
-```
+```text
 Seller-Market/
 ├── .env                              # Bot credentials (git-ignored)
 ├── setup.bat                         # One-command setup
@@ -374,9 +374,7 @@ This trading bot provides:
 ## Overview
 
 ```cmd
-
-setup.batA **high-performance automated trading bot** for Iranian stock exchanges (ephoenix.ir platforms). Features intelligent caching, multi-broker support, and dynamic order calculation to eliminate daily manual configuration.
-
+setup.bat
 ```
 
 ### Key Features
@@ -398,34 +396,22 @@ This single script will:- 🚀 **Instant Execution** - Pre-cached data for zero-
 **That's it!** Your trading bot is ready.
 
 ```bash
-
-## 🎯 Key Features# Clone repository
-
+# Clone repository
 git clone https://github.com/MostafaEsmaeili/Seller-Market.git
 
-### 🤖 Telegram Bot Controlcd Seller-Market
-
-- Configure trading accounts remotely
-
-- Run cache warmup and trading manually with commands# Run complete setup (includes bot token, API server, Telegram bot, and cron jobs)
-
-- View system status and scheduled jobscomplete_setup.bat
-
-- Manage multiple broker accounts```
+# Run complete setup (includes bot token, API server, Telegram bot, and cron jobs)
+complete_setup.bat
+```
 
 - All from your phone!
 
 This script will:
 
-### ⏰ Automated Scheduler- ✅ Install all dependencies
-
-- Configurable cron-like scheduler- ✅ Configure Telegram bot token
-
-- Default: Cache @ 8:30 AM, Trade @ 8:44:30 AM- ✅ Start API server and Telegram bot
-
-- Edit schedule via Telegram bot or JSON config- ✅ Set up Windows scheduled tasks (8:30 AM cache warmup, 8:44 AM trading)
-
-- Enable/disable jobs on the fly- ✅ Test the complete system
+- ✅ Install all dependencies
+- ✅ Configure Telegram bot token
+- ✅ Start API server and Telegram bot
+- ✅ Set up Windows scheduled tasks (8:30 AM cache warmup, 8:44 AM trading)
+- ✅ Test the complete system
 
 
 
@@ -481,17 +467,18 @@ cp config.example.ini config.ini
 
 
 
-- **Windows** 10/11 or Server 2016+```bash
-
-- **Python** 3.8 or higher# Start services
-
-- **Telegram** account for bot controlmanage.bat start
-
+- **Windows** 10/11 or Server 2016+
+- **Python** 3.8 or higher
+- **Telegram** account for bot control
 - **Active broker account** on ephoenix.ir platform
 
-# Check system status
+```bash
+# Start services
+manage.bat start
 
-## 🎯 Telegram Bot Commandsmanage.bat status
+# Check system status
+manage.bat status
+```
 
 
 
@@ -509,8 +496,11 @@ cp config.example.ini config.ini
 
 | `/remove <name>` | Delete config | `/remove OldAccount` |# Stop all services
 
-| `/show` | Display current config | `/show` |manage.bat stop
+| `/show` | Display current config | `/show` |
 
+```bash
+# Stop all services
+manage.bat stop
 ```
 
 ### Config Updates
@@ -603,45 +593,46 @@ pip install locust requests
 
 
 
-### Scheduler Config (`scheduler_config.json`)## 🔧 Configuration
+### Scheduler Config (`scheduler_config.json`)
 
-
-
-```json### Example Config (`config.ini`)
-
+```json
 {
+  "enabled": true,
+  "jobs": [
+    {
+      "name": "cache_warmup",
+      "time": "08:30:00",
+      "command": "python cache_warmup.py",
+      "enabled": true
+    },
+    {
+      "name": "run_trading",
+      "time": "08:44:30",
+      "command": "locust -f locustfile_new.py --headless --users 10 --spawn-rate 10 --run-time 30s",
+      "enabled": true
+    }
+  ]
+}
+```
 
-  "enabled": true,```ini
+### Example Config (`config.ini`)
 
-  "jobs": [[Order_Account_Broker]
-
-    {username = YOUR_ACCOUNT_NUMBER
-
-      "name": "cache_warmup",password = YOUR_PASSWORD
-
-      "time": "08:30:00",captcha = https://identity-gs.ephoenix.ir/api/Captcha/GetCaptcha
-
-      "command": "python cache_warmup.py",login = https://identity-gs.ephoenix.ir/api/v2/accounts/login
-
-      "enabled": trueorder = https://api-gs.ephoenix.ir/api/v2/orders/NewOrder
-
-    },editorder = https://api-gs.ephoenix.ir/api/v2/orders/EditOrder
-
-    {validity = 1           # 1=Day, 2=GTC
-
-      "name": "run_trading",side = 1               # 1=Buy, 2=Sell
-
-      "time": "08:44:30",accounttype = 1
-
-      "command": "locust -f locustfile_new.py --headless --users 10 --spawn-rate 10 --run-time 30s",price = 5860
-
-      "enabled": truevolume = 170017
-
-    }isin = IRO1MHRN0001
-
-  ]serialnumber = 0       # 0=New order, >0=Edit order
-
-}```
+```ini
+[Order_Account_Broker]
+username = YOUR_ACCOUNT_NUMBER
+password = YOUR_PASSWORD
+captcha = https://identity-gs.ephoenix.ir/api/Captcha/GetCaptcha
+login = https://identity-gs.ephoenix.ir/api/v2/accounts/login
+order = https://api-gs.ephoenix.ir/api/v2/orders/NewOrder
+editorder = https://api-gs.ephoenix.ir/api/v2/orders/EditOrder
+validity = 1           # 1=Day, 2=GTC
+side = 1               # 1=Buy, 2=Sell
+accounttype = 1
+price = 5860
+volume = 170017
+isin = IRO1MHRN0001
+serialnumber = 0       # 0=New order, >0=Edit order
+```
 
 ```
 
@@ -653,61 +644,72 @@ Edit via Telegram bot or directly in JSON file.
 
 ## 🏃 Running the System
 
+### Option 1: Manual Operation (Recommended)
+
 ```bash
-
-### Option 1: Manual Operation (Recommended)# Pre-load cache before market opens (8:20 AM)
-
+# Pre-load cache before market opens (8:20 AM)
 python cache_warmup.py
+```
 
 ```cmd
+cd SellerMarket
+# Start Locust when market opens (8:30 AM)
+install_service.bat
+locust -f locustfile_new.py
+```
 
-cd SellerMarket# Start Locust when market opens (8:30 AM)
-
-install_service.batlocust -f locustfile_new.py
-
-```# Navigate to http://localhost:8089
-
+```bash
+# Navigate to http://localhost:8089
 ```
 
 The service will:
 
-- Run bot manually with auto-restart on errors### Headless Mode
-
+- Run bot manually with auto-restart on errors
 - Scheduler runs in background thread
+- Execute cache warmup and trading at scheduled times
 
-- Execute cache warmup and trading at scheduled times```bash
+### Headless Mode
 
-- Monitor via Telegram bot and console outputlocust -f locustfile_new.py --headless --users 10 --spawn-rate 2 --run-time 1m
-
+```bash
+# Monitor via Telegram bot and console output
+locust -f locustfile_new.py --headless --users 10 --spawn-rate 2 --run-time 1m
 ```
 
+**Manage service:**
 
-
-**Manage service:**### Cache Management
+### Cache Management
 
 ```cmd
+net start TradingBotService    # Start
+```
 
-net start TradingBotService    # Start```bash
-
-net stop TradingBotService     # Stop# View cache statistics
-
-sc query TradingBotService     # Statuspython cache_cli.py stats
-
+```bash
+net stop TradingBotService     # Stop
+# View cache statistics
+sc query TradingBotService     # Status
+python cache_cli.py stats
 ```
 
 # Clean expired entries
 
-### Option 2: Manual Modepython cache_cli.py clean
+### Option 2: Manual Mode
 
+```bash
+python cache_cli.py clean
+```
 
+**Start bot:**
 
-**Start bot:**# Clear all cache
+# Clear all cache
 
-```cmdpython cache_cli.py clear
+```cmd
+python cache_cli.py clear
+cd SellerMarket
+```
 
-cd SellerMarket```
-
+```bash
 python simple_config_bot.py
+```
 
 ```## 📊 Performance
 
@@ -863,23 +865,20 @@ Check Telegram for notifications.- 🔒 Review SECURITY.md for security concerns
 
 **Morning (before market):**
 
-```## 📜 License
-
+```bash
 Send to Telegram bot:
-
-/status          # Check systemThis code is released under the [MIT License](LICENSE). Feel free to use and modify this code for your own purposes, as long as you include the original license and attribution.
-
+/status          # Check system
 /cache           # Warm up cache
 ```
 
 **Market opens:**
-```
+```bash
 Send to Telegram bot:
 /trade           # Start trading
 ```
 
 **After trading:**
-```
+```bash
 Send to Telegram bot:
 /status          # Check results
 ```
@@ -916,7 +915,7 @@ python cache_warmup.py          # Manual warmup
 
 ## 📁 File Structure
 
-```
+```text
 Seller-Market/
 ├── .env                              # Bot credentials (git-ignored)
 ├── setup.bat                         # One-command setup
