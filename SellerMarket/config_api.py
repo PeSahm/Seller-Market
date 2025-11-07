@@ -25,6 +25,25 @@ class ConfigManager:
         self.load_results()
         logger.info("ConfigManager initialized")
 
+    def _mask_sensitive_value(self, key, value):
+        """Mask sensitive configuration values for logging"""
+        sensitive_keys = {
+            'password', 'passwd', 'pwd', 'token', 'api_key', 'apikey', 'secret', 
+            'secret_key', 'access_token', 'auth_token', 'bearer_token', 'session_key',
+            'private_key', 'encryption_key', 'db_password', 'database_password'
+        }
+        
+        # Check if key contains sensitive keywords (case-insensitive)
+        key_lower = key.lower()
+        if any(sensitive in key_lower for sensitive in sensitive_keys):
+            return '<redacted>'
+        
+        # For non-sensitive values, return as-is (but limit length for very long values)
+        if isinstance(value, str) and len(value) > 50:
+            return value[:47] + '...'
+        
+        return value
+
     def load_configs(self):
         """Load configurations from JSON file"""
         if os.path.exists(self.config_file):
@@ -105,7 +124,8 @@ class ConfigManager:
         self.configs[user_id][config_name][key] = value
         self.configs[user_id][config_name]['updated_at'] = datetime.now().isoformat()
         self.save_configs()
-        logger.info(f"Updated config {config_name} for user {user_id}: {key} = {value}")
+        masked_value = self._mask_sensitive_value(key, value)
+        logger.info(f"Updated config {config_name} for user {user_id}: {key} = {masked_value}")
 
     def set_active_config(self, user_id, config_name):
         """Set the active configuration for a user"""
