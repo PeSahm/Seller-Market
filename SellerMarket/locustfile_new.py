@@ -80,17 +80,17 @@ def send_telegram_notification(message: str):
     try:
         # Read bot token and user ID from environment (same as simple_config_bot.py)
         bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-        user_id = os.getenv('USER_ID')
+        telegram_user_id = os.getenv('TELEGRAM_USER_ID') or os.getenv('USER_ID')  # Fallback for backwards compatibility
         
-        if not bot_token or not user_id:
+        if not bot_token or not telegram_user_id:
             logger.warning("Telegram credentials not found. Skipping notification.")
-            logger.info("Set TELEGRAM_BOT_TOKEN and USER_ID environment variables to enable notifications.")
+            logger.info("Set TELEGRAM_BOT_TOKEN and TELEGRAM_USER_ID environment variables to enable notifications.")
             return
         
         # Send message via Telegram API
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         payload = {
-            'chat_id': user_id,
+            'chat_id': telegram_user_id,
             'text': message,
             'parse_mode': 'Markdown'
         }
