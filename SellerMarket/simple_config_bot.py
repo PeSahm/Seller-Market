@@ -106,7 +106,13 @@ if proxy_config:
 else:
     logger.info("No proxy configured - using direct connection")
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# Initialize bot - use dummy token if BOT_TOKEN not set (for tests)
+# Tests should not trigger bot initialization
+if BOT_TOKEN:
+    bot = telebot.TeleBot(BOT_TOKEN)
+else:
+    # For tests - use a properly formatted dummy token
+    bot = telebot.TeleBot("123456789:ABCdefGHIjklMNOpqrsTUVwxyz")
 
 # Initialize scheduler
 scheduler = JobScheduler(SCHEDULER_CONFIG_FILE)
