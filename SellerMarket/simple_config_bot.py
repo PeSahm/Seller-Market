@@ -233,7 +233,11 @@ def get_log_tail(lines: int = 50) -> str:
         return f"❌ Error reading log: {str(e)}"
 
 def get_locust_config():
-    """Load locust configuration from locust_config.json"""
+    """
+    Load Locust configuration from locust_config.json.
+    Note: The 'host' parameter is required by Locust CLI but ignored at runtime.
+    Actual broker URLs are dynamically constructed in broker_enum.py.
+    """
     locust_config_file = os.path.join(os.path.dirname(__file__), 'locust_config.json')
     try:
         with open(locust_config_file, 'r') as f:
