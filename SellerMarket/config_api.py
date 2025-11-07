@@ -285,7 +285,22 @@ def internal_error(error):
     return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
+    # Server configuration from environment variables (with secure defaults)
+    server_host = os.getenv('API_HOST', '127.0.0.1')  # Local-only by default
+    server_port = int(os.getenv('API_PORT', '5000'))
+    server_debug = os.getenv('API_DEBUG', 'false').lower() == 'true'  # Debug disabled by default
+    
     logger.info("Starting Remote Configuration API Server...")
+    logger.info(f"Server configuration: host={server_host}, port={server_port}, debug={server_debug}")
+    
+    if server_host != '127.0.0.1':
+        logger.warning(f"⚠️  WARNING: Server bound to {server_host} (not localhost)")
+        logger.warning("⚠️  Ensure this is intended for production deployment")
+    
+    if server_debug:
+        logger.warning("⚠️  WARNING: Debug mode enabled - do not use in production!")
+        logger.warning("⚠️  Interactive debugger will be available at /debug")
+    
     logger.info("Available endpoints:")
     logger.info("  GET  /health - Health check")
     logger.info("  GET  /config/<user_id> - Get user config")
@@ -296,4 +311,4 @@ if __name__ == '__main__':
     logger.info("  POST /results/<user_id> - Add order result")
     logger.info("  POST /migrate/<user_id> - Migrate config.ini")
 
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host=server_host, port=server_port, debug=server_debug)
