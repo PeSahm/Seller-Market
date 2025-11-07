@@ -5,9 +5,7 @@
 [![Locust](https://img.shields.io/badge/locust-2.0+-green.svg)](https://locust.io/)
 
 > Automated trading bot for Iranian stock exchanges (ephoenix.ir platforms) with Telegram control, intelligent caching, and automated scheduling.
-
 > ⚠️ **SECURITY ALERT**: This repository previously contained exposed credentials. See [SECURITY.md](SECURITY.md) for immediate actions required.
-
 > ⚠️ **LOCALHOST ONLY**: THIS BOT RUNS ON LOCALHOST ONLY — NEVER EXPOSE config_api.py OR THE FLASK SERVICE TO THE INTERNET. The API server is intentionally bound to 127.0.0.1 for security. See [SECURITY.md](SECURITY.md) for deployment guidelines.
 
 ## 🚀 Quick Start
