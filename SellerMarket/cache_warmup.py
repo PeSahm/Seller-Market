@@ -52,7 +52,7 @@ def decode_captcha(im: str) -> str:
         Decoded captcha text
     """
     import requests
-    url = 'http://localhost:8080/ocr/by-base64'
+    url = 'http://localhost:8080/ocr/captcha-easy-base64'
     headers = {
         'accept': 'text/plain',
         'Content-Type': 'application/json'
