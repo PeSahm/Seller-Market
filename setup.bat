@@ -39,7 +39,7 @@ echo.
 cd SellerMarket
 
 REM Install required packages
-pip install locust requests pyTelegramBotAPI python-dotenv pywin32
+pip install -r requirements.txt
 
 if %errorLevel% neq 0 (
     echo.
