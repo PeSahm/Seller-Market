@@ -427,7 +427,7 @@ This script will:
 
 
 
-### 🔧 Windows Service### Option 2: Manual Setup
+### 🔧 Manual Operation### Option 2: Manual Setup
 
 - Runs bot and scheduler as Windows service
 
@@ -653,7 +653,7 @@ Edit via Telegram bot or directly in JSON file.
 
 ```bash
 
-### Option 1: Windows Service (Recommended)# Pre-load cache before market opens (8:20 AM)
+### Option 1: Manual Operation (Recommended)# Pre-load cache before market opens (8:20 AM)
 
 python cache_warmup.py
 
@@ -669,15 +669,15 @@ install_service.batlocust -f locustfile_new.py
 
 The service will:
 
-- Start bot automatically on Windows startup### Headless Mode
+- Run bot manually with auto-restart on errors### Headless Mode
 
-- Run scheduler in background
+- Scheduler runs in background thread
 
-- Execute cache warmup at 8:30 AM```bash
+- Execute cache warmup and trading at scheduled times```bash
 
-- Execute trading at 8:44:30 AMlocust -f locustfile_new.py --headless --users 10 --spawn-rate 2 --run-time 1m
+- Monitor via Telegram bot and console outputlocust -f locustfile_new.py --headless --users 10 --spawn-rate 2 --run-time 1m
 
-- Restart automatically if it crashes```
+```
 
 
 
@@ -841,11 +841,11 @@ python cache_cli.py clear tokens📖 **[Read Full Legal Notice](SECURITY.md)**
 
 - ❌ NOT liable for security breaches
 
-### Automated (Windows Service Running)
+### Automated (Manual Operation)
 
 Users are solely responsible for compliance with all applicable laws and regulations.
 
-**Nothing!** The service handles everything:
+**Keep console window open!** The bot handles everything automatically:
 
 - 8:30:00 AM - Cache warmup runs automatically## 📞 Support
 
@@ -895,25 +895,11 @@ type .env
 python -c "import os; from dotenv import load_dotenv; load_dotenv('.env'); print(os.getenv('TELEGRAM_BOT_TOKEN'))"
 
 # Restart bot
-net stop TradingBotService
-net start TradingBotService
+Press Ctrl+C in console, then run:
+python simple_config_bot.py
 ```
 
-### Service won't start
-```cmd
-# Check if installed
-sc query TradingBotService
 
-# View logs
-type SellerMarket\logs\trading_service.log
-
-# Reinstall
-cd SellerMarket
-uninstall_service.bat
-install_service.bat
-```
-
-### Cache not working
 ```cmd
 cd SellerMarket
 python cache_cli.py stats       # Check status
@@ -1066,7 +1052,7 @@ This trading bot provides:
 
 ✅ **One-command setup** - `setup.bat` does everything  
 ✅ **Telegram control** - Configure and execute from phone  
-✅ **Windows service** - Persistent, auto-restart background operation  
+✅ **Manual operation** - Run with auto-restart and background scheduling  
 ✅ **Automated scheduling** - Set and forget daily trading  
 ✅ **Intelligent caching** - 75-90% performance improvement  
 ✅ **Multi-broker/account** - Trade across multiple platforms  
