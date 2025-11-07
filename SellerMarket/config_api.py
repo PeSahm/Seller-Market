@@ -229,7 +229,10 @@ def get_config(user_id):
 @app.route('/config/<user_id>', methods=['POST'])
 def update_config(user_id):
     """Update configuration for a user"""
-    data = request.json
+    data = request.get_json(silent=True)
+    if not data or not isinstance(data, dict):
+        return jsonify({'error': 'Invalid or missing JSON'}), 400
+    
     config_name = data.get('config_name', 'default')
 
     for key, value in data.items():
@@ -241,7 +244,10 @@ def update_config(user_id):
 @app.route('/config/<user_id>/<config_name>', methods=['POST'])
 def update_specific_config(user_id, config_name):
     """Update a specific named configuration"""
-    data = request.json
+    data = request.get_json(silent=True)
+    if not data or not isinstance(data, dict):
+        return jsonify({'error': 'Invalid or missing JSON'}), 400
+    
     for key, value in data.items():
         config_manager.update_config(user_id, config_name, key, value)
     return jsonify({'status': 'success'})
@@ -283,9 +289,9 @@ def get_results(user_id):
 @app.route('/results/<user_id>', methods=['POST'])
 def add_result(user_id):
     """Add a new order result for a user"""
-    result = request.json
-    if not result:
-        return jsonify({'status': 'error', 'message': 'Invalid or empty payload'}), 400
+    result = request.get_json(silent=True)
+    if not result or not isinstance(result, dict):
+        return jsonify({'status': 'error', 'message': 'Invalid or missing JSON'}), 400
     config_manager.add_order_result(user_id, result)
     return jsonify({'status': 'success', 'id': len(config_manager.results) - 1})
 
