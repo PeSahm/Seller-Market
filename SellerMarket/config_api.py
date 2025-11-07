@@ -4,7 +4,7 @@ Remote Configuration API Server
 Flask-based REST API for managing trading bot configurations and order results
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, abort
 import json
 import os
 from datetime import datetime
@@ -263,7 +263,20 @@ def list_configs(user_id):
 @app.route('/results/<user_id>', methods=['GET'])
 def get_results(user_id):
     """Get order results for a user"""
-    limit = int(request.args.get('limit', 10))
+    limit_str = request.args.get('limit', '10')
+    try:
+        limit = int(limit_str)
+    except (ValueError, TypeError):
+        abort(400, description="Invalid limit parameter: must be a valid integer")
+    
+    if limit <= 0:
+        abort(400, description="Invalid limit parameter: must be a positive integer")
+    
+    # Enforce reasonable maximum to prevent excessive resource usage
+    max_limit = 1000
+    if limit > max_limit:
+        abort(400, description=f"Invalid limit parameter: maximum allowed is {max_limit}")
+    
     results = config_manager.get_order_results(user_id, limit)
     return jsonify(results)
 
