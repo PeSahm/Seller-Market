@@ -176,14 +176,14 @@ python simple_config_bot.py
 ## Option 2: Manual Mode
 
 ```cmd
-# Pre-load cache before market opens
+REM Pre-load cache before market opens
 python cache_warmup.py
 
-# Start Locust when market opens
+REM Start Locust when market opens
 locust -f locustfile_new.py
-# Open http://localhost:8089
+REM Open http://localhost:8089
 
-# Or headless mode
+REM Or headless mode
 locust -f locustfile_new.py --headless --users 10 --spawn-rate 10 --run-time 30s
 ```
 
@@ -211,13 +211,13 @@ locust -f locustfile_new.py --headless --users 10 --spawn-rate 10 --run-time 30s
 ### Cache Management
 
 ```cmd
-# View cache statistics
+REM View cache statistics
 python cache_cli.py stats
 
-# Clean expired entries
+REM Clean expired entries
 python cache_cli.py clean
 
-# Clear all cache
+REM Clear all cache
 python cache_cli.py clear
 ```
 
@@ -239,19 +239,24 @@ python cache_cli.py clear
 
 ### Bot doesn't respond
 ```cmd
-# Check .env file
+REM Check .env file
 type .env
 
-# Restart bot
+REM Restart bot
 Press Ctrl+C in the console
 python simple_config_bot.py
 ```
 
 ### Cache not working
 ```cmd
-python cache_cli.py stats       # Check status
-python cache_cli.py clear       # Clear and retry
-python cache_warmup.py          # Manual warmup
+REM Check status
+python cache_cli.py stats
+
+REM Clear and retry
+python cache_cli.py clear
+
+REM Manual warmup
+python cache_warmup.py
 ```
 
 ### Orders failing
