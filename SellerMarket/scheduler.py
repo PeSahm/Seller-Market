@@ -198,9 +198,10 @@ class JobScheduler:
         """
         Force the scheduler to pick up configuration changes.
         
-        This method clears the executed_today cache for jobs that haven't run yet today,
-        allowing the scheduler loop to immediately pick up new job configurations
-        without requiring a restart.
+        This method trims the executed_today cache to retain only today's execution records,
+        removing entries from previous days. This allows the scheduler loop—which already
+        rereads the config each iteration (every 10 seconds)—to immediately reflect config
+        changes while keeping execution tracking accurate for the current day.
         
         The run loop already rereads the config file on each iteration (every 10 seconds),
         so this method just ensures that execution tracking is up-to-date.
