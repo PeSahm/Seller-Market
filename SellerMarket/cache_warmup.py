@@ -61,8 +61,11 @@ def decode_captcha(im: str) -> str:
     
     try:
         response = requests.post(url, headers=headers, json=data)
-        result = response.text
-        return "".join(result)
+        result = response.text.strip()
+        # Remove quotes if the response includes them
+        if result.startswith('"') and result.endswith('"'):
+            result = result[1:-1]
+        return result
     except requests.RequestException as e:
         logger.error(f"Captcha decoding failed: {e}")
         return ""
