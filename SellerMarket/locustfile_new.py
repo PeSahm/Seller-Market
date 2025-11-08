@@ -233,7 +233,8 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
         api_client=api_client
     )
 
-
+# Market open timing threshold (parsed once at module level)
+MARKET_OPEN_THRESHOLD = datetime.strptime('08:44:58.500', '%H:%M:%S.%f').time()
 class TradingUser(HttpUser):
     """Base Locust user for trading operations."""
     
@@ -264,10 +265,9 @@ class TradingUser(HttpUser):
         # Fast timing check: skip orders before market open timing window
         # Broker API has 300ms penalty per ISIN per person during high demand
         now = datetime.now().time()
-        market_open_threshold = datetime.strptime('08:44:58.500', '%H:%M:%S.%f').time()
-        if now < market_open_threshold:
+        if now < MARKET_OPEN_THRESHOLD:
             return  # Skip order, mark task as completed
-        
+
         # Get logger with file handler for this task
         task_logger = logging.getLogger(__name__)
         
