@@ -157,8 +157,8 @@ class JobScheduler:
                     if k.endswith(today)
                 }
                 
-                # Sleep for 10 seconds before next check
-                time.sleep(10)
+                # Sleep for 1 second before next check
+                time.sleep(1)
                 
             except Exception as e:
                 logger.error(f"Scheduler error: {e}")
