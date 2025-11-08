@@ -53,28 +53,17 @@ class JobScheduler:
             now = datetime.now()
             current_time = now.time()
             
-            # Create a time window (30 seconds before to 30 seconds after)
-            job_datetime = datetime.combine(now.date(), job_time)
-            window_start = (job_datetime - timedelta(seconds=30)).time()
-            window_end = (job_datetime + timedelta(seconds=30)).time()
-            
-            # Check if current time is within window
-            if window_start <= window_end:
-                # Normal case: window doesn't cross midnight
-                in_window = window_start <= current_time <= window_end
-            else:
-                # Midnight crossing case: window spans midnight
-                in_window = current_time >= window_start or current_time <= window_end
-            
-            if not in_window:
-                return False
-            
             # Check if already executed today
             job_key = f"{job['name']}_{now.date().isoformat()}"
             if job_key in self.executed_today:
                 return False
             
-            return True
+            # Check if current time is at or after the scheduled time
+            # This ensures jobs run at the exact scheduled time or very close to it
+            if current_time >= job_time:
+                return True
+            
+            return False
             
         except Exception as e:
             logger.error(f"Error checking job schedule: {e}")
@@ -168,8 +157,8 @@ class JobScheduler:
                     if k.endswith(today)
                 }
                 
-                # Sleep for 10 seconds before next check
-                time.sleep(10)
+                # Sleep for 1 second before next check
+                time.sleep(1)
                 
             except Exception as e:
                 logger.error(f"Scheduler error: {e}")
