@@ -136,72 +136,96 @@ def save_config(config):
         config.write(f)
     logger.info("Configuration saved")
 
-def get_latest_result_file() -> str:
-    """Get the most recent order result file"""
+def get_all_result_files() -> list:
+    """Get all order result files sorted by modification time (newest first)"""
     try:
         if not os.path.exists(RESULTS_DIR):
-            return None
+            return []
         
         files = [f for f in Path(RESULTS_DIR).glob('*.json')]
         if not files:
-            return None
+            return []
         
         # Sort by modification time, most recent first
-        latest = max(files, key=lambda f: f.stat().st_mtime)
-        return str(latest)
+        sorted_files = sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)
+        return [str(f) for f in sorted_files]
     except Exception as e:
-        logger.error(f"Error finding latest result: {e}")
-        return None
+        logger.error(f"Error finding result files: {e}")
+        return []
 
-def format_order_results(result_file: str) -> str:
-    """Format order results for Telegram display"""
-    try:
-        with open(result_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
-        username = data.get('username', 'Unknown')
-        broker = data.get('broker_code', 'Unknown')
-        timestamp = data.get('timestamp', '')
-        orders = data.get('orders', [])
-        
-        if not orders:
-            return f"📊 *Trading Results* [{username}@{broker}]\n\n⚠️ No orders found"
-        
-        # Calculate summary
-        total_volume = sum(o.get('volume', 0) for o in orders)
-        total_executed = sum(o.get('executed_volume', 0) for o in orders)
-        total_amount = sum(o.get('net_amount', 0) for o in orders)
-        
-        # Format message
-        msg = f"📊 *Trading Results*\n\n"
-        msg += f"👤 Account: `{username}@{broker}`\n"
-        msg += f"🕐 Time: {datetime.fromisoformat(timestamp).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        msg += f"📈 *Summary:*\n"
-        msg += f"  Orders: {len(orders)}\n"
-        msg += f"  Volume: {total_volume:,} shares\n"
-        msg += f"  Executed: {total_executed:,} ({total_executed/total_volume*100:.1f}%)\n" if total_volume > 0 else "  Executed: 0\n"
-        msg += f"  Amount: {total_amount:,.0f} Rials\n\n"
-        
-        # Show first 5 orders
-        msg += f"📋 *Orders:* (showing first 5)\n"
-        for i, order in enumerate(orders[:5], 1):
-            side = "BUY" if order.get('side') == 1 else "SELL"
-            symbol = order.get('symbol', 'N/A')
-            volume = order.get('volume', 0)
-            price = order.get('price', 0)
-            state = order.get('state_desc', 'Unknown')
+def format_complete_order_results(result_files: list, max_files: int = 3) -> str:
+    """Format complete order results for all recent files"""
+    if not result_files:
+        return "📊 *No Trading Results Found*"
+    
+    all_messages = []
+    
+    # Process up to max_files most recent files
+    for i, result_file in enumerate(result_files[:max_files], 1):
+        try:
+            with open(result_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
             
-            msg += f"{i}. {side} {volume:,} × {symbol} @ {price:,}\n"
-            msg += f"   Status: {state}\n"
-        
-        if len(orders) > 5:
-            msg += f"\n... and {len(orders) - 5} more orders\n"
-        
-        return msg
-        
-    except Exception as e:
-        logger.error(f"Error formatting results: {e}")
-        return f"❌ Error reading results: {str(e)}"
+            username = data.get('username', 'Unknown')
+            broker = data.get('broker_code', 'Unknown')
+            timestamp = data.get('timestamp', '')
+            orders = data.get('orders', [])
+            
+            file_path = Path(result_file)
+            file_time = datetime.fromtimestamp(file_path.stat().st_mtime)
+            
+            # File header
+            msg = f"📊 *Results #{i}* - `{file_path.name}`\n"
+            msg += f"👤 Account: `{username}@{broker}`\n"
+            msg += f"🕐 File Time: {file_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            msg += f"🕑 Order Time: {datetime.fromisoformat(timestamp).strftime('%H:%M:%S') if timestamp else 'N/A'}\n\n"
+            
+            if not orders:
+                msg += "⚠️ No orders in this file\n\n"
+                all_messages.append(msg)
+                continue
+            
+            # Calculate summary
+            total_volume = sum(o.get('volume', 0) for o in orders)
+            total_executed = sum(o.get('executed_volume', 0) for o in orders)
+            total_amount = sum(o.get('net_amount', 0) for o in orders)
+            
+            msg += f"📈 *Summary:*\n"
+            msg += f"  Orders: {len(orders)}\n"
+            msg += f"  Volume: {total_volume:,} shares\n"
+            msg += f"  Executed: {total_executed:,} ({total_executed/total_volume*100:.1f}%)\n" if total_volume > 0 else "  Executed: 0\n"
+            msg += f"  Amount: {total_amount:,.0f} Rials\n\n"
+            
+            # Show all orders with complete details
+            msg += f"📋 *Order Details:*\n"
+            for j, order in enumerate(orders, 1):
+                symbol = order.get('symbol', 'N/A')
+                tracking_number = order.get('tracking_number', 'N/A')
+                state_desc = order.get('state_desc', 'Unknown')
+                created_shamsi = order.get('created_shamsi', 'N/A')
+                side = "BUY" if order.get('side') == 1 else "SELL"
+                volume = order.get('volume', 0)
+                price = order.get('price', 0)
+                executed = order.get('executed_volume', 0)
+                
+                msg += f"{j}. *{symbol}* ({side})\n"
+                msg += f"   📊 Tracking: `{tracking_number}`\n"
+                msg += f"   📅 Created: {created_shamsi}\n"
+                msg += f"   📈 Volume: {volume:,} | Price: {price:,}\n"
+                msg += f"   ✅ Executed: {executed:,}/{volume:,}\n"
+                msg += f"   📋 Status: {state_desc}\n\n"
+            
+            all_messages.append(msg)
+            
+        except Exception as e:
+            logger.error(f"Error formatting file {result_file}: {e}")
+            all_messages.append(f"❌ Error reading file: {Path(result_file).name}\n\n")
+    
+    # Add summary if multiple files
+    if len(result_files) > max_files:
+        all_messages.append(f"📁 *{len(result_files) - max_files} more result files available*\n\n")
+    
+    return "".join(all_messages)
 
 def get_log_tail(lines: int = 50) -> str:
     """Get last N lines from trading_bot.log"""
@@ -1119,9 +1143,9 @@ def show_results(message):
         return
     
     try:
-        latest_file = get_latest_result_file()
+        result_files = get_all_result_files()
         
-        if not latest_file:
+        if not result_files:
             # Check if directory exists
             if not os.path.exists(RESULTS_DIR):
                 bot.reply_to(message, 
@@ -1147,17 +1171,43 @@ def show_results(message):
                 )
             return
         
-        # Format and send results
-        result_msg = format_order_results(latest_file)
-        bot.reply_to(message, result_msg, parse_mode='Markdown')
+        # Format and send complete results for all recent files
+        result_msg = format_complete_order_results(result_files, max_files=3)
         
-        # Show file info
-        file_path = Path(latest_file)
-        file_time = datetime.fromtimestamp(file_path.stat().st_mtime)
+        # Send in chunks if message is too long (Telegram limit is 4096 chars)
+        if len(result_msg) <= 4000:
+            bot.reply_to(message, result_msg, parse_mode='Markdown')
+        else:
+            # Split into chunks
+            chunks = []
+            current_chunk = ""
+            
+            for line in result_msg.split('\n'):
+                if len(current_chunk + line + '\n') > 3800:
+                    chunks.append(current_chunk)
+                    current_chunk = line + '\n'
+                else:
+                    current_chunk += line + '\n'
+            
+            if current_chunk:
+                chunks.append(current_chunk)
+            
+            # Send chunks
+            for i, chunk in enumerate(chunks, 1):
+                if i == 1:
+                    bot.reply_to(message, f"📊 *Trading Results* (Part {i}/{len(chunks)})\n\n{chunk}", parse_mode='Markdown')
+                else:
+                    bot.send_message(message.chat.id, f"📊 *Results Continued* (Part {i}/{len(chunks)})\n\n{chunk}", parse_mode='Markdown')
+        
+        # Show summary info
+        total_files = len(result_files)
         bot.send_message(
             message.chat.id,
-            f"📁 File: `{file_path.name}`\n"
-            f"🕐 Modified: {file_time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"📁 *Summary:*\n"
+            f"Total result files: {total_files}\n"
+            f"Showing latest: {min(3, total_files)}\n\n"
+            f"� Directory: `{RESULTS_DIR}`\n"
+            f"📋 Use /logs to see execution details",
             parse_mode='Markdown'
         )
         

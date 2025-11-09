@@ -418,7 +418,7 @@ def on_test_stop(environment, **kwargs):
     logger.info("Order results saved. Check 'order_results' directory for details.")
     logger.info("="*80 + "\n")
     
-    # Send Telegram notification
+    # Send Telegram notification with detailed order information
     try:
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
@@ -436,7 +436,7 @@ def on_test_stop(environment, **kwargs):
                 f"Use /logs to check details"
             )
         else:
-            # Orders found
+            # Orders found - include detailed information
             exec_percent = (total_executed / total_orders * 100) if total_orders > 0 else 0
             
             notification = (
@@ -446,8 +446,48 @@ def on_test_stop(environment, **kwargs):
                 f"⚡ Executed: {total_executed}/{total_orders} ({exec_percent:.1f}%)\n"
                 f"📈 Total Volume: {total_volume:,} shares\n"
                 f"👥 Accounts: {accounts_processed}\n\n"
-                f"Use /results to view details"
             )
+            
+            # Add details for each account
+            account_details = []
+            for section_name in config.sections():
+                section = dict(config[section_name])
+                username = section['username']
+                broker_code = section['broker']
+                
+                try:
+                    # Get the result file for this account
+                    result_files = [f for f in Path('order_results').glob(f'*{username}_{broker_code}_*.json')]
+                    if result_files:
+                        latest_file = max(result_files, key=lambda f: f.stat().st_mtime)
+                        with open(latest_file, 'r') as f:
+                            data = json.load(f)
+                            orders = data.get('orders', [])
+                            
+                            if orders:
+                                # Get key order details
+                                order_summaries = []
+                                for order in orders[:3]:  # Show up to 3 orders per account
+                                    symbol = order.get('symbol', 'N/A')
+                                    tracking_number = order.get('tracking_number', 'N/A')
+                                    state_desc = order.get('state_desc', 'Unknown')
+                                    volume = order.get('volume', 0)
+                                    executed = order.get('executed_volume', 0)
+                                    
+                                    order_summaries.append(
+                                        f"• {symbol}: {tracking_number} ({executed}/{volume}) - {state_desc}"
+                                    )
+                                
+                                account_details.append(
+                                    f"👤 *{username}@{broker_code}:*\n" + "\n".join(order_summaries)
+                                )
+                except Exception as e:
+                    logger.error(f"Error getting details for {username}@{broker_code}: {e}")
+            
+            if account_details:
+                notification += "*Order Details:*\n\n" + "\n\n".join(account_details) + "\n\n"
+            
+            notification += "Use /results to view complete details"
         
         send_telegram_notification(notification)
         
