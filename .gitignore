@@ -376,3 +376,6 @@ MigrationBackup/
 
 # GitHub Copilot workspace instructions
 .github/copilot/
+
+# Order Results - Trading Bot Generated Files
+order_results/
