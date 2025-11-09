@@ -29,8 +29,7 @@ class TestBotHelperFunctions(unittest.TestCase):
 
     def test_get_latest_result_file_empty_directory(self):
         """Test get_latest_result_file with empty directory."""
-        # Empty directory should return None
-        from simple_config_bot import get_latest_result_file
+        from simple_config_bot import get_all_result_files
         
         # Temporarily change RESULTS_DIR for testing
         import simple_config_bot
@@ -38,8 +37,8 @@ class TestBotHelperFunctions(unittest.TestCase):
         simple_config_bot.RESULTS_DIR = str(self.results_dir)
         
         try:
-            result = get_latest_result_file()
-            self.assertIsNone(result)
+            result = get_all_result_files()
+            self.assertEqual(result, [])
         finally:
             simple_config_bot.RESULTS_DIR = original_dir
 
@@ -59,15 +58,16 @@ class TestBotHelperFunctions(unittest.TestCase):
         os.utime(file1, (time.time() - 86400, time.time() - 86400))
         os.utime(file3, (time.time() - 172800, time.time() - 172800))
         
-        from simple_config_bot import get_latest_result_file
+        from simple_config_bot import get_all_result_files
         import simple_config_bot
         original_dir = simple_config_bot.RESULTS_DIR
         simple_config_bot.RESULTS_DIR = str(self.results_dir)
         
         try:
-            result = get_latest_result_file()
-            self.assertIsNotNone(result)
-            self.assertTrue(result.endswith("results_2025-11-06_08-45-00.json"))
+            result = get_all_result_files()
+            self.assertTrue(len(result) > 0)
+            # Should be sorted newest first, so first one should be the newest
+            self.assertTrue(result[0].endswith("results_2025-11-06_08-45-00.json"))
         finally:
             simple_config_bot.RESULTS_DIR = original_dir
 
@@ -107,14 +107,14 @@ class TestBotHelperFunctions(unittest.TestCase):
         result_file = self.results_dir / "test_results.json"
         result_file.write_text(json.dumps(test_data, ensure_ascii=False), encoding='utf-8')
         
-        from simple_config_bot import format_order_results
+        from simple_config_bot import format_complete_order_results
         
-        result = format_order_results(str(result_file))
+        result = format_complete_order_results([str(result_file)])
         
         # Verify output format
-        self.assertIn("Trading Results", result)
+        self.assertIn("Results #1", result)
         self.assertIn("test_user@gs", result)
-        self.assertIn("Orders: 2", result)  # Changed from "Total Orders: 2"
+        self.assertIn("Orders: 2", result)
         self.assertIn("Volume: 150 shares", result)
         self.assertIn("فولاد", result)
         self.assertIn("ذوب", result)
@@ -133,12 +133,12 @@ class TestBotHelperFunctions(unittest.TestCase):
         result_file = self.results_dir / "test_results.json"
         result_file.write_text(json.dumps(test_data, ensure_ascii=False), encoding='utf-8')
         
-        from simple_config_bot import format_order_results
+        from simple_config_bot import format_complete_order_results
         
-        result = format_order_results(str(result_file))
+        result = format_complete_order_results([str(result_file)])
         
         # Check for "no orders found" message (case-insensitive)
-        self.assertIn("no orders found", result.lower())
+        self.assertIn("no orders in this file", result.lower())
 
     def test_get_log_tail_basic(self):
         """Test get_log_tail with basic log file."""
@@ -190,6 +190,182 @@ class TestBotHelperFunctions(unittest.TestCase):
             self.assertIn("no log file", result.lower())
         finally:
             simple_config_bot.LOG_FILE = original_log
+
+    def test_get_all_result_files_empty_directory(self):
+        """Test get_all_result_files with empty directory."""
+        from simple_config_bot import get_all_result_files
+        import simple_config_bot
+        original_dir = simple_config_bot.RESULTS_DIR
+        simple_config_bot.RESULTS_DIR = str(self.results_dir)
+        
+        try:
+            result = get_all_result_files()
+            self.assertEqual(result, [])
+        finally:
+            simple_config_bot.RESULTS_DIR = original_dir
+
+    def test_get_all_result_files_with_files(self):
+        """Test get_all_result_files returns files sorted by modification time."""
+        # Create test files with different timestamps
+        file1 = self.results_dir / "results_2025-11-05_08-45-00.json"
+        file2 = self.results_dir / "results_2025-11-06_08-45-00.json"
+        file3 = self.results_dir / "results_2025-11-04_08-45-00.json"
+        
+        for f in [file1, file2, file3]:
+            f.write_text('{"test": "data"}')
+            
+        # Make file2 the newest by modification time
+        import time
+        os.utime(file2, (time.time(), time.time()))
+        os.utime(file1, (time.time() - 86400, time.time() - 86400))
+        os.utime(file3, (time.time() - 172800, time.time() - 172800))
+        
+        from simple_config_bot import get_all_result_files
+        import simple_config_bot
+        original_dir = simple_config_bot.RESULTS_DIR
+        simple_config_bot.RESULTS_DIR = str(self.results_dir)
+        
+        try:
+            result = get_all_result_files()
+            self.assertEqual(len(result), 3)
+            # Should be sorted newest first
+            self.assertTrue(result[0].endswith("results_2025-11-06_08-45-00.json"))
+            self.assertTrue(result[1].endswith("results_2025-11-05_08-45-00.json"))
+            self.assertTrue(result[2].endswith("results_2025-11-04_08-45-00.json"))
+        finally:
+            simple_config_bot.RESULTS_DIR = original_dir
+
+    def test_format_complete_order_results_no_files(self):
+        """Test format_complete_order_results with no files."""
+        from simple_config_bot import format_complete_order_results
+        
+        result = format_complete_order_results([])
+        self.assertIn("No Trading Results Found", result)
+
+    def test_format_complete_order_results_with_data(self):
+        """Test format_complete_order_results with valid data."""
+        # Create test result files
+        test_data1 = {
+            "timestamp": "2025-11-06T08:45:00",
+            "username": "test_user1",
+            "broker_code": "gs",
+            "orders": [
+                {
+                    "isin": "IRO1MHRN0001",
+                    "symbol": "فولاد",
+                    "side": 1,
+                    "price": 6000,
+                    "volume": 100,
+                    "state": 1,
+                    "state_desc": "Registered",
+                    "executed_volume": 100,
+                    "is_done": True,
+                    "tracking_number": "123456",
+                    "created_shamsi": "1404/08/15"
+                }
+            ]
+        }
+        
+        test_data2 = {
+            "timestamp": "2025-11-06T08:46:00",
+            "username": "test_user2",
+            "broker_code": "bbi",
+            "orders": [
+                {
+                    "isin": "IRO1ABCD0002",
+                    "symbol": "ذوب",
+                    "side": 2,
+                    "price": 5000,
+                    "volume": 50,
+                    "state": 1,
+                    "state_desc": "Registered",
+                    "executed_volume": 0,
+                    "is_done": False,
+                    "tracking_number": "789012",
+                    "created_shamsi": "1404/08/15"
+                }
+            ]
+        }
+        
+        file1 = self.results_dir / "results_test_user1_gs_20251106_084500.json"
+        file2 = self.results_dir / "results_test_user2_bbi_20251106_084600.json"
+        
+        file1.write_text(json.dumps(test_data1, ensure_ascii=False), encoding='utf-8')
+        file2.write_text(json.dumps(test_data2, ensure_ascii=False), encoding='utf-8')
+        
+        from simple_config_bot import format_complete_order_results
+        
+        result_files = [str(file1), str(file2)]
+        result = format_complete_order_results(result_files, max_files=2)
+        
+        # Verify output format
+        self.assertIn("Results #1", result)
+        self.assertIn("Results #2", result)
+        self.assertIn("test_user1@gs", result)
+        self.assertIn("test_user2@bbi", result)
+        self.assertIn("فولاد", result)
+        self.assertIn("ذوب", result)
+        self.assertIn("123456", result)
+        self.assertIn("789012", result)
+        self.assertIn("BUY", result)
+        self.assertIn("SELL", result)
+
+    def test_format_complete_order_results_max_files_limit(self):
+        """Test format_complete_order_results respects max_files limit."""
+        # Create 5 test files
+        result_files = []
+        for i in range(5):
+            test_data = {
+                "timestamp": f"2025-11-06T08:4{i}:00",
+                "username": f"user{i}",
+                "broker_code": "gs",
+                "orders": [{"symbol": f"stock{i}", "volume": 100}]
+            }
+            file_path = self.results_dir / f"results_user{i}_gs_20251106_084{i}00.json"
+            file_path.write_text(json.dumps(test_data, ensure_ascii=False), encoding='utf-8')
+            result_files.append(str(file_path))
+        
+        from simple_config_bot import format_complete_order_results
+        
+        result = format_complete_order_results(result_files, max_files=3)
+        
+        # Should only show first 3 files
+        self.assertIn("Results #1", result)
+        self.assertIn("Results #2", result)
+        self.assertIn("Results #3", result)
+        self.assertNotIn("Results #4", result)
+        self.assertIn("2 more result files available", result)
+
+    def test_format_complete_order_results_empty_orders(self):
+        """Test format_complete_order_results with empty orders."""
+        test_data = {
+            "timestamp": "2025-11-06T08:45:00",
+            "username": "test_user",
+            "broker_code": "gs",
+            "orders": []
+        }
+        
+        file_path = self.results_dir / "results_test_user_gs_20251106_084500.json"
+        file_path.write_text(json.dumps(test_data, ensure_ascii=False), encoding='utf-8')
+        
+        from simple_config_bot import format_complete_order_results
+        
+        result = format_complete_order_results([str(file_path)])
+        
+        self.assertIn("No orders in this file", result)
+
+    def test_format_complete_order_results_error_handling(self):
+        """Test format_complete_order_results handles file errors gracefully."""
+        # Create a file with invalid JSON
+        file_path = self.results_dir / "invalid.json"
+        file_path.write_text("invalid json content")
+        
+        from simple_config_bot import format_complete_order_results
+        
+        result = format_complete_order_results([str(file_path)])
+        
+        self.assertIn("Error reading file", result)
+        self.assertIn("invalid.json", result)
 
 
 class TestTelegramNotifications(unittest.TestCase):
@@ -243,6 +419,46 @@ class TestTelegramNotifications(unittest.TestCase):
         self.assertIn("No Orders Found", notification)
         self.assertIn("Market is closed", notification)
         self.assertIn("/logs", notification)
+
+    def test_notification_message_format_with_per_account_details(self):
+        """Test notification message format includes per-account order details."""
+        # Test the enhanced notification format with account details
+        timestamp = "2025-11-06 08:45:00"
+        total_orders = 3
+        total_executed = 2
+        total_volume = 150
+        accounts_processed = 2
+        
+        exec_percent = (total_executed / total_orders * 100) if total_orders > 0 else 0
+        
+        # Simulate account details
+        account_details = [
+            "👤 *user1@gs:*\n• فولاد: 123456 (100/100) - Executed\n• ذوب: 789012 (0/50) - Registered",
+            "👤 *user2@bbi:*\n• مس: 345678 (50/50) - Executed"
+        ]
+        
+        notification = (
+            f"📊 *Trading Completed*\n"
+            f"⏰ {timestamp}\n\n"
+            f"✅ Orders Placed: {total_orders}\n"
+            f"⚡ Executed: {total_executed}/{total_orders} ({exec_percent:.1f}%)\n"
+            f"📈 Total Volume: {total_volume:,} shares\n"
+            f"👥 Accounts: {accounts_processed}\n\n"
+            f"*Order Details:*\n\n" + "\n\n".join(account_details) + "\n\n"
+            f"Use /results to view complete details"
+        )
+        
+        # Verify format
+        self.assertIn("Trading Completed", notification)
+        self.assertIn("Orders Placed: 3", notification)
+        self.assertIn("66.7%", notification)
+        self.assertIn("Total Volume: 150", notification)
+        self.assertIn("user1@gs", notification)
+        self.assertIn("user2@bbi", notification)
+        self.assertIn("فولاد", notification)
+        self.assertIn("123456", notification)
+        self.assertIn("Executed", notification)
+        self.assertIn("Use /results", notification)
 
 
 class TestBotCommands(unittest.TestCase):
