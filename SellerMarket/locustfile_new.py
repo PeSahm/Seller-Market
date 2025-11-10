@@ -482,7 +482,7 @@ def on_test_stop(environment, **kwargs):
                                     f"👤 *{username}@{broker_code}:*\n" + "\n".join(order_summaries)
                                 )
                 except Exception as e:
-                    logger.error(f"Error getting details for {username}@{broker_code}: {e}")
+                    logger.exception(f"Error getting details for {username}@{broker_code}: {e}")
             
             if account_details:
                 notification += "*Order Details:*\n\n" + "\n\n".join(account_details) + "\n\n"
