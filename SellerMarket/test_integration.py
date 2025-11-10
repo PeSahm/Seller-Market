@@ -185,7 +185,7 @@ class TestIntegrationFlow(unittest.TestCase):
         print("1. Authenticating...")
         token = client.authenticate()
         self.assertEqual(token, 'test_jwt_token')
-        print(f"[OK] Authentication successful, token: {token[:20]}...")
+        print(f"✓ Authentication successful, token: {token[:20]}...")
 
         # Set token manually to avoid re-auth in subsequent calls
         client.token = 'test_jwt_token'
@@ -195,7 +195,7 @@ class TestIntegrationFlow(unittest.TestCase):
         print("2. Getting buying power...")
         buying_power = client.get_buying_power(use_cache=False)
         self.assertEqual(buying_power, 1000014598)
-        print(f"[OK] Buying power: {buying_power:,.0f} Rials")
+        print(f"✓ Buying power: {buying_power:,.0f} Rials")
 
         # 3. Get instrument information
         print("3. Getting instrument information...")
@@ -204,7 +204,7 @@ class TestIntegrationFlow(unittest.TestCase):
         self.assertEqual(instrument_info['max_price'], 6000.00)
         self.assertEqual(instrument_info['min_price'], 5700.00)
         self.assertEqual(instrument_info['max_volume'], 170017)
-        print(f"[OK] Instrument: {instrument_info['symbol']} ({self.isin})")
+        print(f"✓ Instrument: {instrument_info['symbol']} ({self.isin})")
         print(f"  Price range: {instrument_info['min_price']:.0f} - {instrument_info['max_price']:.0f}")
         print(f"  Max volume: {instrument_info['max_volume']:,}")
 
@@ -219,7 +219,7 @@ class TestIntegrationFlow(unittest.TestCase):
             price=price
         )
         self.assertEqual(volume, 170017)  # Should match the max allowed volume
-        print(f"[OK] Calculated volume: {volume:,} shares at {price:.0f} Rials")
+        print(f"✓ Calculated volume: {volume:,} shares at {price:.0f} Rials")
 
         # 5. Place order
         print("5. Placing order...")
@@ -237,7 +237,7 @@ class TestIntegrationFlow(unittest.TestCase):
         with patch.object(client, 'place_order', return_value=order_response.json()) as mock_place:
             result = client.place_order(order_data)
             self.assertEqual(result['trackingNumber'], 123456789)
-            print(f"[OK] Order placed successfully, tracking number: {result['trackingNumber']}")
+            print(f"✓ Order placed successfully, tracking number: {result['trackingNumber']}")
 
         print("=== Integration Test Flow Completed Successfully ===")
 
@@ -325,7 +325,7 @@ class TestIntegrationFlow(unittest.TestCase):
         )
 
         self.assertEqual(volume, 25000)
-        print(f"[OK] Sell order volume calculated: {volume:,} shares at {price:.0f} Rials")
+        print(f"✓ Sell order volume calculated: {volume:,} shares at {price:.0f} Rials")
 
     @patch('api_client.requests.get')
     def test_open_orders_tracking(self, mock_get):
@@ -377,14 +377,14 @@ class TestIntegrationFlow(unittest.TestCase):
         self.assertEqual(len(orders), 1)
         self.assertEqual(orders[0]['trackingNumber'], 123456789)
         self.assertEqual(orders[0]['isin'], self.isin)
-        print(f"[OK] Retrieved {len(orders)} open orders")
+        print(f"✓ Retrieved {len(orders)} open orders")
 
         # Test order result tracking
         tracker = OrderResultTracker(results_dir=self.results_dir)
         order_results = [orders[0]]  # Use the order data
 
         # This would normally save to file, but we're just testing the flow
-        print("[OK] Order tracking initialized")
+        print("✓ Order tracking initialized")
 
     def test_error_handling_integration(self):
         """Test error handling in integration scenarios."""
@@ -405,7 +405,7 @@ class TestIntegrationFlow(unittest.TestCase):
         )
         self.assertIsNone(client.username)  # Just check it was assigned
 
-        print("[OK] Error handling tests passed")
+        print("✓ Error handling tests passed")
 
     def test_cache_integration(self):
         """Test cache integration with real cache manager."""
@@ -430,7 +430,7 @@ class TestIntegrationFlow(unittest.TestCase):
         self.assertTrue(hasattr(client.cache, 'save_buying_power'))
         self.assertTrue(hasattr(client.cache, 'get_buying_power'))
 
-        print("[OK] Cache integration verified")
+        print("✓ Cache integration verified")
 
 
 class TestBrokerIntegration(unittest.TestCase):
@@ -457,7 +457,7 @@ class TestBrokerIntegration(unittest.TestCase):
                 self.assertIn(broker_code, endpoints['login'])
                 self.assertIn(broker_code, endpoints['order'])
 
-        print("[OK] Multi-broker endpoint validation passed")
+        print("✓ Multi-broker endpoint validation passed")
 
 
 if __name__ == '__main__':
