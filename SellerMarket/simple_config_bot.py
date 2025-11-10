@@ -154,78 +154,114 @@ def get_all_result_files() -> list:
         return []
 
 def format_complete_order_results(result_files: list, max_files: int = 3) -> str:
-    """Format complete order results for all recent files"""
+    """Format complete order results using latest day logic with minimum tracking numbers"""
     if not result_files:
         return "📊 *No Trading Results Found*"
     
+    # Find the latest date from all order result files
+    all_result_files = list(Path(RESULTS_DIR).glob('*.json'))
+    if all_result_files:
+        # Extract dates from filenames
+        file_dates = []
+        for file_path in all_result_files:
+            try:
+                parts = file_path.stem.split('_')
+                if len(parts) >= 3:
+                    date_str = parts[2]  # YYYYMMDD
+                    if len(date_str) == 8:
+                        file_date = datetime.strptime(date_str, '%Y%m%d').date()
+                        file_dates.append(file_date)
+            except (ValueError, IndexError):
+                continue
+        
+        latest_date = max(file_dates) if file_dates else datetime.now().date()
+    else:
+        latest_date = datetime.now().date()
+    
+    # Group files by account and filter to latest date
+    account_files = {}
+    for file_path in all_result_files:
+        try:
+            parts = file_path.stem.split('_')
+            if len(parts) >= 3:
+                username = parts[0]
+                broker_code = parts[1]
+                date_str = parts[2]
+                
+                if len(date_str) == 8:
+                    file_date = datetime.strptime(date_str, '%Y%m%d').date()
+                    if file_date == latest_date:
+                        account_key = f"{username}_{broker_code}"
+                        if account_key not in account_files:
+                            account_files[account_key] = []
+                        account_files[account_key].append(file_path)
+        except (ValueError, IndexError):
+            continue
+    
+    if not account_files:
+        return f"📊 *No Results for Latest Date*\n\nLatest date found: {latest_date}\nNo result files found for this date."
+    
     all_messages = []
     
-    # Process up to max_files most recent files
-    for i, result_file in enumerate(result_files[:max_files], 1):
+    # Process each account
+    for account_key, files in account_files.items():
+        username, broker_code = account_key.split('_', 1)
+        
         try:
-            with open(result_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            # Collect all orders from all files for this account
+            all_orders = []
+            for file_path in files:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        file_orders = data.get('orders', [])
+                        all_orders.extend(file_orders)
+                except Exception:
+                    logger.exception(f"Error reading file {file_path}")
             
-            username = data.get('username', 'Unknown')
-            broker = data.get('broker_code', 'Unknown')
-            timestamp = data.get('timestamp', '')
-            orders = data.get('orders', [])
-            
-            file_path = Path(result_file)
-            file_time = datetime.fromtimestamp(file_path.stat().st_mtime)
-            
-            # File header
-            msg = f"📊 *Results #{i}* - `{file_path.name}`\n"
-            msg += f"👤 Account: `{username}@{broker}`\n"
-            msg += f"🕐 File Time: {file_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            msg += f"🕑 Order Time: {datetime.fromisoformat(timestamp).strftime('%H:%M:%S') if timestamp else 'N/A'}\n\n"
-            
-            if not orders:
-                msg += "⚠️ No orders in this file\n\n"
-                all_messages.append(msg)
+            if not all_orders:
                 continue
             
-            # Calculate summary
-            total_volume = sum(o.get('volume', 0) for o in orders)
-            total_executed = sum(o.get('executed_volume', 0) for o in orders)
-            total_amount = sum(o.get('net_amount', 0) for o in orders)
-            
-            msg += f"📈 *Summary:*\n"
-            msg += f"  Orders: {len(orders)}\n"
-            msg += f"  Volume: {total_volume:,} shares\n"
-            msg += f"  Executed: {total_executed:,} ({total_executed/total_volume*100:.1f}%)\n" if total_volume > 0 else "  Executed: 0\n"
-            msg += f"  Amount: {total_amount:,.0f} Rials\n\n"
-            
-            # Show all orders with complete details
-            msg += f"📋 *Order Details:*\n"
-            for j, order in enumerate(orders, 1):
+            # Group orders by symbol and select the one with minimum tracking_number
+            symbol_orders = {}
+            for order in all_orders:
                 symbol = order.get('symbol', 'N/A')
-                tracking_number = order.get('tracking_number', 'N/A')
-                state_desc = order.get('state_desc', 'Unknown')
-                created_shamsi = order.get('created_shamsi', 'N/A')
-                side = "BUY" if order.get('side') == 1 else "SELL"
-                volume = order.get('volume', 0)
-                price = order.get('price', 0)
-                executed = order.get('executed_volume', 0)
+                tracking_number = order.get('tracking_number', 0)
                 
-                msg += f"{j}. *{symbol}* ({side})\n"
-                msg += f"   📊 Tracking: `{tracking_number}`\n"
-                msg += f"   📅 Created: {created_shamsi}\n"
-                msg += f"   📈 Volume: {volume:,} | Price: {price:,}\n"
-                msg += f"   ✅ Executed: {executed:,}/{volume:,}\n"
-                msg += f"   📋 Status: {state_desc}\n\n"
+                if symbol not in symbol_orders or tracking_number < symbol_orders[symbol]['tracking_number']:
+                    symbol_orders[symbol] = {
+                        'symbol': symbol,
+                        'tracking_number': tracking_number,
+                        'created_shamsi': order.get('created_shamsi', 'N/A'),
+                        'price': order.get('price', 0),
+                        'volume': order.get('volume', 0),
+                        'state_desc': order.get('state_desc', 'Unknown')
+                    }
             
+            # Format account results
+            msg = f"👤 *{username}@{broker_code}:*\n"
+            
+            # Show orders (up to 5 symbols per account)
+            order_summaries = []
+            for symbol_data in list(symbol_orders.values())[:5]:
+                order_summaries.append(
+                    f"• {symbol_data['symbol']}: #{symbol_data['tracking_number']} | {symbol_data['created_shamsi']} | {symbol_data['price']:,} | {symbol_data['volume']:,}"
+                )
+            
+            msg += "\n".join(order_summaries)
             all_messages.append(msg)
             
         except Exception as e:
-            logger.error(f"Error formatting file {result_file}: {e}")
-            all_messages.append(f"❌ Error reading file: {Path(result_file).name}\n\n")
+            logger.exception(f"Error processing account {account_key}")
+            all_messages.append(f"❌ Error processing {username}@{broker_code}")
     
-    # Add summary if multiple files
-    if len(result_files) > max_files:
-        all_messages.append(f"📁 *{len(result_files) - max_files} more result files available*\n\n")
+    if not all_messages:
+        return f"📊 *No Valid Results*\n\nProcessed {len(account_files)} accounts but found no valid orders for date {latest_date}."
     
-    return "".join(all_messages)
+    # Add header
+    result = f"📊 *Trading Results - {latest_date}*\n\n" + "\n\n".join(all_messages)
+    
+    return result
 
 def get_log_tail(lines: int = 50) -> str:
     """Get last N lines from trading_bot.log"""
