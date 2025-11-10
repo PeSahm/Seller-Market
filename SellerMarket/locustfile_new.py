@@ -481,7 +481,7 @@ def on_test_stop(environment, **kwargs):
                                 account_details.append(
                                     f"👤 *{username}@{broker_code}:*\n" + "\n".join(order_summaries)
                                 )
-                except Exception as e:
+                except Exception:
                     logger.exception(f"Error getting details for {username}@{broker_code}")
             
             if account_details:
@@ -543,9 +543,8 @@ def _create_user_classes():
             
             logger.info(f"✓ Configured trading user: {unique_class_name}")
             
-        except Exception as e:
-            logger.error(f"✗ Failed to configure {section_name}: {e}")
-            logger.exception(e)
+        except Exception:
+            logger.exception(f"✗ Failed to configure {section_name}")
     
     return user_classes
 
