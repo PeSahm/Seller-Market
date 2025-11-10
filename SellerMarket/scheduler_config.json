@@ -10,8 +10,9 @@
     {
       "name": "run_trading",
       "time": "08:44:30",
-      "command": "locust -f locustfile_new.py --headless --users 10 --spawn-rate 10 --run-time 30s --host https://abc.com",
-      "enabled": true
+      "command": "locust -f locustfile_new.py --headless",
+      "enabled": true,
+      "comment": "Locust parameters (users, spawn-rate, run-time, host) are loaded from locust_config.json"
     }
   ]
 }
