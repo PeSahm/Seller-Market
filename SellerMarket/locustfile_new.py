@@ -460,7 +460,7 @@ def on_test_stop(environment, **kwargs):
                     result_files = [f for f in Path('order_results').glob(f'*{username}_{broker_code}_*.json')]
                     if result_files:
                         latest_file = max(result_files, key=lambda f: f.stat().st_mtime)
-                        with open(latest_file, 'r') as f:
+                        with open(latest_file, 'r', encoding='utf-8') as f:
                             data = json.load(f)
                             orders = data.get('orders', [])
                             
