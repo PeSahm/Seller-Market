@@ -75,7 +75,12 @@ def test_latest_day_logic():
 
             print(f"\nSymbols found: {len(symbol_orders)}")
             for symbol, data in symbol_orders.items():
-                print(f"  {symbol}: #{data['tracking_number']} | {data['created_shamsi']} | {data['price']:,} | {data['volume']:,}")
+                try:
+                    print(f"  {symbol}: #{data['tracking_number']} | {data['created_shamsi']} | {data['price']:,} | {data['volume']:,}")
+                except UnicodeEncodeError:
+                    # Handle encoding issues on Windows
+                    safe_shamsi = data['created_shamsi'].encode('utf-8').decode('utf-8', errors='replace')
+                    print(f"  {symbol}: #{data['tracking_number']} | {safe_shamsi} | {data['price']:,} | {data['volume']:,}")
 
 if __name__ == '__main__':
     test_latest_day_logic()
