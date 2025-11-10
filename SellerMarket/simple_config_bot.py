@@ -153,13 +153,13 @@ def get_all_result_files() -> list:
         logger.error(f"Error finding result files: {e}")
         return []
 
-def format_complete_order_results(result_files: list, max_files: int = 3) -> str:
+def format_complete_order_results(result_files: list, max_files: int = 3, results_dir: str = None) -> str:
     """Format complete order results using latest day logic with minimum tracking numbers"""
-    if not result_files:
-        return "📊 *No Trading Results Found*"
+    # Use provided results_dir or default to RESULTS_DIR
+    target_dir = results_dir or RESULTS_DIR
     
     # Find the latest date from all order result files
-    all_result_files = list(Path(RESULTS_DIR).glob('*.json'))
+    all_result_files = list(Path(target_dir).glob('*.json'))
     if all_result_files:
         # Extract dates from filenames
         file_dates = []
