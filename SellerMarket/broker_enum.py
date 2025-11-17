@@ -15,6 +15,7 @@ class BrokerCode(Enum):
     KARAMAD = "karamad"  # Karamad
     TEJARAT = "tejarat"  # Tejarat
     EBB = "ebb"  # Eghtesad Bidar
+    IBTRADER = "ib"  # IbTrader
     
     @classmethod
     def get_broker_name(cls, code: str) -> str:
@@ -25,7 +26,8 @@ class BrokerCode(Enum):
             "bbi": "Bourse Bazar Iran",
             "karamad": "Karamad",
             "tejarat": "Tejarat",
-            "ebb": "EBB"
+            "ebb": "EBB",
+            "ib": "IbTrader"
         }
         return names.get(code, code)
     
@@ -36,13 +38,14 @@ class BrokerCode(Enum):
     
     def get_endpoints(self) -> dict:
         """Get API endpoints for this broker."""
+        domain = "ibtrader.ir" if self.value == "ib" else "ephoenix.ir"
         return {
-            'captcha': f'https://identity-{self.value}.ephoenix.ir/api/Captcha/GetCaptcha',
-            'login': f'https://identity-{self.value}.ephoenix.ir/api/v2/accounts/login',
-            'order': f'https://api-{self.value}.ephoenix.ir/api/v2/orders/NewOrder',
-            'editorder': f'https://api-{self.value}.ephoenix.ir/api/v2/orders/EditOrder',
-            'trading_book': f'https://api-{self.value}.ephoenix.ir/api/v2/tradingbook/GetLastTradingBook',
-            'calculate_order': f'https://api-{self.value}.ephoenix.ir/api/v2/orders/CalculateOrderParam',
-            'open_orders': f'https://api-{self.value}.ephoenix.ir/api/v2/orders/GetOpenOrders',
-            'market_data': 'https://mdapi1.ephoenix.ir/api/v2/instruments/full'
+            'captcha': f'https://identity-{self.value}.{domain}/api/Captcha/GetCaptcha',
+            'login': f'https://identity-{self.value}.{domain}/api/v2/accounts/login',
+            'order': f'https://api-{self.value}.{domain}/api/v2/orders/NewOrder',
+            'editorder': f'https://api-{self.value}.{domain}/api/v2/orders/EditOrder',
+            'trading_book': f'https://api-{self.value}.{domain}/api/v2/tradingbook/GetLastTradingBook',
+            'calculate_order': f'https://api-{self.value}.{domain}/api/v2/orders/CalculateOrderParam',
+            'open_orders': f'https://api-{self.value}.{domain}/api/v2/orders/GetOpenOrders',
+            'market_data': f'https://mdapi1.{domain}/api/v2/instruments/full'
         }
