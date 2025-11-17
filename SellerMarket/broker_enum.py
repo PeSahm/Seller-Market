@@ -39,13 +39,14 @@ class BrokerCode(Enum):
     def get_endpoints(self) -> dict:
         """Get API endpoints for this broker."""
         domain = "ibtrader.ir" if self.value == "ib" else "ephoenix.ir"
+        prefix = "" if self.value == "ib" else f"{self.value}."
         return {
-            'captcha': f'https://identity-{self.value}.{domain}/api/Captcha/GetCaptcha',
-            'login': f'https://identity-{self.value}.{domain}/api/v2/accounts/login',
-            'order': f'https://api-{self.value}.{domain}/api/v2/orders/NewOrder',
-            'editorder': f'https://api-{self.value}.{domain}/api/v2/orders/EditOrder',
-            'trading_book': f'https://api-{self.value}.{domain}/api/v2/tradingbook/GetLastTradingBook',
-            'calculate_order': f'https://api-{self.value}.{domain}/api/v2/orders/CalculateOrderParam',
-            'open_orders': f'https://api-{self.value}.{domain}/api/v2/orders/GetOpenOrders',
+            'captcha': f'https://identity{prefix}{domain}/api/Captcha/GetCaptcha',
+            'login': f'https://identity{prefix}{domain}/api/v2/accounts/login',
+            'order': f'https://api{prefix}{domain}/api/v2/orders/NewOrder',
+            'editorder': f'https://api{prefix}{domain}/api/v2/orders/EditOrder',
+            'trading_book': f'https://api{prefix}{domain}/api/v2/tradingbook/GetLastTradingBook',
+            'calculate_order': f'https://api{prefix}{domain}/api/v2/orders/CalculateOrderParam',
+            'open_orders': f'https://api{prefix}{domain}/api/v2/orders/GetOpenOrders',
             'market_data': f'https://mdapi1.{domain}/api/v2/instruments/full'
         }
