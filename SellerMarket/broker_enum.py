@@ -39,7 +39,7 @@ class BrokerCode(Enum):
     def get_endpoints(self) -> dict:
         """Get API endpoints for this broker."""
         domain = "ibtrader.ir" if self.value == "ib" else "ephoenix.ir"
-        prefix = "" if self.value == "ib" else f"-{self.value}."
+        prefix = "." if self.value == "ib" else f"-{self.value}."
         return {
             'captcha': f'https://identity{prefix}{domain}/api/Captcha/GetCaptcha',
             'login': f'https://identity{prefix}{domain}/api/v2/accounts/login',
