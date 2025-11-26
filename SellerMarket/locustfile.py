@@ -1,9 +1,13 @@
 from locust import HttpUser, task
 import json
+import os
 import requests
 import configparser
 from collections import namedtuple
 from datetime import datetime, timedelta
+
+# OCR service URL - uses environment variable for Docker compatibility
+OCR_SERVICE_URL = os.getenv('OCR_SERVICE_URL', 'http://localhost:8080')
 
 def on_locust_init(Person: dict):
     # read configuration file
@@ -38,7 +42,7 @@ def on_locust_init(Person: dict):
     # decode captcha image
 
     def decoder(im):
-        url = 'http://localhost:8080/ocr/captcha-easy-base64'
+        url = f'{OCR_SERVICE_URL}/ocr/captcha-easy-base64'
         headers = {
             'accept': 'text/plain',
             'Content-Type': 'application/json'
