@@ -23,22 +23,41 @@ jobs:
       with:
         fetch-depth: 0
 
-    - name: Get previous tag
-      id: previoustag
-      run: |
-        TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")"
-        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-    - name: Get next version
+    - name: Get version
       id: semver
-      uses: ietf-tools/semver-action@v1
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        branch: main
-        patchList: fix, bugfix, patch, chore, docs, style, refactor, perf, test, build, ci
-        minorList: feat, feature, minor
-        majorList: breaking, major
-        fallbackTag: v0.0.0
+      run: |
+        # Get the latest tag, or use v0.0.0 if none exists
+        LATEST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo "")"
+        
+        if [ -z "$LATEST_TAG" ]; then
+          # No tags exist, start with v0.1.0
+          NEXT_VERSION="v0.1.0"
+        else
+          # Parse current version
+          VERSION="${LATEST_TAG#v}"
+          MAJOR="$(echo "$VERSION" | cut -d. -f1)"
+          MINOR="$(echo "$VERSION" | cut -d. -f2)"
+          PATCH="$(echo "$VERSION" | cut -d. -f3)"
+          
+          # Get commit message to determine version bump
+          COMMIT_MSG="$(git log -1 --pretty=%B)"
+          
+          if echo "$COMMIT_MSG" | grep -qiE "^(breaking|major)"; then
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+          elif echo "$COMMIT_MSG" | grep -qiE "^(feat|feature|minor)"; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+          else
+            PATCH=$((PATCH + 1))
+          fi
+          
+          NEXT_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+        fi
+        
+        echo "next=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+        echo "Next version: $NEXT_VERSION"
 
     - name: Create and push tag
       if: github.ref == 'refs/heads/main'
