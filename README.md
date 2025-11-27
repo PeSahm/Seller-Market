@@ -3,6 +3,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Locust](https://img.shields.io/badge/locust-2.0+-green.svg)](https://locust.io/)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://ghcr.io/pesahm/seller-market)
 
 > Automated trading bot for Iranian stock exchanges (ephoenix.ir platforms) with Telegram control, intelligent caching, and automated scheduling.
 > ⚠️ **SECURITY ALERT**: This repository previously contained exposed credentials. See [SECURITY.md](SECURITY.md) for immediate actions required.
@@ -180,11 +181,39 @@ Edit via Telegram bot or directly in JSON file.
 
 The easiest way to run the bot with all dependencies including the OCR service for CAPTCHA solving.
 
+### Docker Image
+
+Pre-built images are available on GitHub Container Registry with semantic versioning:
+
+```bash
+# Latest version
+docker pull ghcr.io/pesahm/seller-market:latest
+
+# Specific version
+docker pull ghcr.io/pesahm/seller-market:1.2.3
+
+# Major.minor version (auto-updates patches)
+docker pull ghcr.io/pesahm/seller-market:1.2
+
+# Major version only (auto-updates minor & patches)
+docker pull ghcr.io/pesahm/seller-market:1
+```
+
+### Version Tags
+
+Images are automatically tagged based on commit message prefixes:
+
+| Commit Prefix | Version Bump | Example |
+|---------------|--------------|---------|  
+| `feat:`, `feature:` | Minor (1.0.0 → 1.1.0) | New trading feature |
+| `fix:`, `bugfix:` | Patch (1.0.0 → 1.0.1) | Bug fix |
+| `breaking:`, `major:` | Major (1.0.0 → 2.0.0) | Breaking change |
+
 ### Prerequisites
 - Docker and Docker Compose installed
 - Configuration files ready
 
-### Quick Start
+### Quick Start (From Source)
 
 ```bash
 cd SellerMarket
@@ -202,6 +231,27 @@ docker compose logs -f trading-bot
 # Stop services
 docker compose down
 ```
+
+### Quick Start (Using Pre-built Image)
+
+For users who just want to run the bot without building:
+
+```bash
+# Download and run the setup script
+curl -O https://raw.githubusercontent.com/PeSahm/Seller-Market/main/SellerMarket/docker-setup.sh
+chmod +x docker-setup.sh
+./docker-setup.sh
+
+# Or on Windows PowerShell:
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/PeSahm/Seller-Market/main/SellerMarket/docker-setup.ps1" -OutFile "docker-setup.ps1"
+.\docker-setup.ps1
+```
+
+The setup script will:
+- Create required directories and files
+- Generate docker-compose.yml for pre-built image
+- Create example configuration files
+- Prompt for Telegram credentials
 
 ### Docker Services
 
