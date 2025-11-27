@@ -46,6 +46,8 @@ services:
       # Mount logs and results for persistence
       - ./logs:/app/logs
       - ./order_results:/app/order_results
+      # Cache for tokens, market data, and order params
+      - ./.cache:/app/.cache
       # Important log files - must exist on host before starting
       - type: bind
         source: ./trading_bot.log

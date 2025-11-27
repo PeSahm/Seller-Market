@@ -11,7 +11,7 @@ echo ""
 
 # Create directories
 echo "Creating directories..."
-mkdir -p logs order_results easyocr_models
+mkdir -p logs order_results easyocr_models .cache
 
 # Create empty log files (required for volume mounts)
 echo "Creating log files..."
@@ -183,6 +183,7 @@ services:
       - ./locust_config.json:/app/locust_config.json:ro
       - ./logs:/app/logs
       - ./order_results:/app/order_results
+      - ./.cache:/app/.cache
       - type: bind
         source: ./trading_bot.log
         target: /app/trading_bot.log
@@ -241,6 +242,7 @@ services:
       - ./locust_config.json:/app/locust_config.json:ro
       - ./logs:/app/logs
       - ./order_results:/app/order_results
+      - ./.cache:/app/.cache
       - type: bind
         source: ./trading_bot.log
         target: /app/trading_bot.log
@@ -282,4 +284,5 @@ echo "  - cache_warmup.log (cache logs)"
 echo "  - logs/ (log directory)"
 echo "  - order_results/ (results directory)"
 echo "  - easyocr_models/ (OCR model cache)"
+echo "  - .cache/ (token and market data cache)"
 echo ""

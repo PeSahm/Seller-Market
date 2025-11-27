@@ -13,6 +13,7 @@ Write-Host "Creating directories..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Force -Path logs | Out-Null
 New-Item -ItemType Directory -Force -Path order_results | Out-Null
 New-Item -ItemType Directory -Force -Path easyocr_models | Out-Null
+New-Item -ItemType Directory -Force -Path .cache | Out-Null
 
 # Create empty log files (required for volume mounts)
 Write-Host "Creating log files..." -ForegroundColor Yellow
@@ -173,6 +174,7 @@ services:
       - ./locust_config.json:/app/locust_config.json:ro
       - ./logs:/app/logs
       - ./order_results:/app/order_results
+      - ./.cache:/app/.cache
       - type: bind
         source: ./trading_bot.log
         target: /app/trading_bot.log
@@ -233,6 +235,7 @@ services:
       - ./locust_config.json:/app/locust_config.json:ro
       - ./logs:/app/logs
       - ./order_results:/app/order_results
+      - ./.cache:/app/.cache
       - type: bind
         source: ./trading_bot.log
         target: /app/trading_bot.log
@@ -274,4 +277,5 @@ Write-Host "  - cache_warmup.log (cache logs)"
 Write-Host "  - logs/ (log directory)"
 Write-Host "  - order_results/ (results directory)"
 Write-Host "  - easyocr_models/ (OCR model cache)"
+Write-Host "  - .cache/ (token and market data cache)"
 Write-Host ""
