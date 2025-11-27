@@ -145,17 +145,20 @@ class TestOCRServiceURLConfiguration:
 
     def test_ocr_url_default_fallback(self):
         """Test OCR URL defaults to localhost when env var not set."""
-        # Clear any existing OCR_SERVICE_URL
+        # Clear OCR_SERVICE_URL from environment
         with patch.dict(os.environ, {}, clear=True):
-            # Re-import to test default value
-            import importlib
+            # Ensure OCR_SERVICE_URL is not set
+            assert 'OCR_SERVICE_URL' not in os.environ
+            
+            # Remove module from cache to force re-import
             if 'captcha_utils' in sys.modules:
                 del sys.modules['captcha_utils']
             
-            # Mock the import
-            with patch.dict(os.environ, {'OCR_SERVICE_URL': 'http://localhost:8080'}):
-                url = os.getenv('OCR_SERVICE_URL', 'http://localhost:8080')
-                assert url == 'http://localhost:8080', "Default should be localhost:8080"
+            # Import fresh module
+            import captcha_utils
+            
+            # Assert the module constant uses default fallback
+            assert captcha_utils.OCR_SERVICE_URL == 'http://localhost:8080', "Default should be localhost:8080"
 
     def test_ocr_url_docker_override(self):
         """Test OCR URL can be overridden for Docker."""
