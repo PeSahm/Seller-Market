@@ -64,15 +64,21 @@ class TestDockerConfiguration:
         bot_service = compose_data['services']['trading-bot']
         environment = bot_service.get('environment', [])
         
-        # Check if OCR_SERVICE_URL is set
-        ocr_url_found = False
-        for env in environment:
-            if 'OCR_SERVICE_URL' in env:
-                ocr_url_found = True
-                assert 'http://ocr:8080' in env, "OCR_SERVICE_URL should use internal Docker networking"
-                break
-        
-        assert ocr_url_found, "OCR_SERVICE_URL should be set in trading-bot environment"
+        if isinstance(environment, dict):
+            ocr_url = environment.get('OCR_SERVICE_URL')
+            assert ocr_url is not None, "OCR_SERVICE_URL should be set in trading-bot environment"
+            assert ocr_url == 'http://ocr:8080', "OCR_SERVICE_URL should be 'http://ocr:8080'"
+        elif isinstance(environment, list):
+            ocr_url_found = False
+            for env in environment:
+                if isinstance(env, str) and env.startswith('OCR_SERVICE_URL='):
+                    ocr_url_found = True
+                    value = env.split('=', 1)[1]
+                    assert value == 'http://ocr:8080', "OCR_SERVICE_URL should be 'http://ocr:8080'"
+                    break
+            assert ocr_url_found, "OCR_SERVICE_URL should be set in trading-bot environment"
+        else:
+            raise AssertionError("environment should be dict or list")
 
     def test_docker_compose_depends_on_ocr(self):
         """Verify trading-bot depends on OCR service."""
