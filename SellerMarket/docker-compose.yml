@@ -1,0 +1,66 @@
+# Docker Compose for Seller-Market Trading Bot
+# Includes OCR service for CAPTCHA solving and trading bot
+
+services:
+  # OCR Service for CAPTCHA solving
+  ocr:
+    image: ghcr.io/pesahm/ocr:latest
+    container_name: seller-market-ocr
+    ports:
+      # Map to different host ports to avoid conflict with local OCR
+      - "18080:8080"
+      - "15001:5001"
+    volumes:
+      # Cache EasyOCR models to avoid re-downloading
+      - ./easyocr_models:/root/.EasyOCR/model
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; r=urllib.request.urlopen('http://localhost:5001/health'); exit(0 if b'healthy' in r.read() else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Trading Bot Service
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: seller-market-bot
+    depends_on:
+      ocr:
+        condition: service_healthy
+    environment:
+      # OCR service URL - uses Docker internal networking
+      - OCR_SERVICE_URL=http://ocr:8080
+      # Telegram credentials (from .env file)
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_USER_ID=${TELEGRAM_USER_ID}
+      # Timezone for Tehran market hours
+      - TZ=Asia/Tehran
+    volumes:
+      # Mount configuration files from host
+      - ./config.ini:/app/config.ini:ro
+      - ./scheduler_config.json:/app/scheduler_config.json:ro
+      - ./locust_config.json:/app/locust_config.json:ro
+      # Mount logs and results for persistence
+      - ./logs:/app/logs
+      - ./order_results:/app/order_results
+      # Important log files - must exist on host before starting
+      - type: bind
+        source: ./trading_bot.log
+        target: /app/trading_bot.log
+      - type: bind
+        source: ./cache_warmup.log
+        target: /app/cache_warmup.log
+    restart: unless-stopped
+    # Note: simple_config_bot.py runs both Telegram bot AND scheduler internally
+    # No need for separate scheduler service - it's all-in-one
+
+volumes:
+  easyocr_models:
+    driver: local
+
+networks:
+  default:
+    name: seller-market-network

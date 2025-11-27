@@ -1,0 +1,71 @@
+# .dockerignore for Seller-Market Trading Bot
+# Excludes sensitive files, caches, and unnecessary files from Docker build
+
+# Sensitive configuration files (mount at runtime instead)
+config.ini
+.env
+*.env
+scheduler_config.json
+locust_config.json
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Docker files (not needed in image)
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Documentation
+*.md
+LICENSE
+docs/
+
+# Logs and runtime data (mount at runtime instead)
+logs/
+order_results/
+*.log
+
+# Keep requirements.txt (needed for pip install)
+!requirements.txt
+
+# Test files
+test_*.py
+tests/
+pytest.ini
+.pytest_cache/
+.coverage
+htmlcov/
+
+# EasyOCR models (volume mount instead)
+easyocr_models/
+
+# Batch scripts
+*.bat
+*.sh
+
+# Example configs
+*.example.*

@@ -3,6 +3,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Locust](https://img.shields.io/badge/locust-2.0+-green.svg)](https://locust.io/)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://ghcr.io/pesahm/seller-market)
 
 > Automated trading bot for Iranian stock exchanges (ephoenix.ir platforms) with Telegram control, intelligent caching, and automated scheduling.
 > ⚠️ **SECURITY ALERT**: This repository previously contained exposed credentials. See [SECURITY.md](SECURITY.md) for immediate actions required.
@@ -176,7 +177,107 @@ Edit via Telegram bot or directly in JSON file.
 
 ## 🏃 Running the Bot
 
-## Option 1: Automated Mode
+## Option 1: Docker (Recommended)
+
+The easiest way to run the bot with all dependencies including the OCR service for CAPTCHA solving.
+
+### Docker Image
+
+Pre-built images are available on GitHub Container Registry with semantic versioning:
+
+```bash
+# Latest version
+docker pull ghcr.io/pesahm/seller-market:latest
+
+# Specific version
+docker pull ghcr.io/pesahm/seller-market:1.2.3
+
+# Major.minor version (auto-updates patches)
+docker pull ghcr.io/pesahm/seller-market:1.2
+
+# Major version only (auto-updates minor & patches)
+docker pull ghcr.io/pesahm/seller-market:1
+```
+
+### Version Tags
+
+Images are automatically tagged based on commit message prefixes:
+
+| Commit Prefix | Version Bump | Example |
+|---------------|--------------|---------|  
+| `feat:`, `feature:` | Minor (1.0.0 → 1.1.0) | New trading feature |
+| `fix:`, `bugfix:` | Patch (1.0.0 → 1.0.1) | Bug fix |
+| `breaking:`, `major:` | Major (1.0.0 → 2.0.0) | Breaking change |
+
+### Prerequisites
+- Docker and Docker Compose installed
+- Configuration files ready
+
+### Quick Start (From Source)
+
+```bash
+cd SellerMarket
+
+# Create .env file from example
+cp .env.example .env
+# Edit .env with your Telegram credentials
+
+# Start all services
+docker compose up -d
+
+# View logs
+docker compose logs -f trading-bot
+
+# Stop services
+docker compose down
+```
+
+### Quick Start (Using Pre-built Image)
+
+For users who just want to run the bot without building:
+
+```bash
+# Download and run the setup script
+curl -O https://raw.githubusercontent.com/PeSahm/Seller-Market/main/SellerMarket/docker-setup.sh
+chmod +x docker-setup.sh
+./docker-setup.sh
+
+# Or on Windows PowerShell:
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/PeSahm/Seller-Market/main/SellerMarket/docker-setup.ps1" -OutFile "docker-setup.ps1"
+.\docker-setup.ps1
+```
+
+The setup script will:
+- Create required directories and files
+- Generate docker-compose.yml for pre-built image
+- Create example configuration files
+- Prompt for Telegram credentials
+
+### Docker Services
+
+| Service | Description | Ports |
+|---------|-------------|-------|
+| `ocr` | EasyOCR CAPTCHA solver | 8080, 5001 |
+| `trading-bot` | Main trading bot | None (outbound only) |
+
+### Volume Mounts
+
+Configuration files are mounted from host for easy editing:
+- `config.ini` - Trading accounts configuration
+- `scheduler_config.json` - Scheduler settings
+- `locust_config.json` - Locust configuration
+- `logs/` - Persistent log storage
+- `order_results/` - Trading results
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token | Required |
+| `TELEGRAM_USER_ID` | Your Telegram user ID | Required |
+| `OCR_SERVICE_URL` | OCR service URL | `http://ocr:8080` (Docker) |
+
+## Option 2: Automated Mode (Native)
 
 ```cmd
 cd SellerMarket
@@ -189,7 +290,7 @@ python simple_config_bot.py
 - ✅ Show restart count and status
 - ✅ Accept Telegram commands
 
-## Option 2: Manual Mode
+## Option 3: Manual Mode
 
 ```cmd
 REM Pre-load cache before market opens
@@ -294,12 +395,18 @@ Seller-Market/
     ├── simple_config_bot.py          # Telegram bot (run this!)
     ├── config.ini                    # Trading accounts config
     ├── scheduler_config.json         # Scheduler configuration
+    ├── Dockerfile                    # Docker build configuration
+    ├── docker-compose.yml            # Docker Compose orchestration
+    ├── .dockerignore                 # Docker build exclusions
+    ├── .env.example                  # Environment variables template
     ├── cache_manager.py              # Caching system
     ├── cache_warmup.py               # Pre-market cache loader
     ├── cache_cli.py                  # Cache management CLI
     ├── api_client.py                 # Broker API client
+    ├── captcha_utils.py              # OCR CAPTCHA solver
     ├── locustfile_new.py             # Trading bot (Locust)
     ├── requirements.txt              # Python dependencies
+    ├── test_docker_config.py         # Docker configuration tests
     └── logs/
         ├── trading_bot.log           # Bot logs
         ├── bot_output.log            # Console output
