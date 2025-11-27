@@ -38,6 +38,7 @@ jobs:
         patchList: fix, bugfix, patch, chore, docs, style, refactor, perf, test, build, ci
         minorList: feat, feature, minor
         majorList: breaking, major
+        fallbackTag: v0.0.0
 
     - name: Create and push tag
       if: github.ref == 'refs/heads/main'
