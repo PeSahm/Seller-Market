@@ -14,8 +14,7 @@ services:
       - ./easyocr_models:/root/.EasyOCR/model
     restart: unless-stopped
     healthcheck:
-      # OCR service exposes swagger at /swagger/index.html - use curl to check if service is up
-      test: ["CMD", "curl", "-f", "http://localhost:8080/swagger/index.html"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:5001/health | grep -q healthy"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -44,6 +43,9 @@ services:
       # Mount logs and results for persistence
       - ./logs:/app/logs
       - ./order_results:/app/order_results
+      # Important log files
+      - ./trading_bot.log:/app/trading_bot.log
+      - ./cache_warmup.log:/app/cache_warmup.log
     restart: unless-stopped
     # Note: simple_config_bot.py runs both Telegram bot AND scheduler internally
     # No need for separate scheduler service - it's all-in-one
