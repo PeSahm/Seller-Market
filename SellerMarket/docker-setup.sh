@@ -107,8 +107,101 @@ else
     echo "✓ locust_config.json already exists"
 fi
 
+# Ask about proxy configuration
+echo ""
+echo "Proxy Configuration"
+echo "------------------"
+read -p "Do you want to configure a proxy for Telegram? (y/n): " USE_PROXY
+
+if [ "$USE_PROXY" = "y" ] || [ "$USE_PROXY" = "Y" ]; then
+    read -p "Enter proxy URL (e.g., http://127.0.0.1:10809): " PROXY_URL
+    if [ -z "$PROXY_URL" ]; then
+        PROXY_URL="http://127.0.0.1:10809"
+    fi
+    read -p "Enter NO_PROXY domains (default: localhost,127.0.0.1,::1,.ir,tsetmc.com): " NO_PROXY_DOMAINS
+    if [ -z "$NO_PROXY_DOMAINS" ]; then
+        NO_PROXY_DOMAINS="localhost,127.0.0.1,::1,.ir,tsetmc.com"
+    fi
+    NETWORK_MODE="host"
+    OCR_URL="http://127.0.0.1:18080"
+    echo "✓ Proxy configured: $PROXY_URL"
+else
+    PROXY_URL=""
+    NO_PROXY_DOMAINS=""
+    NETWORK_MODE=""
+    OCR_URL="http://ocr:8080"
+    echo "✓ No proxy configured - using direct connection"
+fi
+
 # Create docker-compose.yml for pre-built image
-cat > docker-compose.yml << 'EOF'
+if [ -n "$PROXY_URL" ]; then
+    # With proxy - use host network mode
+    cat > docker-compose.yml << EOF
+# Docker Compose for Seller-Market Trading Bot (Pre-built Image)
+# Uses the official image from GitHub Container Registry
+
+services:
+  # OCR Service for CAPTCHA solving
+  ocr:
+    image: ghcr.io/pesahm/ocr:latest
+    container_name: seller-market-ocr
+    ports:
+      - "18080:8080"
+      - "15001:5001"
+    volumes:
+      - ./easyocr_models:/root/.EasyOCR/model
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; r=urllib.request.urlopen('http://localhost:5001/health'); exit(0 if b'healthy' in r.read() else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Trading Bot Service
+  trading-bot:
+    image: ghcr.io/pesahm/seller-market:latest
+    container_name: seller-market-bot
+    network_mode: host
+    depends_on:
+      ocr:
+        condition: service_healthy
+    environment:
+      - OCR_SERVICE_URL=$OCR_URL
+      - TELEGRAM_BOT_TOKEN=\${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_USER_ID=\${TELEGRAM_USER_ID}
+      - TZ=Asia/Tehran
+      - HTTP_PROXY=$PROXY_URL
+      - HTTPS_PROXY=$PROXY_URL
+      - http_proxy=$PROXY_URL
+      - https_proxy=$PROXY_URL
+      - NO_PROXY=$NO_PROXY_DOMAINS
+      - no_proxy=$NO_PROXY_DOMAINS
+    volumes:
+      - ./config.ini:/app/config.ini:ro
+      - ./scheduler_config.json:/app/scheduler_config.json:ro
+      - ./locust_config.json:/app/locust_config.json:ro
+      - ./logs:/app/logs
+      - ./order_results:/app/order_results
+      - type: bind
+        source: ./trading_bot.log
+        target: /app/trading_bot.log
+      - type: bind
+        source: ./cache_warmup.log
+        target: /app/cache_warmup.log
+    restart: unless-stopped
+
+volumes:
+  easyocr_models:
+    driver: local
+
+networks:
+  default:
+    name: seller-market-network
+EOF
+else
+    # Without proxy - use bridge network
+    cat > docker-compose.yml << 'EOF'
 # Docker Compose for Seller-Market Trading Bot (Pre-built Image)
 # Uses the official image from GitHub Container Registry
 
@@ -164,6 +257,7 @@ networks:
   default:
     name: seller-market-network
 EOF
+fi
 echo "✓ Created docker-compose.yml"
 
 echo ""

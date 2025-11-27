@@ -76,8 +76,9 @@ if (!(Test-Path scheduler_config.json)) {
     {
       "name": "run_trading",
       "time": "08:44:30",
-      "command": "locust -f locustfile_new.py --headless --users 10 --spawn-rate 10 --run-time 30s",
-      "enabled": true
+      "command": "locust -f locustfile_new.py --headless",
+      "enabled": true,
+      "comment": "Locust parameters (users, spawn-rate, run-time, host) are loaded from locust_config.json"
     }
   ]
 }
@@ -96,7 +97,9 @@ if (!(Test-Path locust_config.json)) {
     "spawn_rate": 10,
     "run_time": "30s",
     "host": "https://abc.com",
-    "processes": 4
+    "html_report": "report.html",
+    "processes": 4,
+    "_comment_processes": "Number of worker processes for distributed load. Use -1 for auto-detect CPU cores. Note: --processes requires Linux/macOS (uses fork())"
   }
 }
 "@ | Out-File -FilePath locust_config.json -Encoding utf8
@@ -105,8 +108,92 @@ if (!(Test-Path locust_config.json)) {
     Write-Host "✓ locust_config.json already exists" -ForegroundColor Green
 }
 
-# Create docker-compose.yml for pre-built image
-@"
+# Ask about proxy configuration
+Write-Host ""
+Write-Host "Proxy Configuration" -ForegroundColor Yellow
+Write-Host "------------------" -ForegroundColor Yellow
+$useProxy = Read-Host "Do you want to configure a proxy for Telegram? (y/n)"
+
+if ($useProxy -eq "y" -or $useProxy -eq "Y") {
+    $proxyUrl = Read-Host "Enter proxy URL (default: http://127.0.0.1:10809)"
+    if ([string]::IsNullOrEmpty($proxyUrl)) {
+        $proxyUrl = "http://127.0.0.1:10809"
+    }
+    $noProxyDomains = Read-Host "Enter NO_PROXY domains (default: localhost,127.0.0.1,::1,.ir,tsetmc.com)"
+    if ([string]::IsNullOrEmpty($noProxyDomains)) {
+        $noProxyDomains = "localhost,127.0.0.1,::1,.ir,tsetmc.com"
+    }
+    Write-Host "✓ Proxy configured: $proxyUrl" -ForegroundColor Green
+    
+    # Create docker-compose.yml with proxy (host network mode)
+    @"
+# Docker Compose for Seller-Market Trading Bot (Pre-built Image)
+# Uses the official image from GitHub Container Registry
+
+services:
+  # OCR Service for CAPTCHA solving
+  ocr:
+    image: ghcr.io/pesahm/ocr:latest
+    container_name: seller-market-ocr
+    ports:
+      - "18080:8080"
+      - "15001:5001"
+    volumes:
+      - ./easyocr_models:/root/.EasyOCR/model
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; r=urllib.request.urlopen('http://localhost:5001/health'); exit(0 if b'healthy' in r.read() else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Trading Bot Service
+  trading-bot:
+    image: ghcr.io/pesahm/seller-market:latest
+    container_name: seller-market-bot
+    network_mode: host
+    depends_on:
+      ocr:
+        condition: service_healthy
+    environment:
+      - OCR_SERVICE_URL=http://127.0.0.1:18080
+      - TELEGRAM_BOT_TOKEN=`${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_USER_ID=`${TELEGRAM_USER_ID}
+      - TZ=Asia/Tehran
+      - HTTP_PROXY=$proxyUrl
+      - HTTPS_PROXY=$proxyUrl
+      - http_proxy=$proxyUrl
+      - https_proxy=$proxyUrl
+      - NO_PROXY=$noProxyDomains
+      - no_proxy=$noProxyDomains
+    volumes:
+      - ./config.ini:/app/config.ini:ro
+      - ./scheduler_config.json:/app/scheduler_config.json:ro
+      - ./locust_config.json:/app/locust_config.json:ro
+      - ./logs:/app/logs
+      - ./order_results:/app/order_results
+      - type: bind
+        source: ./trading_bot.log
+        target: /app/trading_bot.log
+      - type: bind
+        source: ./cache_warmup.log
+        target: /app/cache_warmup.log
+    restart: unless-stopped
+
+volumes:
+  easyocr_models:
+    driver: local
+
+networks:
+  default:
+    name: seller-market-network
+"@ | Out-File -FilePath docker-compose.yml -Encoding utf8
+} else {
+    Write-Host "✓ No proxy configured - using direct connection" -ForegroundColor Green
+    
+    # Create docker-compose.yml without proxy
+    @"
 # Docker Compose for Seller-Market Trading Bot (Pre-built Image)
 # Uses the official image from GitHub Container Registry
 
@@ -162,6 +249,7 @@ networks:
   default:
     name: seller-market-network
 "@ | Out-File -FilePath docker-compose.yml -Encoding utf8
+}
 Write-Host "✓ Created docker-compose.yml" -ForegroundColor Green
 
 Write-Host ""
