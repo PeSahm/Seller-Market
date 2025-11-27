@@ -61,12 +61,15 @@ services:
   #   volumes:
   #     - ./config.ini:/app/config.ini:ro
   #     - ./scheduler_config.json:/app/scheduler_config.json:ro
+  #     - ./locust_config.json:/app/locust_config.json:ro
   #     - ./logs:/app/logs
   #     - ./order_results:/app/order_results
   #   command: ["python", "scheduler.py"]
   #   restart: unless-stopped
 
   # Locust Load Testing Service (optional - uncomment for load testing)
+  # Note: Locust parameters (users, spawn-rate, run-time, host, processes) are loaded from locust_config.json
+  # The --processes flag enables distributed load generation on Linux (uses fork())
   # locust:
   #   build:
   #     context: .
@@ -82,7 +85,8 @@ services:
   #   volumes:
   #     - ./config.ini:/app/config.ini:ro
   #     - ./locust_config.json:/app/locust_config.json:ro
-  #   command: ["locust", "-f", "locustfile_new.py", "--host=http://localhost"]
+  #     - ./scheduler_config.json:/app/scheduler_config.json:ro
+  #   command: ["python", "-c", "from scheduler import build_locust_command_from_config; import subprocess; subprocess.run(build_locust_command_from_config('locust -f locustfile_new.py --headless'))"]
   #   restart: unless-stopped
 
 volumes:

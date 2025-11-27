@@ -97,6 +97,8 @@ class TestDockerConfiguration:
         
         # Check required volume mounts
         assert 'config.ini' in volume_str, "config.ini should be mounted"
+        assert 'scheduler_config.json' in volume_str, "scheduler_config.json should be mounted"
+        assert 'locust_config.json' in volume_str, "locust_config.json should be mounted"
         assert 'logs' in volume_str, "logs directory should be mounted"
         assert 'order_results' in volume_str, "order_results directory should be mounted"
 
