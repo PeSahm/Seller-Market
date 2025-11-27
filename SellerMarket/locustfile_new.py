@@ -265,8 +265,8 @@ class TradingUser(HttpUser):
         # Fast timing check: skip orders before market open timing window
         # Broker API has 300ms penalty per ISIN per person during high demand
         now = datetime.now().time()
-        if now < MARKET_OPEN_THRESHOLD:
-            return  # Skip order, mark task as completed
+        # if now < MARKET_OPEN_THRESHOLD:
+        #     return  # Skip order, mark task as completed
 
         # Get logger with file handler for this task
         task_logger = logging.getLogger(__name__)
