@@ -176,7 +176,7 @@ class TestOCRServiceConnectivity:
                 del sys.modules['captcha_utils']
             from captcha_utils import decode_captcha
             
-            result = decode_captcha("base64encodedimage")
+            decode_captcha("base64encodedimage")
             
             # Verify the call was made
             mock_post.assert_called_once()
