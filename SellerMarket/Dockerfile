@@ -39,7 +39,8 @@ ENV PYTHONUNBUFFERED=1
 
 # Health check - verify Python can import main modules
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import captcha_utils; import api_client; print('OK')" || exit 1
+    CMD python -c "import simple_config_bot; print('OK')" || exit 1
 
-# Default command - can be overridden in docker-compose
-CMD ["python", "Orbis.py"]
+# Default command - runs Telegram bot with integrated scheduler
+# This is what run_bot.bat does: python simple_config_bot.py
+CMD ["python", "simple_config_bot.py"]

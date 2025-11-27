@@ -14,7 +14,8 @@ services:
       - ./easyocr_models:/root/.EasyOCR/model
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      # OCR service exposes swagger at /swagger/index.html - use curl to check if service is up
+      test: ["CMD", "curl", "-f", "http://localhost:8080/swagger/index.html"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -44,50 +45,8 @@ services:
       - ./logs:/app/logs
       - ./order_results:/app/order_results
     restart: unless-stopped
-
-  # Scheduler Service (optional - uncomment to run scheduler)
-  # scheduler:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
-  #   container_name: seller-market-scheduler
-  #   depends_on:
-  #     ocr:
-  #       condition: service_healthy
-  #   environment:
-  #     - OCR_SERVICE_URL=http://ocr:8080
-  #     - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-  #     - TELEGRAM_USER_ID=${TELEGRAM_USER_ID}
-  #   volumes:
-  #     - ./config.ini:/app/config.ini:ro
-  #     - ./scheduler_config.json:/app/scheduler_config.json:ro
-  #     - ./locust_config.json:/app/locust_config.json:ro
-  #     - ./logs:/app/logs
-  #     - ./order_results:/app/order_results
-  #   command: ["python", "scheduler.py"]
-  #   restart: unless-stopped
-
-  # Locust Load Testing Service (optional - uncomment for load testing)
-  # Note: Locust parameters (users, spawn-rate, run-time, host, processes) are loaded from locust_config.json
-  # The --processes flag enables distributed load generation on Linux (uses fork())
-  # locust:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
-  #   container_name: seller-market-locust
-  #   depends_on:
-  #     ocr:
-  #       condition: service_healthy
-  #   environment:
-  #     - OCR_SERVICE_URL=http://ocr:8080
-  #   ports:
-  #     - "8089:8089"
-  #   volumes:
-  #     - ./config.ini:/app/config.ini:ro
-  #     - ./locust_config.json:/app/locust_config.json:ro
-  #     - ./scheduler_config.json:/app/scheduler_config.json:ro
-  #   command: ["python", "-c", "from scheduler import build_locust_command_from_config; import subprocess; subprocess.run(build_locust_command_from_config('locust -f locustfile_new.py --headless'))"]
-  #   restart: unless-stopped
+    # Note: simple_config_bot.py runs both Telegram bot AND scheduler internally
+    # No need for separate scheduler service - it's all-in-one
 
 volumes:
   easyocr_models:
