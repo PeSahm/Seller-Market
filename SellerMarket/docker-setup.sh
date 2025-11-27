@@ -75,8 +75,9 @@ if [ ! -f scheduler_config.json ]; then
     {
       "name": "run_trading",
       "time": "08:44:30",
-      "command": "locust -f locustfile_new.py --headless --users 10 --spawn-rate 10 --run-time 30s",
-      "enabled": true
+      "command": "locust -f locustfile_new.py --headless",
+      "enabled": true,
+      "comment": "Locust parameters (users, spawn-rate, run-time, host) are loaded from locust_config.json"
     }
   ]
 }
@@ -95,7 +96,9 @@ if [ ! -f locust_config.json ]; then
     "spawn_rate": 10,
     "run_time": "30s",
     "host": "https://abc.com",
-    "processes": 4
+    "html_report": "report.html",
+    "processes": 4,
+    "_comment_processes": "Number of worker processes for distributed load. Use -1 for auto-detect CPU cores. Note: --processes requires Linux/macOS (uses fork())"
   }
 }
 EOF
