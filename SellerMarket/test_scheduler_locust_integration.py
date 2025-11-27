@@ -21,13 +21,14 @@ def test_locust_config_loading():
     assert 'spawn_rate' in config
     assert 'run_time' in config
     assert 'host' in config
+    assert 'processes' in config, "processes parameter should be in config"
     print("\n✅ Locust config loaded successfully")
 
 def test_command_building():
     """
     Verify that a base Locust CLI command is augmented with configured Locust parameters.
     
-    Asserts that the resulting command includes the flags `--users`, `--spawn-rate`, `--run-time`, and `--host`.
+    Asserts that the resulting command includes the flags `--users`, `--spawn-rate`, `--run-time`, `--host`, and `--processes`.
     """
     print("\n" + "="*80)
     print("Testing Locust Command Building")
@@ -45,6 +46,7 @@ def test_command_building():
     assert '--spawn-rate' in full_command_args
     assert '--run-time' in full_command_args
     assert '--host' in full_command_args
+    assert '--processes' in full_command_args, "--processes should be in command"
     
     # Verify that each parameter is a separate element
     users_index = full_command_args.index('--users')
@@ -62,6 +64,12 @@ def test_command_building():
     host_index = full_command_args.index('--host')
     assert host_index + 1 < len(full_command_args)
     assert full_command_args[host_index + 1] == 'https://abc.com'
+    
+    # Verify --processes parameter
+    processes_index = full_command_args.index('--processes')
+    assert processes_index + 1 < len(full_command_args)
+    assert full_command_args[processes_index + 1] == '4', "processes should be '4'"
+    
     print("\n✅ Command built successfully")
 
 def test_scheduler_integration():
@@ -105,6 +113,7 @@ def test_scheduler_integration():
     assert '--spawn-rate' in full_command_args
     assert '--run-time' in full_command_args
     assert '--host' in full_command_args
+    assert '--processes' in full_command_args, "--processes should be in full command"
     
     print("\n✅ Scheduler integration working correctly")
 
@@ -126,12 +135,54 @@ def test_non_locust_commands():
     assert result_args == expected_args, f"Expected {expected_args}, got {result_args}"
     print("\n✅ Non-locust commands preserved correctly")
 
+
+def test_distributed_processes_config():
+    """
+    Test that --processes parameter is correctly loaded and applied for distributed load generation.
+    
+    The --processes flag enables running multiple Locust worker processes on a single machine,
+    which is useful for better CPU utilization. Values can be:
+    - A positive integer (e.g., 4) to spawn that many workers
+    - -1 to auto-detect the number of CPU cores
+    
+    Note: This feature requires Linux/macOS as it uses fork().
+    """
+    print("\n" + "="*80)
+    print("Testing Distributed Processes Configuration")
+    print("="*80)
+    
+    config = load_locust_config()
+    
+    print(f"\nProcesses config value: {config.get('processes')}")
+    
+    # Verify processes is in config
+    assert 'processes' in config, "processes should be defined in locust_config.json"
+    
+    # Build command and verify --processes is included
+    base_command = "locust -f locustfile_new.py --headless"
+    full_command_args = build_locust_command_from_config(base_command)
+    
+    print(f"Full command: {shlex.join(full_command_args)}")
+    
+    assert '--processes' in full_command_args, "--processes flag should be in command"
+    
+    processes_index = full_command_args.index('--processes')
+    processes_value = full_command_args[processes_index + 1]
+    
+    print(f"--processes value: {processes_value}")
+    
+    # Value should be a valid integer string (positive or -1 for auto-detect)
+    assert processes_value.lstrip('-').isdigit(), f"processes value '{processes_value}' should be an integer"
+    
+    print("\n✅ Distributed processes configuration working correctly")
+
 if __name__ == '__main__':
     try:
         test_locust_config_loading()
         test_command_building()
         test_scheduler_integration()
         test_non_locust_commands()
+        test_distributed_processes_config()
         
         print("\n" + "="*80)
         print("✅ ALL TESTS PASSED")
@@ -142,6 +193,7 @@ if __name__ == '__main__':
         print("- scheduler_config.json now uses simple base command")
         print("- All Locust parameters centralized in locust_config.json")
         print("- Non-locust commands remain unchanged")
+        print("- Distributed load generation via --processes supported")
         
     except AssertionError as e:
         print(f"\n❌ TEST FAILED: {e}")

@@ -27,6 +27,8 @@ def load_locust_config() -> Dict[str, Any]:
             - "spawn_rate" (int): spawn rate, default 10
             - "run_time" (str): run time string, default "30s"
             - "host" (str): target host URL, default "https://abc.com"
+            - "processes" (int): number of worker processes for distributed load, optional
+              Use -1 for auto-detect CPU cores. Note: requires Linux/macOS (uses fork())
     """
     locust_config_file = os.path.join(os.path.dirname(__file__), 'locust_config.json')
     try:
@@ -50,7 +52,7 @@ def build_locust_command_from_config(base_command: str) -> List[str]:
         base_command (str): The base command string (e.g. "locust -f locustfile.py --headless"); if it does not start with "locust", it is returned unchanged.
     
     Returns:
-        full_command_args (List[str]): The combined command arguments including any of `--users`, `--spawn-rate`, `--run-time`, and `--host` present in the Locust config.
+        full_command_args (List[str]): The combined command arguments including any of `--users`, `--spawn-rate`, `--run-time`, `--host`, and `--processes` present in the Locust config.
     """
     locust_config = load_locust_config()
     
@@ -74,6 +76,10 @@ def build_locust_command_from_config(base_command: str) -> List[str]:
     
     if 'host' in locust_config:
         command_args.extend(['--host', str(locust_config['host'])])
+    
+    # Add --processes for distributed load generation (Linux/macOS only, uses fork())
+    if 'processes' in locust_config:
+        command_args.extend(['--processes', str(locust_config['processes'])])
     
     logger.info(f"Built Locust command from config: {shlex.join(command_args)}")
     return command_args
