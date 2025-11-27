@@ -138,6 +138,7 @@ services:
       - OCR_SERVICE_URL=http://ocr:8080
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_USER_ID=${TELEGRAM_USER_ID}
+      - TZ=Asia/Tehran
     volumes:
       - ./config.ini:/app/config.ini:ro
       - ./scheduler_config.json:/app/scheduler_config.json:ro

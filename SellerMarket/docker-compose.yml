@@ -36,6 +36,8 @@ services:
       # Telegram credentials (from .env file)
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_USER_ID=${TELEGRAM_USER_ID}
+      # Timezone for Tehran market hours
+      - TZ=Asia/Tehran
     volumes:
       # Mount configuration files from host
       - ./config.ini:/app/config.ini:ro
