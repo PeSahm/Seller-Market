@@ -1,7 +1,7 @@
 # Dockerfile for Seller-Market Trading Bot
 # Multi-stage build for smaller image size
 
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
@@ -27,7 +27,6 @@ ENV PATH=/root/.local/bin:$PATH
 
 # Copy application code
 COPY *.py ./
-COPY config.example.ini ./
 
 # Create directories for runtime data
 RUN mkdir -p logs order_results

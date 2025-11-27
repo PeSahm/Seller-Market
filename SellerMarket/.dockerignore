@@ -48,7 +48,9 @@ docs/
 logs/
 order_results/
 *.log
-*.txt
+
+# Keep requirements.txt (needed for pip install)
+!requirements.txt
 
 # Test files
 test_*.py
