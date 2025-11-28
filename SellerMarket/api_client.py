@@ -246,7 +246,7 @@ class EphoenixAPIClient:
             
             # Cache the market data
             if self.cache:
-                self.cache.save_market_data(isin, result)
+                self.cache.save_market_data(isin, result, expiry_minutes= 5)
             
             logger.info(f"Instrument {isin} ({result['symbol']}): "
                        f"Price range [{result['min_price']}-{result['max_price']}], "
