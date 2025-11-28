@@ -109,7 +109,7 @@ class JobScheduler:
             return {"enabled": False, "jobs": []}
     
     def should_run_job(self, job: Dict[str, Any]) -> bool:
-        """Check if a job should run now"""
+        """Check if a job should run now within the allowed time window"""
         try:
             if not job.get('enabled', True):
                 return False
@@ -121,15 +121,29 @@ class JobScheduler:
             # Get current time
             now = datetime.now()
             current_time = now.time()
+            today = now.date()
             
             # Check if already executed today
-            job_key = f"{job['name']}_{now.date().isoformat()}"
+            job_key = f"{job['name']}_{today.isoformat()}"
             if job_key in self.executed_today:
                 return False
             
-            # Check if current time is at or after the scheduled time
-            # This ensures jobs run at the exact scheduled time or very close to it
-            if current_time >= job_time:
+            # Build full datetime objects for proper comparison across midnight
+            job_dt = datetime.combine(today, job_time)
+            current_dt = datetime.combine(today, current_time)
+            
+            # If job datetime is in the future, it might be scheduled for yesterday
+            # (e.g., job at 23:59:00, current time is 00:01:00)
+            if job_dt > current_dt:
+                job_dt = job_dt - timedelta(days=1)
+            
+            # Calculate time difference
+            delta = current_dt - job_dt
+            
+            # Only run if we're within 120 seconds AFTER the scheduled time
+            # This prevents immediate execution when bot starts after scheduled time
+            # Jobs that were missed (more than 120 seconds ago) will wait until next day
+            if 0 <= delta.total_seconds() <= 120:
                 return True
             
             return False
