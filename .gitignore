@@ -382,3 +382,6 @@ order_results/
 
 # Bot cache directory (tokens, market data, selection state)
 .cache/
+
+# EasyOCR model cache (large ML models downloaded at runtime)
+easyocr_models/
