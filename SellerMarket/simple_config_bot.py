@@ -131,9 +131,74 @@ def read_config():
     return config
 
 def save_config(config):
-    """Save config.ini"""
+    """
+    Save config.ini while preserving commented sections.
+    
+    This function updates only the active sections' properties in-place,
+    keeping all commented sections intact.
+    """
+    # Read the current file to preserve structure
+    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    
+    # Build a map of section -> {key: value} from the config object
+    config_data = {}
+    for section in config.sections():
+        config_data[section] = dict(config[section])
+    
+    new_lines = []
+    current_section = None
+    current_section_is_active = False
+    processed_keys = set()
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        # Check if this is a section header
+        if stripped.startswith('[') and ']' in stripped:
+            # Write any remaining keys for the previous section
+            if current_section_is_active and current_section in config_data:
+                for key, value in config_data[current_section].items():
+                    if key not in processed_keys:
+                        new_lines.append(f'{key} = {value}\n')
+            
+            processed_keys = set()
+            
+            # Check if this is an active (uncommented) section
+            if not stripped.startswith(';') and not stripped.startswith('#'):
+                bracket_end = stripped.index(']')
+                current_section = stripped[1:bracket_end]
+                current_section_is_active = current_section in config_data
+            else:
+                current_section = None
+                current_section_is_active = False
+            
+            new_lines.append(line)
+        
+        elif current_section_is_active and '=' in stripped and not stripped.startswith(';') and not stripped.startswith('#'):
+            # This is a key=value line in an active section
+            key = stripped.split('=')[0].strip()
+            processed_keys.add(key)
+            
+            if key in config_data[current_section]:
+                # Update with new value from config
+                new_lines.append(f'{key} = {config_data[current_section][key]}\n')
+            else:
+                # Keep original line
+                new_lines.append(line)
+        else:
+            # Keep all other lines (comments, empty lines, commented properties)
+            new_lines.append(line)
+    
+    # Write any remaining keys for the last section
+    if current_section_is_active and current_section in config_data:
+        for key, value in config_data[current_section].items():
+            if key not in processed_keys:
+                new_lines.append(f'{key} = {value}\n')
+    
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        config.write(f)
+        f.writelines(new_lines)
+    
     logger.info("Configuration saved")
 
 def get_all_result_files() -> list:
@@ -291,37 +356,60 @@ def set_active_section(config_file, section_name):
     
     new_lines = []
     in_target_section = False
+    in_other_active_section = False
     
     for line in lines:
         stripped = line.strip()
         
         # Check if this is a section header
-        if stripped.startswith('[') and stripped.endswith(']'):
-            # Extract section name (remove comments and brackets)
-            current_section = stripped.lstrip('#;').strip('[]')
-            
-            if current_section == section_name:
-                # Uncomment target section
-                new_lines.append(f'[{section_name}]\n')
-                in_target_section = True
-            else:
-                # Comment out other sections
-                if not stripped.startswith('#') and not stripped.startswith(';'):
-                    new_lines.append(f'; [{current_section}]\n')
+        if stripped.startswith('[') or (stripped.startswith(';') and '[' in stripped) or (stripped.startswith('#') and '[' in stripped):
+            # Check if it looks like a section header
+            test_stripped = stripped.lstrip('#; ')
+            if test_stripped.startswith('[') and ']' in test_stripped:
+                # Extract section name (remove comments and brackets)
+                bracket_start = test_stripped.index('[')
+                bracket_end = test_stripped.index(']')
+                current_section = test_stripped[bracket_start + 1:bracket_end].strip()
+                
+                if current_section == section_name:
+                    # Uncomment target section
+                    new_lines.append(f'[{section_name}]\n')
+                    in_target_section = True
+                    in_other_active_section = False
                 else:
-                    new_lines.append(line)
-                in_target_section = False
-        else:
-            # For non-section lines, uncomment if in target section
-            if in_target_section and (stripped.startswith(';') or stripped.startswith('#')):
-                # Remove comment prefix
-                uncommented = stripped.lstrip('#;').strip()
+                    # Comment out other sections if they're active
+                    if not stripped.startswith('#') and not stripped.startswith(';'):
+                        new_lines.append(f'; [{current_section}]\n')
+                        in_other_active_section = True
+                    else:
+                        new_lines.append(line)
+                        in_other_active_section = False
+                    in_target_section = False
+                continue
+        
+        # Handle property lines
+        if in_target_section:
+            # Uncomment property lines in target section
+            if stripped.startswith(';') or stripped.startswith('#'):
+                uncommented = stripped.lstrip('#; ')
                 if '=' in uncommented:
                     new_lines.append(uncommented + '\n')
                 else:
                     new_lines.append(line)
             else:
                 new_lines.append(line)
+        elif in_other_active_section:
+            # Comment out property lines in other active sections
+            if stripped and not stripped.startswith(';') and not stripped.startswith('#'):
+                if '=' in stripped:
+                    new_lines.append(f'; {stripped}\n')
+                else:
+                    new_lines.append(line)
+            else:
+                new_lines.append(line)
+        else:
+            # Keep lines in already-commented sections as-is
+            new_lines.append(line)
     
     with open(config_file, 'w', encoding='utf-8') as f:
         f.writelines(new_lines)
