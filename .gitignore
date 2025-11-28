@@ -380,6 +380,5 @@ MigrationBackup/
 # Order Results - Trading Bot Generated Files
 order_results/
 
-# Bot selection state file
-selected_section.txt
-.selected_section
+# Bot cache directory (tokens, market data, selection state)
+.cache/

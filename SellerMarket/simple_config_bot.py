@@ -48,7 +48,9 @@ CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.ini')
 SCHEDULER_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'scheduler_config.json')
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), 'order_results')
 LOG_FILE = os.path.join(os.path.dirname(__file__), 'trading_bot.log')
-SELECTED_SECTION_FILE = os.path.join(os.path.dirname(__file__), '.selected_section')
+# Store selection in .cache directory (mounted as Docker volume for persistence)
+CACHE_DIR = os.path.join(os.path.dirname(__file__), '.cache')
+SELECTED_SECTION_FILE = os.path.join(CACHE_DIR, 'selected_section.txt')
 
 # Validate environment variables only when running the bot (not when importing for tests)
 def validate_environment():
@@ -309,6 +311,8 @@ def set_selected_section(section_name):
     This does NOT comment out other sections - all sections remain active for trading.
     """
     try:
+        # Ensure cache directory exists (for Docker volume mount)
+        os.makedirs(os.path.dirname(SELECTED_SECTION_FILE), exist_ok=True)
         with open(SELECTED_SECTION_FILE, 'w', encoding='utf-8') as f:
             f.write(section_name)
         logger.info(f"Selected section for editing: {section_name}")
