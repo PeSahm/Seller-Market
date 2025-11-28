@@ -650,6 +650,270 @@ class TestSchedulerConfig(unittest.TestCase):
         self.assertTrue(updated_config["jobs"][0]["enabled"])
 
 
+class TestConfigManagement(unittest.TestCase):
+    """Test configuration management functions - /list, /use, /add, /remove, /show and property updates."""
+
+    def setUp(self):
+        """Set up test fixtures with a test config.ini file."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "config.ini"
+        self.selected_file = Path(self.temp_dir) / ".selected_section"
+        
+        # Create a test config.ini with multiple sections (all active - no comments)
+        self.initial_config = """[Account1]
+username = user1
+password = pass1
+broker = gs
+isin = IRO1TEST0001
+side = 1
+
+[Account2]
+username = user2
+password = pass2
+broker = bbi
+isin = IRO1TEST0002
+side = 2
+
+[Account3]
+username = user3
+password = pass3
+broker = shahr
+isin = IRO1TEST0003
+side = 1
+"""
+        self.config_file.write_text(self.initial_config, encoding='utf-8')
+        
+        # Store original paths
+        import simple_config_bot
+        self.original_config_file = simple_config_bot.CONFIG_FILE
+        self.original_selected_file = simple_config_bot.SELECTED_SECTION_FILE
+        simple_config_bot.CONFIG_FILE = str(self.config_file)
+        simple_config_bot.SELECTED_SECTION_FILE = str(self.selected_file)
+        
+    def tearDown(self):
+        """Clean up test fixtures."""
+        import shutil
+        import simple_config_bot
+        simple_config_bot.CONFIG_FILE = self.original_config_file
+        simple_config_bot.SELECTED_SECTION_FILE = self.original_selected_file
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_read_config_returns_all_sections(self):
+        """Test that read_config returns all sections."""
+        from simple_config_bot import read_config
+        
+        config = read_config()
+        sections = config.sections()
+        
+        # Should have all 3 sections
+        self.assertIn('Account1', sections)
+        self.assertIn('Account2', sections)
+        self.assertIn('Account3', sections)
+        self.assertEqual(len(sections), 3)
+
+    def test_get_selected_section_returns_first_when_no_selection(self):
+        """Test that get_selected_section returns first section when no selection file exists."""
+        from simple_config_bot import get_selected_section
+        
+        selected = get_selected_section()
+        self.assertEqual(selected, 'Account1')
+
+    def test_set_selected_section_persists(self):
+        """Test that set_selected_section saves the selection to file."""
+        from simple_config_bot import set_selected_section, get_selected_section
+        
+        set_selected_section('Account2')
+        
+        # Should persist
+        selected = get_selected_section()
+        self.assertEqual(selected, 'Account2')
+        
+        # File should exist
+        self.assertTrue(self.selected_file.exists())
+        self.assertEqual(self.selected_file.read_text().strip(), 'Account2')
+
+    def test_set_selected_section_does_not_modify_config(self):
+        """Test that set_selected_section does NOT modify config.ini (no commenting)."""
+        from simple_config_bot import set_selected_section
+        
+        original_content = self.config_file.read_text(encoding='utf-8')
+        
+        set_selected_section('Account2')
+        
+        new_content = self.config_file.read_text(encoding='utf-8')
+        
+        # Config file should be unchanged
+        self.assertEqual(original_content, new_content)
+
+    def test_save_config_preserves_all_sections(self):
+        """Test that save_config keeps all sections active."""
+        from simple_config_bot import read_config, save_config
+        
+        config = read_config()
+        config['Account1']['broker'] = 'bbi'
+        save_config(config)
+        
+        # Re-read and verify all sections exist
+        new_config = read_config()
+        self.assertEqual(len(new_config.sections()), 3)
+        self.assertIn('Account1', new_config.sections())
+        self.assertIn('Account2', new_config.sections())
+        self.assertIn('Account3', new_config.sections())
+        
+        # Verify the update
+        self.assertEqual(new_config['Account1']['broker'], 'bbi')
+
+    def test_update_one_section_preserves_others(self):
+        """Test updating one section preserves all other sections' values."""
+        from simple_config_bot import read_config, save_config
+        
+        config = read_config()
+        original_account2 = dict(config['Account2'])
+        original_account3 = dict(config['Account3'])
+        
+        # Update Account1
+        config['Account1']['username'] = 'new_user1'
+        config['Account1']['broker'] = 'karamad'
+        save_config(config)
+        
+        # Verify other sections are unchanged
+        new_config = read_config()
+        self.assertEqual(dict(new_config['Account2']), original_account2)
+        self.assertEqual(dict(new_config['Account3']), original_account3)
+
+    def test_update_broker_preserves_all_configs(self):
+        """Test updating broker value preserves all configurations."""
+        from simple_config_bot import read_config, save_config, get_selected_section, set_selected_section
+        
+        set_selected_section('Account1')
+        
+        config = read_config()
+        section = get_selected_section()
+        config[section]['broker'] = 'tejarat'
+        save_config(config)
+        
+        # Verify all 3 sections still exist
+        new_config = read_config()
+        self.assertEqual(len(new_config.sections()), 3)
+        self.assertEqual(new_config['Account1']['broker'], 'tejarat')
+
+    def test_update_symbol_preserves_all_configs(self):
+        """Test updating ISIN/symbol value preserves all configurations."""
+        from simple_config_bot import read_config, save_config, get_selected_section, set_selected_section
+        
+        set_selected_section('Account2')
+        
+        config = read_config()
+        section = get_selected_section()
+        config[section]['isin'] = 'IRO1NEWSTOCK1'
+        save_config(config)
+        
+        new_config = read_config()
+        self.assertEqual(len(new_config.sections()), 3)
+        self.assertEqual(new_config['Account2']['isin'], 'IRO1NEWSTOCK1')
+
+    def test_update_side_preserves_all_configs(self):
+        """Test updating side value preserves all configurations."""
+        from simple_config_bot import read_config, save_config, get_selected_section, set_selected_section
+        
+        set_selected_section('Account1')
+        
+        config = read_config()
+        section = get_selected_section()
+        config[section]['side'] = '2'
+        save_config(config)
+        
+        new_config = read_config()
+        self.assertEqual(len(new_config.sections()), 3)
+        self.assertEqual(new_config['Account1']['side'], '2')
+
+    def test_update_username_preserves_all_configs(self):
+        """Test updating username value preserves all configurations."""
+        from simple_config_bot import read_config, save_config, get_selected_section, set_selected_section
+        
+        set_selected_section('Account3')
+        
+        config = read_config()
+        section = get_selected_section()
+        config[section]['username'] = 'new_trading_user'
+        save_config(config)
+        
+        new_config = read_config()
+        self.assertEqual(len(new_config.sections()), 3)
+        self.assertEqual(new_config['Account3']['username'], 'new_trading_user')
+
+    def test_update_password_preserves_all_configs(self):
+        """Test updating password value preserves all configurations."""
+        from simple_config_bot import read_config, save_config, get_selected_section, set_selected_section
+        
+        set_selected_section('Account1')
+        
+        config = read_config()
+        section = get_selected_section()
+        config[section]['password'] = 'new_secure_password'
+        save_config(config)
+        
+        new_config = read_config()
+        self.assertEqual(len(new_config.sections()), 3)
+        self.assertEqual(new_config['Account1']['password'], 'new_secure_password')
+
+    def test_multiple_updates_preserve_all_sections(self):
+        """Test that multiple sequential updates preserve all sections."""
+        from simple_config_bot import read_config, save_config, set_selected_section
+        
+        # Perform multiple updates on different sections
+        for i, section in enumerate(['Account1', 'Account2', 'Account3']):
+            set_selected_section(section)
+            config = read_config()
+            config[section]['isin'] = f'IRO1UPDATE{i:03d}'
+            save_config(config)
+        
+        # Verify all sections still exist with correct updates
+        final_config = read_config()
+        self.assertEqual(len(final_config.sections()), 3)
+        self.assertEqual(final_config['Account1']['isin'], 'IRO1UPDATE000')
+        self.assertEqual(final_config['Account2']['isin'], 'IRO1UPDATE001')
+        self.assertEqual(final_config['Account3']['isin'], 'IRO1UPDATE002')
+
+    def test_switch_selection_and_update(self):
+        """Test switching selected section and updating works correctly."""
+        from simple_config_bot import read_config, save_config, get_selected_section, set_selected_section
+        
+        # Start with Account1
+        set_selected_section('Account1')
+        self.assertEqual(get_selected_section(), 'Account1')
+        
+        # Switch to Account2 and update
+        set_selected_section('Account2')
+        self.assertEqual(get_selected_section(), 'Account2')
+        
+        config = read_config()
+        config['Account2']['broker'] = 'ebb'
+        save_config(config)
+        
+        # Verify all sections exist
+        new_config = read_config()
+        self.assertEqual(len(new_config.sections()), 3)
+        self.assertEqual(new_config['Account2']['broker'], 'ebb')
+        # Account1 should be unchanged
+        self.assertEqual(new_config['Account1']['broker'], 'gs')
+
+    def test_special_characters_in_values(self):
+        """Test handling special characters in config values."""
+        from simple_config_bot import read_config, save_config, set_selected_section
+        
+        set_selected_section('Account1')
+        config = read_config()
+        
+        # Update with special characters (avoid % which triggers interpolation)
+        config['Account1']['password'] = 'Pass@123!#$^&*'
+        save_config(config)
+        
+        # Verify the special characters are preserved
+        new_config = read_config()
+        self.assertEqual(new_config['Account1']['password'], 'Pass@123!#$^&*')
+
+
 if __name__ == '__main__':
     # Run with verbose output
     print("="*80)

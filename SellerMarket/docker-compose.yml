@@ -40,7 +40,7 @@ services:
       - TZ=Asia/Tehran
     volumes:
       # Mount configuration files from host
-      - ./config.ini:/app/config.ini:ro
+      - ./config.ini:/app/config.ini
       - ./scheduler_config.json:/app/scheduler_config.json:ro
       - ./locust_config.json:/app/locust_config.json:ro
       # Mount logs and results for persistence
