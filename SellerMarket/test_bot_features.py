@@ -650,6 +650,438 @@ class TestSchedulerConfig(unittest.TestCase):
         self.assertTrue(updated_config["jobs"][0]["enabled"])
 
 
+class TestConfigManagement(unittest.TestCase):
+    """Test configuration management functions - /list, /use, /add, /remove, /show and property updates."""
+
+    def setUp(self):
+        """Set up test fixtures with a test config.ini file."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "config.ini"
+        
+        # Create a test config.ini with multiple sections (some commented, some active)
+        self.initial_config = """; [Account_Commented1]
+; username = user1
+; password = pass1
+; broker = gs
+; isin = IRO1TEST0001
+; side = 1
+
+; [Account_Commented2]
+; username = user2
+; password = pass2
+; broker = bbi
+; isin = IRO1TEST0002
+; side = 2
+
+[Account_Active1]
+username = active_user1
+password = active_pass1
+broker = shahr
+isin = IRO1ACTIVE001
+side = 1
+
+[Account_Active2]
+username = active_user2
+password = active_pass2
+broker = karamad
+isin = IRO1ACTIVE002
+side = 2
+"""
+        self.config_file.write_text(self.initial_config, encoding='utf-8')
+        
+        # Store original CONFIG_FILE path
+        import simple_config_bot
+        self.original_config_file = simple_config_bot.CONFIG_FILE
+        simple_config_bot.CONFIG_FILE = str(self.config_file)
+        
+    def tearDown(self):
+        """Clean up test fixtures."""
+        import shutil
+        import simple_config_bot
+        simple_config_bot.CONFIG_FILE = self.original_config_file
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_read_config_returns_only_active_sections(self):
+        """Test that read_config only returns uncommented sections."""
+        from simple_config_bot import read_config
+        
+        config = read_config()
+        sections = config.sections()
+        
+        # Should only have the active (uncommented) sections
+        self.assertIn('Account_Active1', sections)
+        self.assertIn('Account_Active2', sections)
+        self.assertNotIn('Account_Commented1', sections)
+        self.assertNotIn('Account_Commented2', sections)
+        self.assertEqual(len(sections), 2)
+
+    def test_get_active_section_returns_first_active(self):
+        """Test that get_active_section returns the first active section."""
+        from simple_config_bot import read_config, get_active_section
+        
+        config = read_config()
+        active = get_active_section(config)
+        
+        self.assertEqual(active, 'Account_Active1')
+
+    def test_save_config_preserves_commented_sections(self):
+        """Test that save_config preserves commented sections when updating values."""
+        from simple_config_bot import read_config, save_config, get_active_section
+        
+        # Read config and update a value
+        config = read_config()
+        section = get_active_section(config)
+        config[section]['broker'] = 'bbi'
+        config[section]['isin'] = 'IRO1NEWCODE01'
+        
+        # Save the config
+        save_config(config)
+        
+        # Read the file directly and verify commented sections are preserved
+        content = self.config_file.read_text(encoding='utf-8')
+        
+        # Verify commented sections still exist
+        self.assertIn('; [Account_Commented1]', content)
+        self.assertIn('; username = user1', content)
+        self.assertIn('; [Account_Commented2]', content)
+        self.assertIn('; username = user2', content)
+        
+        # Verify active section was updated
+        self.assertIn('broker = bbi', content)
+        self.assertIn('isin = IRO1NEWCODE01', content)
+        
+        # Verify other active section is still there
+        self.assertIn('[Account_Active2]', content)
+        self.assertIn('username = active_user2', content)
+
+    def test_save_config_updates_only_active_section_values(self):
+        """Test that save_config only updates values in the modified section."""
+        from simple_config_bot import read_config, save_config
+        
+        config = read_config()
+        
+        # Update Account_Active1
+        config['Account_Active1']['username'] = 'new_username'
+        
+        save_config(config)
+        
+        content = self.config_file.read_text(encoding='utf-8')
+        
+        # Verify Account_Active1 was updated
+        lines = content.split('\n')
+        in_active1 = False
+        found_new_username = False
+        for line in lines:
+            if '[Account_Active1]' in line and not line.strip().startswith(';'):
+                in_active1 = True
+            elif line.strip().startswith('[') and 'Account_Active1' not in line:
+                in_active1 = False
+            if in_active1 and 'username = new_username' in line:
+                found_new_username = True
+        
+        self.assertTrue(found_new_username)
+        
+        # Verify Account_Active2 still has original username
+        self.assertIn('username = active_user2', content)
+
+    def test_set_active_section_comments_out_previous_active(self):
+        """Test that set_active_section properly comments out previously active sections."""
+        from simple_config_bot import set_active_section, read_config, get_active_section
+        
+        # Switch to Account_Active2
+        set_active_section(str(self.config_file), 'Account_Active2')
+        
+        content = self.config_file.read_text(encoding='utf-8')
+        
+        # Account_Active1 should now be commented
+        self.assertIn('; [Account_Active1]', content)
+        
+        # Account_Active2 should be active (uncommented)
+        # Check that [Account_Active2] appears without a semicolon prefix
+        lines = content.split('\n')
+        active2_active = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped == '[Account_Active2]':
+                active2_active = True
+                break
+        self.assertTrue(active2_active)
+        
+        # Verify with read_config
+        config = read_config()
+        active = get_active_section(config)
+        self.assertEqual(active, 'Account_Active2')
+
+    def test_set_active_section_uncomments_commented_section(self):
+        """Test that set_active_section can activate a previously commented section."""
+        from simple_config_bot import set_active_section, read_config, get_active_section
+        
+        # Switch to a commented section
+        set_active_section(str(self.config_file), 'Account_Commented1')
+        
+        content = self.config_file.read_text(encoding='utf-8')
+        
+        # Account_Commented1 should now be active (uncommented)
+        lines = content.split('\n')
+        commented1_active = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped == '[Account_Commented1]':
+                commented1_active = True
+                break
+        self.assertTrue(commented1_active)
+        
+        # Its properties should be uncommented too
+        config = read_config()
+        self.assertIn('Account_Commented1', config.sections())
+        self.assertEqual(config['Account_Commented1']['username'], 'user1')
+
+    def test_set_active_section_comments_property_lines(self):
+        """Test that set_active_section comments out property lines of non-target sections."""
+        from simple_config_bot import set_active_section
+        
+        # Switch to Account_Commented1
+        set_active_section(str(self.config_file), 'Account_Commented1')
+        
+        content = self.config_file.read_text(encoding='utf-8')
+        
+        # Account_Active1 and Account_Active2 should have their properties commented
+        lines = content.split('\n')
+        in_active1_section = False
+        active1_props_commented = True
+        
+        for line in lines:
+            stripped = line.strip()
+            if '; [Account_Active1]' in stripped:
+                in_active1_section = True
+                continue
+            if in_active1_section:
+                if stripped.startswith('[') or stripped.startswith('; ['):
+                    in_active1_section = False
+                elif stripped and '=' in stripped and not stripped.startswith(';'):
+                    active1_props_commented = False
+        
+        self.assertTrue(active1_props_commented)
+
+    def test_update_broker_preserves_other_configs(self):
+        """Test updating broker value preserves all other configurations."""
+        from simple_config_bot import read_config, save_config, get_active_section
+        
+        config = read_config()
+        section = get_active_section(config)
+        
+        # Update broker
+        config[section]['broker'] = 'tejarat'
+        save_config(config)
+        
+        # Re-read and verify
+        content = self.config_file.read_text(encoding='utf-8')
+        
+        # Count commented sections - should still have 2
+        commented_sections = content.count('; [')
+        self.assertEqual(commented_sections, 2)
+        
+        # Verify the update
+        new_config = read_config()
+        self.assertEqual(new_config[section]['broker'], 'tejarat')
+
+    def test_update_symbol_preserves_other_configs(self):
+        """Test updating ISIN/symbol value preserves all other configurations."""
+        from simple_config_bot import read_config, save_config, get_active_section
+        
+        config = read_config()
+        section = get_active_section(config)
+        
+        # Update symbol
+        config[section]['isin'] = 'IRO1NEWSTOCK1'
+        save_config(config)
+        
+        content = self.config_file.read_text(encoding='utf-8')
+        
+        # Verify commented sections preserved
+        self.assertIn('; [Account_Commented1]', content)
+        self.assertIn('; [Account_Commented2]', content)
+        
+        # Verify the update
+        new_config = read_config()
+        self.assertEqual(new_config[section]['isin'], 'IRO1NEWSTOCK1')
+
+    def test_update_side_preserves_other_configs(self):
+        """Test updating side value preserves all other configurations."""
+        from simple_config_bot import read_config, save_config, get_active_section
+        
+        config = read_config()
+        section = get_active_section(config)
+        
+        # Update side from 1 to 2
+        config[section]['side'] = '2'
+        save_config(config)
+        
+        content = self.config_file.read_text(encoding='utf-8')
+        
+        # Verify commented sections preserved
+        self.assertIn('; [Account_Commented1]', content)
+        
+        # Verify the update
+        new_config = read_config()
+        self.assertEqual(new_config[section]['side'], '2')
+
+    def test_update_username_preserves_other_configs(self):
+        """Test updating username value preserves all other configurations."""
+        from simple_config_bot import read_config, save_config, get_active_section
+        
+        config = read_config()
+        section = get_active_section(config)
+        
+        # Update username
+        config[section]['username'] = 'new_trading_user'
+        save_config(config)
+        
+        content = self.config_file.read_text(encoding='utf-8')
+        
+        # Verify commented sections preserved
+        self.assertIn('; [Account_Commented1]', content)
+        self.assertIn('; username = user1', content)
+        
+        # Verify the update
+        new_config = read_config()
+        self.assertEqual(new_config[section]['username'], 'new_trading_user')
+
+    def test_update_password_preserves_other_configs(self):
+        """Test updating password value preserves all other configurations."""
+        from simple_config_bot import read_config, save_config, get_active_section
+        
+        config = read_config()
+        section = get_active_section(config)
+        
+        # Update password
+        config[section]['password'] = 'new_secure_password'
+        save_config(config)
+        
+        content = self.config_file.read_text(encoding='utf-8')
+        
+        # Verify commented sections preserved
+        self.assertIn('; [Account_Commented1]', content)
+        self.assertIn('; password = pass1', content)
+        
+        # Verify the update
+        new_config = read_config()
+        self.assertEqual(new_config[section]['password'], 'new_secure_password')
+
+    def test_multiple_updates_preserve_structure(self):
+        """Test that multiple sequential updates preserve the file structure."""
+        from simple_config_bot import read_config, save_config, get_active_section
+        
+        # Perform multiple updates
+        for i in range(5):
+            config = read_config()
+            section = get_active_section(config)
+            config[section]['isin'] = f'IRO1UPDATE{i:03d}'
+            save_config(config)
+        
+        content = self.config_file.read_text(encoding='utf-8')
+        
+        # Verify commented sections still preserved after 5 updates
+        self.assertIn('; [Account_Commented1]', content)
+        self.assertIn('; [Account_Commented2]', content)
+        
+        # Verify final value
+        final_config = read_config()
+        self.assertEqual(final_config[get_active_section(final_config)]['isin'], 'IRO1UPDATE004')
+
+    def test_switch_and_update_preserves_all_sections(self):
+        """Test switching sections and updating preserves all configurations."""
+        from simple_config_bot import read_config, save_config, get_active_section, set_active_section
+        
+        # Switch to Account_Active2
+        set_active_section(str(self.config_file), 'Account_Active2')
+        
+        # Update a value in the new active section
+        config = read_config()
+        section = get_active_section(config)
+        self.assertEqual(section, 'Account_Active2')
+        
+        config[section]['broker'] = 'ebb'
+        save_config(config)
+        
+        content = self.config_file.read_text(encoding='utf-8')
+        
+        # Verify original commented sections still exist
+        self.assertIn('; [Account_Commented1]', content)
+        self.assertIn('; [Account_Commented2]', content)
+        
+        # Verify Account_Active1 is now commented
+        self.assertIn('; [Account_Active1]', content)
+        
+        # Verify the update
+        new_config = read_config()
+        self.assertEqual(new_config['Account_Active2']['broker'], 'ebb')
+
+    def test_add_new_config_section(self):
+        """Test adding a new configuration section."""
+        # Simulate adding a new config (like /add command)
+        with open(self.config_file, 'a', encoding='utf-8') as f:
+            f.write('\n[NewAccount]\n')
+            f.write('username = \n')
+            f.write('password = \n')
+            f.write('broker = gs\n')
+            f.write('isin = IRO1MHRN0001\n')
+            f.write('side = 1\n')
+        
+        from simple_config_bot import read_config
+        
+        config = read_config()
+        
+        # Verify new section exists
+        self.assertIn('NewAccount', config.sections())
+        
+        # Verify original sections still exist
+        self.assertIn('Account_Active1', config.sections())
+        self.assertIn('Account_Active2', config.sections())
+
+    def test_config_with_empty_values(self):
+        """Test handling config sections with empty values."""
+        # Create config with empty values
+        config_content = """[TestAccount]
+username = 
+password = 
+broker = gs
+isin = IRO1TEST0001
+side = 1
+"""
+        self.config_file.write_text(config_content, encoding='utf-8')
+        
+        from simple_config_bot import read_config, save_config, get_active_section
+        
+        config = read_config()
+        section = get_active_section(config)
+        
+        # Update empty values
+        config[section]['username'] = 'filled_username'
+        config[section]['password'] = 'filled_password'
+        save_config(config)
+        
+        # Verify updates
+        new_config = read_config()
+        self.assertEqual(new_config[section]['username'], 'filled_username')
+        self.assertEqual(new_config[section]['password'], 'filled_password')
+
+    def test_special_characters_in_values(self):
+        """Test handling special characters in config values."""
+        from simple_config_bot import read_config, save_config, get_active_section
+        
+        config = read_config()
+        section = get_active_section(config)
+        
+        # Update with special characters (avoid % which triggers interpolation)
+        config[section]['password'] = 'Pass@123!#$^&*'
+        save_config(config)
+        
+        # Verify the special characters are preserved
+        new_config = read_config()
+        self.assertEqual(new_config[section]['password'], 'Pass@123!#$^&*')
+
+
 if __name__ == '__main__':
     # Run with verbose output
     print("="*80)
