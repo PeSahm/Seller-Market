@@ -48,6 +48,7 @@ CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.ini')
 SCHEDULER_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'scheduler_config.json')
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), 'order_results')
 LOG_FILE = os.path.join(os.path.dirname(__file__), 'trading_bot.log')
+SELECTED_SECTION_FILE = os.path.join(os.path.dirname(__file__), '.selected_section')
 
 # Validate environment variables only when running the bot (not when importing for tests)
 def validate_environment():
@@ -132,73 +133,10 @@ def read_config():
 
 def save_config(config):
     """
-    Save config.ini while preserving commented sections.
-    
-    This function updates only the active sections' properties in-place,
-    keeping all commented sections intact.
+    Save config.ini - simple write since we no longer use comments for section management.
     """
-    # Read the current file to preserve structure
-    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-    
-    # Build a map of section -> {key: value} from the config object
-    config_data = {}
-    for section in config.sections():
-        config_data[section] = dict(config[section])
-    
-    new_lines = []
-    current_section = None
-    current_section_is_active = False
-    processed_keys = set()
-    
-    for line in lines:
-        stripped = line.strip()
-        
-        # Check if this is a section header
-        if stripped.startswith('[') and ']' in stripped:
-            # Write any remaining keys for the previous section
-            if current_section_is_active and current_section in config_data:
-                for key, value in config_data[current_section].items():
-                    if key not in processed_keys:
-                        new_lines.append(f'{key} = {value}\n')
-            
-            processed_keys = set()
-            
-            # Check if this is an active (uncommented) section
-            if not stripped.startswith(';') and not stripped.startswith('#'):
-                bracket_end = stripped.index(']')
-                current_section = stripped[1:bracket_end]
-                current_section_is_active = current_section in config_data
-            else:
-                current_section = None
-                current_section_is_active = False
-            
-            new_lines.append(line)
-        
-        elif current_section_is_active and '=' in stripped and not stripped.startswith(';') and not stripped.startswith('#'):
-            # This is a key=value line in an active section
-            key = stripped.split('=')[0].strip()
-            processed_keys.add(key)
-            
-            if key in config_data[current_section]:
-                # Update with new value from config
-                new_lines.append(f'{key} = {config_data[current_section][key]}\n')
-            else:
-                # Keep original line
-                new_lines.append(line)
-        else:
-            # Keep all other lines (comments, empty lines, commented properties)
-            new_lines.append(line)
-    
-    # Write any remaining keys for the last section
-    if current_section_is_active and current_section in config_data:
-        for key, value in config_data[current_section].items():
-            if key not in processed_keys:
-                new_lines.append(f'{key} = {value}\n')
-    
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        f.writelines(new_lines)
-    
+        config.write(f)
     logger.info("Configuration saved")
 
 def get_all_result_files() -> list:
@@ -342,79 +280,51 @@ def get_locust_config():
             'html_report': 'report.html'
         }
 
-def get_active_section(config):
-    """Get the first active (non-commented) section"""
-    for section in config.sections():
-        if not section.startswith('#') and not section.startswith(';'):
-            return section
-    return None
+def get_selected_section():
+    """
+    Get the currently selected section for editing.
+    Returns the saved selection or the first available section.
+    """
+    # Try to read from file
+    if os.path.exists(SELECTED_SECTION_FILE):
+        try:
+            with open(SELECTED_SECTION_FILE, 'r', encoding='utf-8') as f:
+                selected = f.read().strip()
+                if selected:
+                    # Verify it still exists in config
+                    config = read_config()
+                    if selected in config.sections():
+                        return selected
+        except Exception as e:
+            logger.warning(f"Could not read selected section file: {e}")
+    
+    # Fall back to first section
+    config = read_config()
+    sections = config.sections()
+    return sections[0] if sections else None
+
+def set_selected_section(section_name):
+    """
+    Set the currently selected section for editing.
+    This does NOT comment out other sections - all sections remain active for trading.
+    """
+    try:
+        with open(SELECTED_SECTION_FILE, 'w', encoding='utf-8') as f:
+            f.write(section_name)
+        logger.info(f"Selected section for editing: {section_name}")
+        return True
+    except Exception as e:
+        logger.error(f"Could not save selected section: {e}")
+        return False
+
+# Keep old function names for backward compatibility
+def get_active_section(config=None):
+    """Get the currently selected section for editing (backward compatible)."""
+    return get_selected_section()
 
 def set_active_section(config_file, section_name):
-    """Make a section active by uncommenting it and commenting others"""
-    with open(config_file, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-    
-    new_lines = []
-    in_target_section = False
-    in_other_active_section = False
-    
-    for line in lines:
-        stripped = line.strip()
-        
-        # Check if this is a section header
-        if stripped.startswith('[') or (stripped.startswith(';') and '[' in stripped) or (stripped.startswith('#') and '[' in stripped):
-            # Check if it looks like a section header
-            test_stripped = stripped.lstrip('#; ')
-            if test_stripped.startswith('[') and ']' in test_stripped:
-                # Extract section name (remove comments and brackets)
-                bracket_start = test_stripped.index('[')
-                bracket_end = test_stripped.index(']')
-                current_section = test_stripped[bracket_start + 1:bracket_end].strip()
-                
-                if current_section == section_name:
-                    # Uncomment target section
-                    new_lines.append(f'[{section_name}]\n')
-                    in_target_section = True
-                    in_other_active_section = False
-                else:
-                    # Comment out other sections if they're active
-                    if not stripped.startswith('#') and not stripped.startswith(';'):
-                        new_lines.append(f'; [{current_section}]\n')
-                        in_other_active_section = True
-                    else:
-                        new_lines.append(line)
-                        in_other_active_section = False
-                    in_target_section = False
-                continue
-        
-        # Handle property lines
-        if in_target_section:
-            # Uncomment property lines in target section
-            if stripped.startswith(';') or stripped.startswith('#'):
-                uncommented = stripped.lstrip('#; ')
-                if '=' in uncommented:
-                    new_lines.append(uncommented + '\n')
-                else:
-                    new_lines.append(line)
-            else:
-                new_lines.append(line)
-        elif in_other_active_section:
-            # Comment out property lines in other active sections
-            if stripped and not stripped.startswith(';') and not stripped.startswith('#'):
-                if '=' in stripped:
-                    new_lines.append(f'; {stripped}\n')
-                else:
-                    new_lines.append(line)
-            else:
-                new_lines.append(line)
-        else:
-            # Keep lines in already-commented sections as-is
-            new_lines.append(line)
-    
-    with open(config_file, 'w', encoding='utf-8') as f:
-        f.writelines(new_lines)
-    
-    logger.info(f"Set active section to: {section_name}")
+    """Set the selected section (backward compatible - no longer comments out sections)."""
+    return set_selected_section(section_name)
 
 @bot.message_handler(commands=['list'])
 def list_configs(message):
@@ -424,40 +334,33 @@ def list_configs(message):
     
     try:
         config = read_config()
-        sections = []
-        active_section = get_active_section(config)
-        
-        # Get all sections including commented ones
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            for line in f:
-                stripped = line.strip()
-                if stripped.startswith('[') and ']' in stripped:
-                    # Extract section name, handle comments on same line
-                    bracket_end = stripped.index(']')
-                    section_part = stripped[:bracket_end + 1]
-                    section_name = section_part.lstrip('#;[').rstrip(']').strip()
-                    
-                    if section_name:  # Skip empty section names
-                        is_active = (section_name == active_section)
-                        status = "✅ ACTIVE" if is_active else "⚪"
-                        sections.append(f"{status} `{section_name}`")
+        sections = config.sections()
+        selected_section = get_selected_section()
         
         if not sections:
             bot.reply_to(message, "📝 No configurations found\n\nUse /add <name> to create one")
             return
         
-        response = "📋 *Available Configs:*\n\n" + "\n".join(sections)
-        response += "\n\nUse `/use <name>` to switch"
+        section_list = []
+        for section_name in sections:
+            is_selected = (section_name == selected_section)
+            status = "✏️ EDITING" if is_selected else "✅"
+            section_list.append(f"{status} `{section_name}`")
+        
+        response = f"📋 *All Configs ({len(sections)} accounts):*\n\n"
+        response += "\n".join(section_list)
+        response += "\n\n✏️ = Currently editing\n✅ = Active for trading"
+        response += "\n\nUse `/use <name>` to select for editing"
         
         bot.reply_to(message, response, parse_mode='Markdown')
         
     except Exception as e:
         logger.error(f"Error listing configs: {e}")
-        bot.reply_to(message, "❌ Error listing configurations")
+        bot.reply_to(message, f"❌ Error listing configurations: {e}")
 
 @bot.message_handler(commands=['use'])
 def use_config(message):
-    """Switch to a different configuration"""
+    """Select a configuration for editing (does NOT disable other configs)"""
     if not is_authorized(message):
         return
     
@@ -471,25 +374,21 @@ def use_config(message):
         
         # Check if section exists
         config = read_config()
-        all_sections = []
-        
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            for line in f:
-                stripped = line.strip()
-                if stripped.startswith('[') and ']' in stripped:
-                    bracket_end = stripped.index(']')
-                    section_part = stripped[:bracket_end + 1]
-                    section_name = section_part.lstrip('#;[').rstrip(']').strip()
-                    if section_name:
-                        all_sections.append(section_name)
+        all_sections = config.sections()
         
         if target_section not in all_sections:
-            available = ', '.join([f'`{s}`' for s in all_sections])
+            available = ', '.join([f'`{s}`' for s in all_sections[:5]])
+            if len(all_sections) > 5:
+                available += f' ... ({len(all_sections)} total)'
             bot.reply_to(message, f"❌ Config `{target_section}` not found\n\nAvailable: {available}", parse_mode='Markdown')
             return
         
-        set_active_section(CONFIG_FILE, target_section)
-        bot.reply_to(message, f"✅ Switched to config: `{target_section}`", parse_mode='Markdown')
+        set_selected_section(target_section)
+        bot.reply_to(message, 
+            f"✏️ Now editing: `{target_section}`\n\n"
+            f"Use /broker, /symbol, /side, /user, /pass to update this config.\n"
+            f"All {len(all_sections)} configs remain active for trading.", 
+            parse_mode='Markdown')
         
     except Exception as e:
         logger.error(f"Error switching config: {e}")
