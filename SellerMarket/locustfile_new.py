@@ -448,6 +448,28 @@ def on_test_stop(environment, **kwargs):
                 f"👥 Accounts: {accounts_processed}\n\n"
             )
             
+            # Find the latest date from all order result files
+            all_result_files = list(Path('order_results').glob('*.json'))
+            if all_result_files:
+                # Extract dates from filenames (format: username_broker_YYYYMMDD_HHMMSS.json)
+                file_dates = []
+                for file_path in all_result_files:
+                    try:
+                        # Extract date from filename (position after second underscore)
+                        parts = file_path.stem.split('_')
+                        if len(parts) >= 3:
+                            date_str = parts[2]  # YYYYMMDD
+                            if len(date_str) == 8:  # Valid date format
+                                file_date = datetime.strptime(date_str, '%Y%m%d').date()
+                                file_dates.append(file_date)
+                    except (ValueError, IndexError):
+                        continue
+                
+                latest_date = max(file_dates) if file_dates else datetime.now().date()
+                logger.info(f"Processing orders from latest date: {latest_date}")
+            else:
+                latest_date = datetime.now().date()
+            
             # Add details for each account
             account_details = []
             for section_name in config.sections():
@@ -456,31 +478,49 @@ def on_test_stop(environment, **kwargs):
                 broker_code = section['broker']
                 
                 try:
-                    # Get the result file for this account
-                    result_files = [f for f in Path('order_results').glob(f'*{username}_{broker_code}_*.json')]
+                    # Get all result files for this account from the latest date
+                    date_str = latest_date.strftime('%Y%m%d')
+                    result_files = [f for f in Path('order_results').glob(f'*{username}_{broker_code}_{date_str}_*.json')]
+                    
                     if result_files:
-                        latest_file = max(result_files, key=lambda f: f.stat().st_mtime)
-                        with open(latest_file, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                            orders = data.get('orders', [])
-                            
-                            if orders:
-                                # Get key order details
-                                order_summaries = []
-                                for order in orders[:3]:  # Show up to 3 orders per account
-                                    symbol = order.get('symbol', 'N/A')
-                                    tracking_number = order.get('tracking_number', 'N/A')
-                                    state_desc = order.get('state_desc', 'Unknown')
-                                    volume = order.get('volume', 0)
-                                    executed = order.get('executed_volume', 0)
-                                    
-                                    order_summaries.append(
-                                        f"• {symbol}: {tracking_number} ({executed}/{volume}) - {state_desc}"
-                                    )
+                        # Collect all orders from all files of the latest date
+                        all_orders = []
+                        for file_path in result_files:
+                            try:
+                                with open(file_path, 'r', encoding='utf-8') as f:
+                                    data = json.load(f)
+                                    file_orders = data.get('orders', [])
+                                    all_orders.extend(file_orders)
+                            except Exception:
+                                logger.exception(f"Error reading file {file_path}")
+                        
+                        if all_orders:
+                            # Group orders by symbol and select the one with minimum tracking_number
+                            symbol_orders = {}
+                            for order in all_orders:
+                                symbol = order.get('symbol', 'N/A')
+                                tracking_number = order.get('tracking_number', 0)
                                 
-                                account_details.append(
-                                    f"👤 *{username}@{broker_code}:*\n" + "\n".join(order_summaries)
+                                if symbol not in symbol_orders or tracking_number < symbol_orders[symbol]['tracking_number']:
+                                    symbol_orders[symbol] = {
+                                        'symbol': symbol,
+                                        'tracking_number': tracking_number,
+                                        'created_shamsi': order.get('created_shamsi', 'N/A'),
+                                        'price': order.get('price', 0),
+                                        'volume': order.get('volume', 0),
+                                        'state_desc': order.get('state_desc', 'Unknown')
+                                    }
+                            
+                            # Get key order details (up to 5 symbols per account)
+                            order_summaries = []
+                            for symbol_data in list(symbol_orders.values())[:5]:
+                                order_summaries.append(
+                                    f"• {symbol_data['symbol']}: #{symbol_data['tracking_number']} | {symbol_data['created_shamsi']} | {symbol_data['price']:,} | {symbol_data['volume']:,}"
                                 )
+                            
+                            account_details.append(
+                                f"👤 *{username}@{broker_code}:*\n" + "\n".join(order_summaries)
+                            )
                 except Exception:
                     logger.exception(f"Error getting details for {username}@{broker_code}")
             
