@@ -262,11 +262,6 @@ class TradingUser(HttpUser):
         
         If the current local time is before 08:44:58.500, the task returns immediately without sending a request. Otherwise, it sends a POST request using the instance's order URL, JSON payload, and authorization token, and records the outcome to the configured logger. Exceptions raised during request submission are caught and logged.
         """
-        # Fast timing check: skip orders before market open timing window
-        # Broker API has 300ms penalty per ISIN per person during high demand
-        now = datetime.now().time()
-        # if now < MARKET_OPEN_THRESHOLD:
-        #     return  # Skip order, mark task as completed
 
         # Get logger with file handler for this task
         task_logger = logging.getLogger(__name__)

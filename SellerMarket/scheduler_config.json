@@ -3,13 +3,13 @@
   "jobs": [
     {
       "name": "cache_warmup",
-      "time": "08:30:00",
+      "time": "08:15:00",
       "command": "python cache_warmup.py",
       "enabled": true
     },
     {
       "name": "run_trading",
-      "time": "08:44:30",
+      "time": "08:44:00",
       "command": "locust -f locustfile_new.py --headless",
       "enabled": true,
       "comment": "Locust parameters (users, spawn-rate, run-time, host) are loaded from locust_config.json"
