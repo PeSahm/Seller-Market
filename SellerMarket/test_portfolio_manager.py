@@ -425,6 +425,58 @@ class TestMarketCondition:
             is_queued=False
         )
         assert normal.is_queued == False
+    
+    def test_is_sell_queue_detection(self):
+        """Test sell queue detection - when sell at min price with heavy selling."""
+        # Sell queue (panic) - selling at min price with heavy sell volume
+        sell_queue = MarketCondition(
+            isin='IRO1TEST0001',
+            symbol='TEST',
+            last_price=5000.0,
+            max_price=5500.0,
+            min_price=4500.0,
+            best_limits=[BestLimit(
+                isin='IRO1TEST0001', row=1,
+                buy_volume=100_000, buy_order_count=10, buy_price=4500.0,  # Weak buying
+                sell_volume=50_000_000, sell_order_count=5000, sell_price=4500.0  # Sell at min!
+            )],
+            total_buy_volume=500_000,   # Very weak buying (< 1M)
+            total_sell_volume=200_000_000,  # 200M
+            is_queued=False
+        )
+        assert sell_queue.is_sell_queue == True
+        
+        # Normal market - sell price not at min, balanced volumes
+        normal = MarketCondition(
+            isin='IRO1TEST0001',
+            symbol='TEST',
+            last_price=5000.0,
+            max_price=5500.0,
+            min_price=4500.0,
+            best_limits=[BestLimit(
+                isin='IRO1TEST0001', row=1,
+                buy_volume=1_000_000, buy_order_count=100, buy_price=4950.0,
+                sell_volume=500_000, sell_order_count=50, sell_price=5010.0  # Sell at 5010, not min
+            )],
+            total_buy_volume=100_000_000,  # 100M healthy buying
+            total_sell_volume=50_000_000,   # 50M
+            is_queued=False
+        )
+        assert normal.is_sell_queue == False
+        
+        # Empty best_limits - should be False
+        empty = MarketCondition(
+            isin='IRO1TEST0001',
+            symbol='TEST',
+            last_price=5000.0,
+            max_price=5500.0,
+            min_price=4500.0,
+            best_limits=[],
+            total_buy_volume=10_000_000,
+            total_sell_volume=100_000_000,
+            is_queued=False
+        )
+        assert empty.is_sell_queue == False  # No best_limits = can't determine
 
 
 # =============================================================================
@@ -680,7 +732,56 @@ class TestPortfolioWatcher:
         price, reason = mock_watcher._determine_sell_action(sample_market_condition, MarketPhase.PREMARKET)
         
         assert price is not None
-        assert reason == "premarket_normal"
+        assert reason == "premarket_normal_urgent"
+    
+    def test_determine_sell_action_sell_queue_panic(self, mock_watcher, sample_market_condition):
+        """Test sell action in sell queue (panic mode) - must sell at MIN price."""
+        # Set up sell queue conditions:
+        # 1. Sell price at min price
+        # 2. Heavy sell volume OR weak buy volume
+        sample_market_condition.min_price = 4500.0
+        sample_market_condition.best_limits = [BestLimit(
+            isin='IRO1TEST0001', row=1,
+            buy_volume=100_000, buy_order_count=10, buy_price=4500.0,  # Weak buying
+            sell_volume=50_000_000, sell_order_count=5000, sell_price=4500.0  # Sell at min!
+        )]
+        sample_market_condition.total_sell_volume = 500_000_000  # Heavy selling
+        sample_market_condition.total_buy_volume = 500_000       # Very weak buying (<1M)
+        sample_market_condition.is_queued = False
+        
+        price, reason = mock_watcher._determine_sell_action(sample_market_condition, MarketPhase.TRADING)
+        
+        assert price == sample_market_condition.min_price
+        assert reason == "sell_queue_panic"
+    
+    def test_determine_sell_action_sell_queue_premarket(self, mock_watcher, sample_market_condition):
+        """Test sell action in sell queue during premarket (urgent)."""
+        # Set up sell queue conditions for premarket
+        sample_market_condition.min_price = 4500.0
+        sample_market_condition.best_limits = [BestLimit(
+            isin='IRO1TEST0001', row=1,
+            buy_volume=50_000, buy_order_count=5, buy_price=4500.0,
+            sell_volume=100_000_000, sell_order_count=10000, sell_price=4500.0  # Panic at min!
+        )]
+        sample_market_condition.total_sell_volume = 500_000_000
+        sample_market_condition.total_buy_volume = 100_000  # Very weak (<1M)
+        sample_market_condition.is_queued = False
+        
+        price, reason = mock_watcher._determine_sell_action(sample_market_condition, MarketPhase.PREMARKET)
+        
+        assert price == sample_market_condition.min_price
+        assert reason == "sell_queue_panic_premarket"
+    
+    def test_determine_sell_action_queue_demand_low_premarket(self, mock_watcher, sample_market_condition):
+        """Test sell action when queue demand low during premarket."""
+        sample_market_condition.is_queued = True
+        mock_watcher.config.min_buy_volume = 999_999_999_999  # Very high threshold
+        
+        price, reason = mock_watcher._determine_sell_action(sample_market_condition, MarketPhase.PREMARKET)
+        
+        assert price is not None
+        assert reason == "queue_demand_low_premarket"
+        assert price == sample_market_condition.best_buy_price
     
     def test_get_pending_volume(self, mock_watcher):
         """Test pending volume calculation."""

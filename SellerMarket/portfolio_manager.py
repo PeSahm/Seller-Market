@@ -191,7 +191,7 @@ class MarketCondition:
     best_limits: List[BestLimit]
     total_buy_volume: int
     total_sell_volume: int
-    is_queued: bool  # True if in queue (Seller's Market)
+    is_queued: bool  # True if in queue (Seller's Market / buy queue)
     timestamp: datetime = field(default_factory=datetime.now)
     
     @property
@@ -214,6 +214,58 @@ class MarketCondition:
         if self.best_limits:
             return self.best_limits[0].buy_volume
         return 0
+    
+    @property
+    def first_row_sell_volume(self) -> int:
+        """Get sell volume at best price (first row)."""
+        if self.best_limits:
+            return self.best_limits[0].sell_volume
+        return 0
+    
+    @property
+    def is_sell_queue(self) -> bool:
+        """
+        Check if this is a SELL queue (everyone wants to sell at min price).
+        
+        Sell queue = high sell volume at min price, low/no buy volume
+        This is the WORST case scenario - panic selling.
+        """
+        if not self.best_limits:
+            return False
+        
+        # Sell queue indicators:
+        # 1. Sell volume >> buy volume
+        # 2. Sell price is at or near min price
+        # 3. Very little buying interest
+        first_row = self.best_limits[0]
+        
+        is_sell_at_min = first_row.sell_price <= self.min_price * 1.01  # Within 1% of min
+        has_heavy_sell = self.total_sell_volume > self.total_buy_volume * 2
+        has_weak_buying = self.total_buy_volume < 1_000_000  # Less than 1M buy volume
+        
+        return is_sell_at_min and (has_heavy_sell or has_weak_buying)
+    
+    @property
+    def is_normal_market(self) -> bool:
+        """Check if this is a normal trading market (not queued either way)."""
+        return not self.is_queued and not self.is_sell_queue
+    
+    @property
+    def market_pressure(self) -> str:
+        """
+        Determine market pressure direction.
+        
+        Returns:
+            'buy_queue': High demand, buyers waiting (Seller's Market - GOOD)
+            'sell_queue': Everyone selling at min (PANIC - BAD)
+            'normal': Regular trading with both buyers and sellers
+        """
+        if self.is_queued:
+            return 'buy_queue'
+        elif self.is_sell_queue:
+            return 'sell_queue'
+        else:
+            return 'normal'
 
 
 @dataclass
@@ -695,10 +747,34 @@ class PortfolioWatcher:
         """
         Check if pending orders need to be cancelled and repriced.
         
-        In a fast-moving normal market, other sellers may undercut our price.
-        We need to revise orders quickly to stay competitive.
+        Scenarios requiring repricing:
+        1. SELL QUEUE: Must reprice ALL orders to MIN price immediately
+        2. Normal market: Other sellers may undercut, need competitive pricing
         """
         if not self._pending_orders or not can_modify_orders():
+            return
+        
+        # Sell queue is URGENT - reprice to minimum immediately
+        if market.is_sell_queue:
+            target_price = market.min_price
+            orders_to_cancel = []
+            
+            for order in self._pending_orders:
+                if order.state in (OrderState.ADDED, OrderState.ADDING):
+                    if order.price > target_price:
+                        orders_to_cancel.append(order)
+                        logger.warning(f"🚨 SELL QUEUE! Order {order.serial_number} @ {order.price} must go to MIN {target_price}")
+            
+            for order in orders_to_cancel:
+                if order.serial_number:
+                    success = self.api_client.cancel_order(order.serial_number)
+                    if success:
+                        self._pending_orders.remove(order)
+                        self.notifier.send(
+                            f"🚨 *SELL QUEUE - Repricing to MIN* {self.config.isin}\n"
+                            f"Old price: {order.price:,.0f}\n"
+                            f"New target: MIN {target_price:,.0f}"
+                        )
             return
         
         # Only reprice in normal market (not queued)
@@ -707,6 +783,8 @@ class PortfolioWatcher:
         
         # Calculate target price for normal market
         target_price = market.last_price * self.config.sell_discount
+        if target_price < market.min_price:
+            target_price = market.min_price
         
         # Check each pending order
         orders_to_cancel = []
@@ -733,45 +811,84 @@ class PortfolioWatcher:
         """
         Determine if we should sell and at what price.
         
-        Logic:
-        1. Queued market + low buy volume = Demand dropping, sell at best BUY price
-        2. Normal market = Competition, sell at last_price * discount
-        3. Pre-market normal = Rare opportunity, sell at discounted price
+        ## Market Scenarios:
+        
+        1. **Buy Queue (Seller's Market)** - is_queued=True
+           - High demand, buyers waiting at max price
+           - HOLD unless demand drops below threshold
+           - If demand low → sell at best BUY price (before queue breaks)
+        
+        2. **Sell Queue (Panic)** - is_sell_queue=True
+           - Everyone trying to sell at min price
+           - WORST CASE - sell at MIN PRICE immediately
+           - Race to exit before 8:55 freeze
+        
+        3. **Normal Market** - not queued either way
+           - Competition with other sellers
+           - Sell at last_price * discount
+           - Pre-market is URGENT - act before 8:55 freeze
         
         Returns:
             (price, reason) tuple, or (None, None) if no action needed
         """
-        # Case 1: Stock is in queue (Seller's Market / high demand)
+        # Check time urgency - how long until freeze?
+        seconds_to_freeze = 0
+        if phase == MarketPhase.PREMARKET:
+            now = datetime.now()
+            freeze_time = now.replace(hour=8, minute=55, second=0, microsecond=0)
+            seconds_to_freeze = max(0, (freeze_time - now).total_seconds())
+        
+        # =========================================================================
+        # Case 1: SELL QUEUE (Panic mode - everyone selling at min price)
+        # =========================================================================
+        if market.is_sell_queue:
+            # WORST CASE - must sell at minimum price
+            price = market.min_price
+            
+            if phase == MarketPhase.PREMARKET:
+                # URGENT! Must act before 8:55 freeze
+                logger.warning(f"🚨 SELL QUEUE DETECTED! Selling at MIN {price}, {seconds_to_freeze:.0f}s to freeze!")
+                return (price, "sell_queue_panic_premarket")
+            else:
+                logger.warning(f"🚨 SELL QUEUE DETECTED! Selling at MIN {price}")
+                return (price, "sell_queue_panic")
+        
+        # =========================================================================
+        # Case 2: BUY QUEUE (Seller's Market - high demand)
+        # =========================================================================
         if market.is_queued:
             # Check if demand is dropping below threshold
             if market.first_row_buy_volume < self.config.min_buy_volume:
-                # Demand is low - sell at best buy price for maximum profit
-                # This happens when queue is about to break
+                # Demand is dropping - sell at best buy price before queue breaks
                 price = market.best_buy_price
                 if price > 0:
-                    logger.info(f"Queue demand low ({market.first_row_buy_volume:,} < {self.config.min_buy_volume:,}), selling at best buy {price}")
-                    return (price, "queue_demand_low")
+                    if phase == MarketPhase.PREMARKET:
+                        logger.info(f"Queue demand dropping ({market.first_row_buy_volume:,}), {seconds_to_freeze:.0f}s to freeze, selling at {price}")
+                        return (price, "queue_demand_low_premarket")
+                    else:
+                        logger.info(f"Queue demand low ({market.first_row_buy_volume:,}), selling at best buy {price}")
+                        return (price, "queue_demand_low")
             else:
                 # Still high demand - hold position
-                logger.debug(f"Queue demand high ({market.first_row_buy_volume:,}), holding")
+                logger.debug(f"Buy queue demand high ({market.first_row_buy_volume:,}), holding")
                 return (None, None)
         
-        # Case 2: Stock is normal (not queued) - competitive selling
+        # =========================================================================
+        # Case 3: NORMAL MARKET (competition with other sellers)
+        # =========================================================================
+        # Calculate competitive sell price with discount
+        price = market.last_price * self.config.sell_discount
+        
+        # Make sure price is within allowed range
+        if price < market.min_price:
+            price = market.min_price
+        
+        if phase == MarketPhase.PREMARKET:
+            # URGENT - must place orders before 8:55 freeze!
+            logger.info(f"Pre-market normal, {seconds_to_freeze:.0f}s to freeze, selling at {price}")
+            return (price, "premarket_normal_urgent")
         else:
-            # Calculate competitive sell price
-            # Use discount to be competitive with other sellers
-            price = market.last_price * self.config.sell_discount
-            
-            # Make sure price is within allowed range
-            if price < market.min_price:
-                price = market.min_price
-            
-            # Pre-market normal is urgent
-            if phase == MarketPhase.PREMARKET:
-                logger.info(f"Pre-market normal detected, selling at {price}")
-                return (price, "premarket_normal")
-            
-            # Trading session normal
+            # Trading session - normal competition
             logger.info(f"Normal market, selling at {price} (last={market.last_price}, discount={self.config.sell_discount})")
             return (price, "normal_market_sell")
     
