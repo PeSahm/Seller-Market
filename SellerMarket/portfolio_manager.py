@@ -2,24 +2,41 @@
 Portfolio Manager for Auto-Selling Stocks Based on Market Conditions.
 
 This module monitors owned stocks and automatically sells them when specific
-market conditions are met:
+market conditions are met.
 
-1. Normal Market During Trading: After market opens, if the stock transitions
-   from queued (Seller's Market) to normal trading, sell at the best sell price
-   when buy volume exceeds a configurable threshold.
+## Market Timing (Tehran Stock Exchange):
 
-2. Pre-Market Normal: If the stock becomes normal during pre-market or right
-   at market open, sell immediately at last_price * sell_discount (-1% default).
+| Time Period       | Description                                    | Actions Allowed    |
+|-------------------|------------------------------------------------|--------------------|
+| 08:45:00-08:55:00 | Pre-market order entry                         | Place/Cancel/Modify|
+| 08:55:00-09:02:00 | Order FREEZE - No modifications allowed        | None               |
+| 09:00:00          | Market opens, orders start matching            | None               |
+| 09:02:00+         | Trading session, can modify orders             | Place/Cancel/Modify|
+
+## Sell Logic:
+
+1. **High Demand (Queued/Seller's Market)**:
+   - If buy volume at best price < threshold: Stock is losing demand
+   - Sell quickly at best BUY price to get maximum profit before queue breaks
+
+2. **Normal Market (Not Queued)**:
+   - Competition with other sellers
+   - Sell at last_price * sell_discount (e.g., 0.99 = -1%)
+   - Continuously monitor and revise orders as price moves
+   - Must be aggressive to compete with other sellers
+
+3. **Order Freeze Handling**:
+   - During 08:55:00-09:02:00, cannot cancel/modify orders
+   - Wait until 09:02:00 to analyze and adjust
+   - System tracks this and queues actions for after freeze
+
+4. **Partial Fills**:
+   - Track executed vs remaining volume
+   - Recalculate and resubmit for remaining shares
+   - Goal: Sell ALL shares
 
 Usage:
     python portfolio_manager.py --config portfolio_config.ini
-
-The script will:
-1. Load portfolio configurations
-2. Authenticate and cache tokens
-3. Monitor portfolio positions
-4. Execute sell orders when conditions are met
-5. Report all actions to Telegram
 """
 
 import argparse
@@ -39,6 +56,73 @@ from broker_enum import BrokerCode
 from api_client import EphoenixAPIClient
 from cache_manager import TradingCache
 from captcha_utils import decode_captcha
+
+# =============================================================================
+# Market Timing Constants (Tehran Stock Exchange)
+# =============================================================================
+
+# Pre-market order entry period
+PREMARKET_START = datetime.strptime("08:45:00", "%H:%M:%S").time()
+PREMARKET_END = datetime.strptime("08:55:00", "%H:%M:%S").time()
+
+# Order freeze period - NO modifications allowed
+ORDER_FREEZE_START = datetime.strptime("08:55:00", "%H:%M:%S").time()
+ORDER_FREEZE_END = datetime.strptime("09:02:00", "%H:%M:%S").time()
+
+# Market open time (orders start matching)
+MARKET_OPEN = datetime.strptime("09:00:00", "%H:%M:%S").time()
+
+# Trading session
+TRADING_START = datetime.strptime("09:02:00", "%H:%M:%S").time()
+TRADING_END = datetime.strptime("12:30:00", "%H:%M:%S").time()
+
+
+class MarketPhase(IntEnum):
+    """Current market phase based on time."""
+    CLOSED = 0           # Outside trading hours
+    PREMARKET = 1        # 08:45:00 - 08:55:00: Can place/cancel orders
+    ORDER_FREEZE = 2     # 08:55:00 - 09:02:00: NO modifications allowed
+    TRADING = 3          # 09:02:00 - 12:30:00: Normal trading
+
+
+def get_market_phase() -> MarketPhase:
+    """Determine current market phase based on time."""
+    now = datetime.now().time()
+    
+    if PREMARKET_START <= now < ORDER_FREEZE_START:
+        return MarketPhase.PREMARKET
+    elif ORDER_FREEZE_START <= now < ORDER_FREEZE_END:
+        return MarketPhase.ORDER_FREEZE
+    elif TRADING_START <= now <= TRADING_END:
+        return MarketPhase.TRADING
+    else:
+        return MarketPhase.CLOSED
+
+
+def can_modify_orders() -> bool:
+    """Check if we can modify/cancel orders right now."""
+    phase = get_market_phase()
+    return phase in (MarketPhase.PREMARKET, MarketPhase.TRADING)
+
+
+def seconds_until_can_modify() -> float:
+    """Get seconds until we can modify orders again (0 if already can)."""
+    if can_modify_orders():
+        return 0.0
+    
+    now = datetime.now()
+    freeze_end = now.replace(
+        hour=ORDER_FREEZE_END.hour,
+        minute=ORDER_FREEZE_END.minute,
+        second=ORDER_FREEZE_END.second,
+        microsecond=0
+    )
+    
+    if now.time() < ORDER_FREEZE_END:
+        return (freeze_end - now).total_seconds()
+    
+    # After trading hours, return until next day premarket
+    return 0.0
 
 # Configure logging
 logging.basicConfig(
@@ -479,6 +563,8 @@ class PortfolioWatcher:
         self._pending_orders: List[SellOrder] = []
         self._total_sold = 0
         self._target_quantity = 0
+        self._last_market_phase: Optional[MarketPhase] = None
+        self._freeze_notified = False  # Track if we've notified about freeze
         
         logger.info(f"PortfolioWatcher initialized for {config.username}@{config.broker} - {config.isin}")
     
@@ -489,13 +575,17 @@ class PortfolioWatcher:
             return
         
         self._running = True
+        self._freeze_notified = False
         self._thread = threading.Thread(target=self._watch_loop, daemon=True)
         self._thread.start()
         
+        phase = get_market_phase()
         self.notifier.send(
             f"🔍 *Started watching* {self.config.isin}\n"
             f"Account: `{self.config.username}@{self.config.broker}`\n"
-            f"Min buy volume: {self.config.min_buy_volume:,}"
+            f"Min buy volume: {self.config.min_buy_volume:,}\n"
+            f"Sell discount: {self.config.sell_discount:.1%}\n"
+            f"Current phase: {phase.name}"
         )
         logger.info(f"Started watching {self.config.isin}")
     
@@ -524,7 +614,21 @@ class PortfolioWatcher:
     
     def _check_and_act(self):
         """Check market conditions and take action if needed."""
-        # Get current position
+        phase = get_market_phase()
+        
+        # Notify on phase change
+        if self._last_market_phase != phase:
+            self._last_market_phase = phase
+            self._freeze_notified = False
+            if phase != MarketPhase.CLOSED:
+                self.notifier.send(f"⏰ *Market phase changed*: {phase.name}")
+        
+        # Skip if market is closed
+        if phase == MarketPhase.CLOSED:
+            logger.debug("Market closed, skipping check")
+            return
+        
+        # Get current position from portfolio
         positions = self.api_client.get_portfolio_positions()
         position = next(
             (p for p in positions if p.isin == self.config.isin),
@@ -543,21 +647,42 @@ class PortfolioWatcher:
         # Update target quantity if not set
         if self._target_quantity == 0:
             self._target_quantity = position.quantity
+            self.notifier.send(
+                f"📊 *Tracking position* {self.config.isin}\n"
+                f"Quantity: {self._target_quantity:,} shares"
+            )
             logger.info(f"Target quantity set to {self._target_quantity} for {self.config.isin}")
         
-        # Get market conditions
+        # Get market conditions (best limits)
         market = self.api_client.get_best_limits(self.config.isin)
         
-        # Check pending orders
+        # Update pending orders status
         self._update_pending_orders()
         
+        # Handle order freeze period - can only monitor, not act
+        if phase == MarketPhase.ORDER_FREEZE:
+            if not self._freeze_notified:
+                wait_time = seconds_until_can_modify()
+                self.notifier.send(
+                    f"🔒 *Order freeze* until 09:02:00\n"
+                    f"Position: {position.quantity:,} shares\n"
+                    f"Pending orders: {len(self._pending_orders)}\n"
+                    f"Wait time: {wait_time:.0f}s"
+                )
+                self._freeze_notified = True
+            logger.debug(f"Order freeze period - waiting until 09:02:00")
+            return
+        
+        # Determine if we need to cancel and resubmit orders at new price
+        self._handle_order_repricing(market, phase)
+        
         # Determine sell action
-        sell_price, sell_reason = self._determine_sell_action(market)
+        sell_price, sell_reason = self._determine_sell_action(market, phase)
         
         if sell_price is None:
             return
         
-        # Calculate remaining quantity to sell
+        # Calculate remaining quantity to sell (position - pending orders)
         remaining = position.quantity - self._get_pending_volume()
         
         if remaining <= 0:
@@ -566,27 +691,89 @@ class PortfolioWatcher:
         # Execute sell orders
         self._execute_sell(market, sell_price, remaining, sell_reason)
     
-    def _determine_sell_action(self, market: MarketCondition) -> tuple:
+    def _handle_order_repricing(self, market: MarketCondition, phase: MarketPhase):
+        """
+        Check if pending orders need to be cancelled and repriced.
+        
+        In a fast-moving normal market, other sellers may undercut our price.
+        We need to revise orders quickly to stay competitive.
+        """
+        if not self._pending_orders or not can_modify_orders():
+            return
+        
+        # Only reprice in normal market (not queued)
+        if market.is_queued:
+            return
+        
+        # Calculate target price for normal market
+        target_price = market.last_price * self.config.sell_discount
+        
+        # Check each pending order
+        orders_to_cancel = []
+        for order in self._pending_orders:
+            if order.state in (OrderState.ADDED, OrderState.ADDING):
+                # If our price is higher than target, we need to lower it
+                if order.price > target_price + 1:  # +1 for rounding tolerance
+                    orders_to_cancel.append(order)
+                    logger.info(f"Order {order.serial_number} price {order.price} > target {target_price}, will cancel")
+        
+        # Cancel orders that need repricing
+        for order in orders_to_cancel:
+            if order.serial_number:
+                success = self.api_client.cancel_order(order.serial_number)
+                if success:
+                    self._pending_orders.remove(order)
+                    self.notifier.send(
+                        f"🔄 *Repricing order* {self.config.isin}\n"
+                        f"Old price: {order.price:,.0f}\n"
+                        f"New target: {target_price:,.0f}"
+                    )
+    
+    def _determine_sell_action(self, market: MarketCondition, phase: MarketPhase) -> tuple:
         """
         Determine if we should sell and at what price.
+        
+        Logic:
+        1. Queued market + low buy volume = Demand dropping, sell at best BUY price
+        2. Normal market = Competition, sell at last_price * discount
+        3. Pre-market normal = Rare opportunity, sell at discounted price
         
         Returns:
             (price, reason) tuple, or (None, None) if no action needed
         """
-        now = datetime.now()
-        market_open = now.replace(hour=8, minute=45, second=0, microsecond=0)
+        # Case 1: Stock is in queue (Seller's Market / high demand)
+        if market.is_queued:
+            # Check if demand is dropping below threshold
+            if market.first_row_buy_volume < self.config.min_buy_volume:
+                # Demand is low - sell at best buy price for maximum profit
+                # This happens when queue is about to break
+                price = market.best_buy_price
+                if price > 0:
+                    logger.info(f"Queue demand low ({market.first_row_buy_volume:,} < {self.config.min_buy_volume:,}), selling at best buy {price}")
+                    return (price, "queue_demand_low")
+            else:
+                # Still high demand - hold position
+                logger.debug(f"Queue demand high ({market.first_row_buy_volume:,}), holding")
+                return (None, None)
         
-        # Pre-market or at open - stock is normal
-        if now < market_open and not market.is_queued:
+        # Case 2: Stock is normal (not queued) - competitive selling
+        else:
+            # Calculate competitive sell price
+            # Use discount to be competitive with other sellers
             price = market.last_price * self.config.sell_discount
-            return (price, "pre_market_normal")
-        
-        # During trading - buy volume threshold met
-        if not market.is_queued and market.first_row_buy_volume >= self.config.min_buy_volume:
-            price = market.best_sell_price if market.best_sell_price > 0 else market.last_price
-            return (price, "volume_threshold_met")
-        
-        return (None, None)
+            
+            # Make sure price is within allowed range
+            if price < market.min_price:
+                price = market.min_price
+            
+            # Pre-market normal is urgent
+            if phase == MarketPhase.PREMARKET:
+                logger.info(f"Pre-market normal detected, selling at {price}")
+                return (price, "premarket_normal")
+            
+            # Trading session normal
+            logger.info(f"Normal market, selling at {price} (last={market.last_price}, discount={self.config.sell_discount})")
+            return (price, "normal_market_sell")
     
     def _execute_sell(self, market: MarketCondition, price: float, 
                       quantity: int, reason: str):

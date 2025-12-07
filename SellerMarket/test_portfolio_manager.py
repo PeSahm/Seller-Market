@@ -4,6 +4,7 @@ Comprehensive tests for Portfolio Manager module.
 Tests cover:
 - PortfolioConfig parsing
 - OrderState enum
+- MarketPhase and timing functions
 - BestLimit and MarketCondition dataclasses
 - PortfolioWatcher sell decision logic
 - PortfolioAPIClient API interactions (mocked)
@@ -21,6 +22,7 @@ from dataclasses import asdict
 
 from portfolio_manager import (
     OrderState,
+    MarketPhase,
     PortfolioPosition,
     BestLimit,
     MarketCondition,
@@ -30,6 +32,14 @@ from portfolio_manager import (
     PortfolioAPIClient,
     PortfolioWatcher,
     PortfolioManager,
+    get_market_phase,
+    can_modify_orders,
+    seconds_until_can_modify,
+    PREMARKET_START,
+    ORDER_FREEZE_START,
+    ORDER_FREEZE_END,
+    TRADING_START,
+    TRADING_END,
 )
 
 
@@ -191,6 +201,75 @@ class TestOrderState:
         assert OrderState(1) == OrderState.ADDING
         assert OrderState(3) == OrderState.EXECUTED
         assert OrderState(6) == OrderState.PARTIAL_EXECUTED
+
+
+# =============================================================================
+# Test Market Timing Functions
+# =============================================================================
+
+class TestMarketTiming:
+    """Tests for market timing functions."""
+    
+    def test_market_phase_enum_values(self):
+        """Test MarketPhase enum values."""
+        assert MarketPhase.CLOSED == 0
+        assert MarketPhase.PREMARKET == 1
+        assert MarketPhase.ORDER_FREEZE == 2
+        assert MarketPhase.TRADING == 3
+    
+    @patch('portfolio_manager.datetime')
+    def test_get_market_phase_premarket(self, mock_datetime):
+        """Test premarket phase detection (08:45-08:55)."""
+        mock_datetime.now.return_value = datetime(2025, 12, 7, 8, 50, 0)
+        mock_datetime.strptime = datetime.strptime
+        
+        phase = get_market_phase()
+        assert phase == MarketPhase.PREMARKET
+    
+    @patch('portfolio_manager.datetime')
+    def test_get_market_phase_order_freeze(self, mock_datetime):
+        """Test order freeze phase detection (08:55-09:02)."""
+        mock_datetime.now.return_value = datetime(2025, 12, 7, 9, 0, 0)
+        mock_datetime.strptime = datetime.strptime
+        
+        phase = get_market_phase()
+        assert phase == MarketPhase.ORDER_FREEZE
+    
+    @patch('portfolio_manager.datetime')
+    def test_get_market_phase_trading(self, mock_datetime):
+        """Test trading phase detection (09:02-12:30)."""
+        mock_datetime.now.return_value = datetime(2025, 12, 7, 10, 30, 0)
+        mock_datetime.strptime = datetime.strptime
+        
+        phase = get_market_phase()
+        assert phase == MarketPhase.TRADING
+    
+    @patch('portfolio_manager.datetime')
+    def test_get_market_phase_closed(self, mock_datetime):
+        """Test closed phase detection (outside trading hours)."""
+        mock_datetime.now.return_value = datetime(2025, 12, 7, 14, 0, 0)
+        mock_datetime.strptime = datetime.strptime
+        
+        phase = get_market_phase()
+        assert phase == MarketPhase.CLOSED
+    
+    @patch('portfolio_manager.get_market_phase')
+    def test_can_modify_orders_premarket(self, mock_phase):
+        """Test can modify orders in premarket."""
+        mock_phase.return_value = MarketPhase.PREMARKET
+        assert can_modify_orders() == True
+    
+    @patch('portfolio_manager.get_market_phase')
+    def test_can_modify_orders_freeze(self, mock_phase):
+        """Test cannot modify orders during freeze."""
+        mock_phase.return_value = MarketPhase.ORDER_FREEZE
+        assert can_modify_orders() == False
+    
+    @patch('portfolio_manager.get_market_phase')
+    def test_can_modify_orders_trading(self, mock_phase):
+        """Test can modify orders during trading."""
+        mock_phase.return_value = MarketPhase.TRADING
+        assert can_modify_orders() == True
 
 
 # =============================================================================
@@ -561,35 +640,47 @@ class TestPortfolioWatcher:
                     watcher.api_client = Mock()
                     return watcher
     
-    def test_determine_sell_action_volume_threshold(self, mock_watcher, sample_market_condition):
-        """Test sell action when volume threshold is met."""
-        # Buy volume exceeds threshold and market is normal
-        sample_market_condition.is_queued = False
-        mock_watcher.config.min_buy_volume = 1000000  # Set low threshold
-        
-        price, reason = mock_watcher._determine_sell_action(sample_market_condition)
-        
-        assert price is not None
-        assert reason == "volume_threshold_met"
-    
-    def test_determine_sell_action_queued_market(self, mock_watcher, sample_market_condition):
-        """Test no sell action when market is queued."""
+    def test_determine_sell_action_queue_demand_low(self, mock_watcher, sample_market_condition):
+        """Test sell action when queue demand is low."""
+        # Stock is queued but buy volume is below threshold
         sample_market_condition.is_queued = True
-        
-        price, reason = mock_watcher._determine_sell_action(sample_market_condition)
-        
-        assert price is None
-        assert reason is None
-    
-    def test_determine_sell_action_below_threshold(self, mock_watcher, sample_market_condition):
-        """Test no sell action when below volume threshold."""
-        sample_market_condition.is_queued = False
         mock_watcher.config.min_buy_volume = 999_999_999_999  # Very high threshold
         
-        price, reason = mock_watcher._determine_sell_action(sample_market_condition)
+        price, reason = mock_watcher._determine_sell_action(sample_market_condition, MarketPhase.TRADING)
+        
+        assert price is not None
+        assert reason == "queue_demand_low"
+        assert price == sample_market_condition.best_buy_price
+    
+    def test_determine_sell_action_queue_demand_high(self, mock_watcher, sample_market_condition):
+        """Test no sell action when queue demand is high (hold)."""
+        # Stock is queued and buy volume is above threshold
+        sample_market_condition.is_queued = True
+        mock_watcher.config.min_buy_volume = 1000000  # Low threshold, demand is high
+        
+        price, reason = mock_watcher._determine_sell_action(sample_market_condition, MarketPhase.TRADING)
         
         assert price is None
         assert reason is None
+    
+    def test_determine_sell_action_normal_market(self, mock_watcher, sample_market_condition):
+        """Test sell action in normal market (not queued)."""
+        sample_market_condition.is_queued = False
+        
+        price, reason = mock_watcher._determine_sell_action(sample_market_condition, MarketPhase.TRADING)
+        
+        assert price is not None
+        assert reason == "normal_market_sell"
+        assert price == pytest.approx(sample_market_condition.last_price * mock_watcher.config.sell_discount)
+    
+    def test_determine_sell_action_premarket_normal(self, mock_watcher, sample_market_condition):
+        """Test sell action in premarket when stock is normal."""
+        sample_market_condition.is_queued = False
+        
+        price, reason = mock_watcher._determine_sell_action(sample_market_condition, MarketPhase.PREMARKET)
+        
+        assert price is not None
+        assert reason == "premarket_normal"
     
     def test_get_pending_volume(self, mock_watcher):
         """Test pending volume calculation."""
@@ -782,9 +873,10 @@ class TestPreMarketNormal:
             is_queued=False  # Stock is normal pre-market
         )
         
-        price, reason = watcher_with_mocked_time._determine_sell_action(market_condition)
+        # Test with PREMARKET phase directly
+        price, reason = watcher_with_mocked_time._determine_sell_action(market_condition, MarketPhase.PREMARKET)
         
-        assert reason == "pre_market_normal"
+        assert reason == "premarket_normal"
         assert price == pytest.approx(5247.0 * 0.99)
 
 
