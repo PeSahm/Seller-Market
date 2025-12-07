@@ -35,6 +35,7 @@ from portfolio_manager import (
     get_market_phase,
     can_modify_orders,
     seconds_until_can_modify,
+    round_to_tick_size,
     PREMARKET_START,
     ORDER_FREEZE_START,
     ORDER_FREEZE_END,
@@ -702,7 +703,8 @@ class TestPortfolioWatcher:
         
         assert price is not None
         assert reason == "queue_demand_low"
-        assert price == sample_market_condition.best_buy_price
+        # Price is rounded to tick size (tick=10 for 5000-20000 range)
+        assert price == round_to_tick_size(sample_market_condition.best_buy_price)
     
     def test_determine_sell_action_queue_demand_high(self, mock_watcher, sample_market_condition):
         """Test no sell action when queue demand is high (hold)."""
@@ -723,7 +725,9 @@ class TestPortfolioWatcher:
         
         assert price is not None
         assert reason == "normal_market_sell"
-        assert price == pytest.approx(sample_market_condition.last_price * mock_watcher.config.sell_discount)
+        # Price is rounded to tick size (tick=10 for 5000-20000 range)
+        expected_price = round_to_tick_size(sample_market_condition.last_price * mock_watcher.config.sell_discount)
+        assert price == expected_price
     
     def test_determine_sell_action_premarket_normal(self, mock_watcher, sample_market_condition):
         """Test sell action in premarket when stock is normal."""
@@ -781,7 +785,8 @@ class TestPortfolioWatcher:
         
         assert price is not None
         assert reason == "queue_demand_low_premarket"
-        assert price == sample_market_condition.best_buy_price
+        # Price is rounded to tick size (tick=10 for 5000-20000 range)
+        assert price == round_to_tick_size(sample_market_condition.best_buy_price)
     
     def test_determine_sell_action_price_floor_at_min_price(self, mock_watcher, sample_market_condition):
         """Test that sell price never goes below daily minimum price.
@@ -1040,7 +1045,9 @@ class TestPreMarketNormal:
         price, reason = watcher_with_mocked_time._determine_sell_action(market_condition, MarketPhase.PREMARKET)
         
         assert reason == "premarket_normal_urgent"
-        assert price == pytest.approx(5247.0 * 0.99)
+        # Price is rounded to tick size (tick=10 for 5000-20000 range)
+        # 5247.0 * 0.99 = 5194.53 -> rounded to 5190
+        assert price == round_to_tick_size(5247.0 * 0.99)
 
 
 # =============================================================================
