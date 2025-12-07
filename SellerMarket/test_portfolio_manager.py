@@ -832,19 +832,32 @@ class TestPortfolioWatcher:
         assert price == 4950.0
         assert reason == "normal_market_sell"
     
-    def test_get_pending_volume(self, mock_watcher):
-        """Test pending volume calculation."""
+    def test_check_needs_repricing_true(self, mock_watcher):
+        """Test repricing detection when price changed significantly."""
         mock_watcher._pending_orders = [
-            SellOrder('IRO1TEST0001', 5000.0, 1000, remaining_volume=500),
-            SellOrder('IRO1TEST0001', 5000.0, 2000, remaining_volume=1500),
+            SellOrder('IRO1TEST0001', 5000.0, 1000, serial_number=111, state=OrderState.ADDED),
         ]
-        # Need to manually set remaining_volume as __post_init__ calculates it
-        mock_watcher._pending_orders[0].remaining_volume = 500
-        mock_watcher._pending_orders[1].remaining_volume = 1500
         
-        total = mock_watcher._get_pending_volume()
+        # New price differs by more than 1
+        result = mock_watcher._check_needs_repricing(4990.0)
+        assert result == True
+    
+    def test_check_needs_repricing_false(self, mock_watcher):
+        """Test repricing detection when price is within tolerance."""
+        mock_watcher._pending_orders = [
+            SellOrder('IRO1TEST0001', 5000.0, 1000, serial_number=111, state=OrderState.ADDED),
+        ]
         
-        assert total == 2000
+        # New price within tolerance (diff <= 1)
+        result = mock_watcher._check_needs_repricing(5000.5)
+        assert result == False
+    
+    def test_check_needs_repricing_no_orders(self, mock_watcher):
+        """Test repricing detection with no pending orders."""
+        mock_watcher._pending_orders = []
+        
+        result = mock_watcher._check_needs_repricing(4900.0)
+        assert result == False
     
     def test_start_stop(self, mock_watcher):
         """Test starting and stopping the watcher."""
@@ -1056,7 +1069,7 @@ class TestOrderStateTracking:
                     return watcher
     
     def test_update_executed_orders(self, watcher_with_pending_orders):
-        """Test updating executed orders."""
+        """Test updating executed orders - removes completed orders from pending list."""
         # First order is executed (not in open orders), second is still pending
         watcher_with_pending_orders.api_client.get_order_status = Mock(
             side_effect=[None, {'orderState': 2, 'executedVolume': 0}]
@@ -1064,11 +1077,12 @@ class TestOrderStateTracking:
         
         watcher_with_pending_orders._update_pending_orders()
         
-        assert watcher_with_pending_orders._total_sold == 1000
+        # Only one order should remain (the one still in ADDED state)
         assert len(watcher_with_pending_orders._pending_orders) == 1
+        assert watcher_with_pending_orders._pending_orders[0].serial_number == 222
     
     def test_update_partial_executed(self, watcher_with_pending_orders):
-        """Test updating partially executed orders."""
+        """Test updating partially executed orders - keeps them in pending list."""
         watcher_with_pending_orders.api_client.get_order_status = Mock(
             return_value={'orderState': 6, 'executedVolume': 500}  # Partial
         )
@@ -1080,8 +1094,9 @@ class TestOrderStateTracking:
         
         watcher_with_pending_orders._update_pending_orders()
         
-        assert watcher_with_pending_orders._total_sold == 500
+        # Partial executed orders stay in pending list
         assert len(watcher_with_pending_orders._pending_orders) == 1
+        assert watcher_with_pending_orders._pending_orders[0].state == OrderState.PARTIAL_EXECUTED
 
 
 # =============================================================================

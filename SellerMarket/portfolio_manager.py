@@ -613,8 +613,7 @@ class PortfolioWatcher:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._pending_orders: List[SellOrder] = []
-        self._total_sold = 0
-        self._target_quantity = 0
+        self._target_quantity = 0  # Initial position size, set on first check
         self._last_market_phase: Optional[MarketPhase] = None
         self._freeze_notified = False  # Track if we've notified about freeze
         
@@ -688,15 +687,16 @@ class PortfolioWatcher:
         )
         
         if not position or position.quantity <= 0:
-            if self._target_quantity > 0 and self._total_sold >= self._target_quantity:
+            # Position is empty - all shares sold!
+            if self._target_quantity > 0:
                 self.notifier.send(
                     f"✅ *All shares sold* for {self.config.isin}\n"
-                    f"Total sold: {self._total_sold:,} shares"
+                    f"Total sold: {self._target_quantity:,} shares"
                 )
                 self._running = False
             return
         
-        # Update target quantity if not set
+        # Update target quantity if not set (first run)
         if self._target_quantity == 0:
             self._target_quantity = position.quantity
             self.notifier.send(
@@ -725,87 +725,72 @@ class PortfolioWatcher:
             logger.debug(f"Order freeze period - waiting until 09:02:00")
             return
         
-        # Determine if we need to cancel and resubmit orders at new price
-        self._handle_order_repricing(market, phase)
-        
-        # Determine sell action
+        # Determine sell action based on market conditions
         sell_price, sell_reason = self._determine_sell_action(market, phase)
         
         if sell_price is None:
             return
         
-        # Calculate remaining quantity to sell (position - pending orders)
-        remaining = position.quantity - self._get_pending_volume()
+        # =================================================================
+        # SAFER APPROACH: Use portfolio as source of truth
+        # Cancel all pending orders if price changed, then place new ones
+        # for the ACTUAL remaining quantity from portfolio
+        # =================================================================
         
-        if remaining <= 0:
-            return
+        # Check if we need to reprice (price changed significantly)
+        needs_repricing = self._check_needs_repricing(sell_price)
         
-        # Execute sell orders
-        self._execute_sell(market, sell_price, remaining, sell_reason)
+        if needs_repricing and self._pending_orders:
+            # Cancel all pending orders - we'll recalculate from portfolio
+            self._cancel_all_pending_orders()
+        
+        # Use portfolio quantity as source of truth (already fetched above)
+        # This is the ACTUAL remaining shares we own
+        quantity_to_sell = position.quantity
+        
+        # Only place new orders if we have shares and no pending orders
+        if quantity_to_sell > 0 and not self._pending_orders:
+            self._execute_sell(market, sell_price, quantity_to_sell, sell_reason)
     
-    def _handle_order_repricing(self, market: MarketCondition, phase: MarketPhase):
+    def _check_needs_repricing(self, new_price: float) -> bool:
         """
-        Check if pending orders need to be cancelled and repriced.
+        Check if pending orders need repricing.
         
-        Scenarios requiring repricing:
-        1. SELL QUEUE: Must reprice ALL orders to MIN price immediately
-        2. Normal market: Other sellers may undercut, need competitive pricing
+        Returns True if the new price differs significantly from existing orders.
         """
-        if not self._pending_orders or not can_modify_orders():
-            return
+        if not self._pending_orders:
+            return False
         
-        # Sell queue is URGENT - reprice to minimum immediately
-        if market.is_sell_queue:
-            target_price = market.min_price
-            orders_to_cancel = []
-            
-            for order in self._pending_orders:
-                if order.state in (OrderState.ADDED, OrderState.ADDING):
-                    if order.price > target_price:
-                        orders_to_cancel.append(order)
-                        logger.warning(f"🚨 SELL QUEUE! Order {order.serial_number} @ {order.price} must go to MIN {target_price}")
-            
-            for order in orders_to_cancel:
-                if order.serial_number:
-                    success = self.api_client.cancel_order(order.serial_number)
-                    if success:
-                        self._pending_orders.remove(order)
-                        self.notifier.send(
-                            f"🚨 *SELL QUEUE - Repricing to MIN* {self.config.isin}\n"
-                            f"Old price: {order.price:,.0f}\n"
-                            f"New target: MIN {target_price:,.0f}"
-                        )
-            return
-        
-        # Only reprice in normal market (not queued)
-        if market.is_queued:
-            return
-        
-        # Calculate target price for normal market
-        target_price = market.last_price * self.config.sell_discount
-        if target_price < market.min_price:
-            target_price = market.min_price
-        
-        # Check each pending order
-        orders_to_cancel = []
         for order in self._pending_orders:
             if order.state in (OrderState.ADDED, OrderState.ADDING):
-                # If our price is higher than target, we need to lower it
-                if order.price > target_price + 1:  # +1 for rounding tolerance
-                    orders_to_cancel.append(order)
-                    logger.info(f"Order {order.serial_number} price {order.price} > target {target_price}, will cancel")
+                # If price difference > 1 (rounding tolerance), need to reprice
+                if abs(order.price - new_price) > 1:
+                    logger.info(f"Price changed: {order.price} -> {new_price}, need repricing")
+                    return True
         
-        # Cancel orders that need repricing
-        for order in orders_to_cancel:
-            if order.serial_number:
+        return False
+    
+    def _cancel_all_pending_orders(self):
+        """Cancel all pending orders and clear the list."""
+        if not can_modify_orders():
+            logger.warning("Cannot cancel orders during freeze period")
+            return
+        
+        cancelled_count = 0
+        for order in self._pending_orders:
+            if order.serial_number and order.state in (OrderState.ADDED, OrderState.ADDING):
                 success = self.api_client.cancel_order(order.serial_number)
                 if success:
-                    self._pending_orders.remove(order)
-                    self.notifier.send(
-                        f"🔄 *Repricing order* {self.config.isin}\n"
-                        f"Old price: {order.price:,.0f}\n"
-                        f"New target: {target_price:,.0f}"
-                    )
+                    cancelled_count += 1
+                    logger.info(f"Cancelled order {order.serial_number}")
+        
+        if cancelled_count > 0:
+            self.notifier.send(
+                f"🔄 *Cancelled {cancelled_count} orders* for repricing\n"
+                f"ISIN: {self.config.isin}"
+            )
+        
+        self._pending_orders = []
     
     def _determine_sell_action(self, market: MarketCondition, phase: MarketPhase) -> tuple:
         """
@@ -945,7 +930,12 @@ class PortfolioWatcher:
             remaining -= order_volume
     
     def _update_pending_orders(self):
-        """Update status of pending orders and handle completed/cancelled ones."""
+        """
+        Update status of pending orders.
+        
+        Simplified: Just check which orders are still active.
+        We use portfolio as source of truth for quantities, not order tracking.
+        """
         updated_orders = []
         
         for order in self._pending_orders:
@@ -955,42 +945,30 @@ class PortfolioWatcher:
             status = self.api_client.get_order_status(order.serial_number)
             
             if status is None:
-                # Order not in open orders - check if executed
-                order.state = OrderState.EXECUTED
-                self._total_sold += order.volume
-                logger.info(f"Order {order.serial_number} completed: {order.volume} shares")
+                # Order not in open orders - it was executed or cancelled
+                logger.info(f"Order {order.serial_number} no longer in open orders")
                 continue
             
             order.state = OrderState(status.get('orderState', 1))
-            order.executed_volume = int(status.get('executedVolume', 0))
-            order.remaining_volume = order.volume - order.executed_volume
             
-            if order.state == OrderState.EXECUTED:
-                self._total_sold += order.volume
-            elif order.state == OrderState.PARTIAL_EXECUTED:
-                self._total_sold += order.executed_volume
-                # Keep tracking remaining
+            if order.state in (OrderState.ADDED, OrderState.ADDING, OrderState.MODIFYING):
+                # Order is still active
                 updated_orders.append(order)
-            elif order.state in (OrderState.ADDED, OrderState.ADDING, OrderState.MODIFYING):
+            elif order.state == OrderState.PARTIAL_EXECUTED:
+                # Partially executed but still active
                 updated_orders.append(order)
             elif order.state == OrderState.CANCELED:
                 logger.info(f"Order {order.serial_number} was cancelled")
             elif order.state == OrderState.ERROR:
                 logger.error(f"Order {order.serial_number} has error")
                 self.notifier.send(f"❌ *Order error* {order.serial_number}")
+            # EXECUTED orders are removed from pending list
         
         self._pending_orders = updated_orders
     
-    def _get_pending_volume(self) -> int:
-        """Get total volume in pending orders."""
-        return sum(o.remaining_volume for o in self._pending_orders)
-    
     def cancel_all_pending(self):
-        """Cancel all pending orders."""
-        for order in self._pending_orders:
-            if order.serial_number:
-                self.api_client.cancel_order(order.serial_number)
-        self._pending_orders = []
+        """Cancel all pending orders (public method for external use)."""
+        self._cancel_all_pending_orders()
 
 
 class PortfolioManager:
@@ -1091,7 +1069,7 @@ class PortfolioManager:
                 'running': watcher.is_running,
                 'isin': watcher.config.isin,
                 'account': f"{watcher.config.username}@{watcher.config.broker}",
-                'total_sold': watcher._total_sold,
+                'target_quantity': watcher._target_quantity,
                 'pending_orders': len(watcher._pending_orders)
             }
             for key, watcher in self.watchers.items()
