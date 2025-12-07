@@ -42,6 +42,13 @@ class BrokerCode(Enum):
         prefix = "." if self.value == "ib" else f"-{self.value}."
         mdapi = "mdapi" if self.value == "ib" else "mdapi1"
         backoffice_prefix = "." if self.value == "ib" else f"-{self.value}."
+        
+        # Portfolio endpoint differs for IB broker (uses api8 instead of backofficeexternal)
+        if self.value == "ib":
+            portfolio_url = f'https://api8.{domain}/api/portfolio/getrealsecuritypositionbydate'
+        else:
+            portfolio_url = f'https://backofficeexternal{backoffice_prefix}{domain}/api/portfolio/getrealsecuritypositionbydate'
+        
         return {
             'captcha': f'https://identity{prefix}{domain}/api/Captcha/GetCaptcha',
             'login': f'https://identity{prefix}{domain}/api/v2/accounts/login',
@@ -51,6 +58,6 @@ class BrokerCode(Enum):
             'calculate_order': f'https://api{prefix}{domain}/api/v2/orders/CalculateOrderParam',
             'open_orders': f'https://api{prefix}{domain}/api/v2/orders/GetOpenOrders',
             'cancel_order': f'https://api{prefix}{domain}/api/v2/orders/CancelOrder',
-            'portfolio': f'https://backofficeexternal{backoffice_prefix}{domain}/api/portfolio/getrealsecuritypositionbydate',
+            'portfolio': portfolio_url,
             'market_data': f'https://{mdapi}.{domain}/api/v2/instruments/full'
         }
