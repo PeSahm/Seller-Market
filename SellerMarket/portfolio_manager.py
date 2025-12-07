@@ -148,6 +148,53 @@ def seconds_until_can_modify() -> float:
     # After trading hours, return until next day premarket
     return 0.0
 
+
+def round_to_tick_size(price: float) -> int:
+    """
+    Round price to valid tick size based on Iran capital market rules.
+    
+    According to Tehran Stock Exchange and Fara Bourse regulations:
+    - Price 1-5,000 Rials: tick size = 1 Rial
+    - Price 5,000-20,000 Rials: tick size = 10 Rials
+    - Price > 20,000 Rials: tick size = 50 Rials
+    
+    Args:
+        price: Raw price in Rials
+        
+    Returns:
+        Price rounded DOWN to valid tick size (as integer)
+    """
+    if price <= 0:
+        return 0
+    
+    if price < 5000:
+        tick_size = 1
+    elif price < 20000:
+        tick_size = 10
+    else:
+        tick_size = 50
+    
+    # Round DOWN to nearest tick (floor division)
+    return int(price // tick_size) * tick_size
+
+
+def get_tick_size(price: float) -> int:
+    """
+    Get tick size for a given price.
+    
+    Args:
+        price: Price in Rials
+        
+    Returns:
+        Tick size (1, 10, or 50)
+    """
+    if price < 5000:
+        return 1
+    elif price < 20000:
+        return 10
+    else:
+        return 50
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -920,7 +967,7 @@ class PortfolioWatcher:
         # =========================================================================
         if market.is_sell_queue:
             # WORST CASE - must sell at minimum price
-            price = market.min_price
+            price = round_to_tick_size(market.min_price)
             
             if phase == MarketPhase.PREMARKET:
                 # URGENT! Must act before 8:55 freeze
@@ -937,7 +984,7 @@ class PortfolioWatcher:
             # Check if demand is dropping below threshold
             if market.first_row_buy_volume < self.config.min_buy_volume:
                 # Demand is dropping - sell at best buy price before queue breaks
-                price = market.best_buy_price
+                price = round_to_tick_size(market.best_buy_price)
                 if price > 0:
                     if phase == MarketPhase.PREMARKET:
                         logger.info(f"Queue demand dropping ({market.first_row_buy_volume:,}), {seconds_to_freeze:.0f}s to freeze, selling at {price}")
@@ -954,11 +1001,12 @@ class PortfolioWatcher:
         # Case 3: NORMAL MARKET (competition with other sellers)
         # =========================================================================
         # Calculate competitive sell price with discount
-        price = market.last_price * self.config.sell_discount
+        price = round_to_tick_size(market.last_price * self.config.sell_discount)
         
         # Make sure price is within allowed range
-        if price < market.min_price:
-            price = market.min_price
+        min_price_rounded = round_to_tick_size(market.min_price)
+        if price < min_price_rounded:
+            price = min_price_rounded
         
         if phase == MarketPhase.PREMARKET:
             # URGENT - must place orders before 8:55 freeze!
