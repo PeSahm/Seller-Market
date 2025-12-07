@@ -24,6 +24,7 @@ else:
 
 import threading
 from scheduler import JobScheduler
+from portfolio_manager import PortfolioManager, PortfolioConfig
 
 # Load environment variables from .env file
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
@@ -526,6 +527,12 @@ def send_help(message):
 /settrade <HH:MM:SS> - Set trade time
 /enablejob <name> - Enable job
 /disablejob <name> - Disable job
+
+*Portfolio Management:*
+/portfolio - Show portfolio positions
+/watchlist - Show watched stocks
+/startsell <config> - Start auto-sell
+/stopsell <config> - Stop auto-sell
 
 *Example:*
 /list
@@ -1345,6 +1352,126 @@ def stop_trading(message):
     except Exception as e:
         logger.error(f"Error stopping processes: {e}")
         bot.reply_to(message, f"❌ Error: {str(e)}")
+
+# ========================================
+# Portfolio Management Commands
+# ========================================
+
+# Global portfolio manager instance
+_portfolio_manager = None
+PORTFOLIO_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'portfolio_config.ini')
+
+def get_portfolio_manager():
+    """Get or create portfolio manager instance."""
+    global _portfolio_manager
+    if _portfolio_manager is None:
+        _portfolio_manager = PortfolioManager(PORTFOLIO_CONFIG_FILE)
+    return _portfolio_manager
+
+@bot.message_handler(commands=['portfolio'])
+def show_portfolio(message):
+    """Show current portfolio positions"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        manager = get_portfolio_manager()
+        positions = manager.get_all_positions()
+        
+        if not positions:
+            bot.reply_to(message, "📊 *No portfolio positions found*\n\nEither no positions or no watchers configured.", parse_mode='Markdown')
+            return
+        
+        response = "📊 *Portfolio Positions:*\n\n"
+        for pos in positions:
+            response += f"🏷️ `{pos['symbol']}` ({pos['isin']})\n"
+            response += f"   Account: `{pos['account']}`\n"
+            response += f"   Quantity: {pos['quantity']:,}\n"
+            response += f"   Avg Price: {pos['average_price']:,.0f}\n\n"
+        
+        bot.reply_to(message, response, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error getting portfolio: {e}")
+        bot.reply_to(message, f"❌ Error getting portfolio: {e}")
+
+@bot.message_handler(commands=['watchlist'])
+def show_watchlist(message):
+    """Show stocks being watched for auto-sell"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        manager = get_portfolio_manager()
+        status = manager.get_status()
+        
+        if not status:
+            bot.reply_to(message, "👀 *No stocks being watched*\n\nUse `/startsell <config>` to start watching.", parse_mode='Markdown')
+            return
+        
+        response = "👀 *Watchlist Status:*\n\n"
+        for key, info in status.items():
+            status_icon = "🟢" if info['running'] else "🔴"
+            response += f"{status_icon} `{info['isin']}`\n"
+            response += f"   Account: `{info['account']}`\n"
+            response += f"   Sold: {info['total_sold']:,}\n"
+            response += f"   Pending: {info['pending_orders']} orders\n\n"
+        
+        bot.reply_to(message, response, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error getting watchlist: {e}")
+        bot.reply_to(message, f"❌ Error getting watchlist: {e}")
+
+@bot.message_handler(commands=['startsell'])
+def start_sell_watcher(message):
+    """Start auto-sell watcher for a config section"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        parts = message.text.split()
+        
+        manager = get_portfolio_manager()
+        
+        if len(parts) < 2:
+            # Start all watchers
+            manager.start_all()
+            bot.reply_to(message, "🔍 *Started all portfolio watchers*\n\nUse /watchlist to see status.", parse_mode='Markdown')
+        else:
+            # Start specific watcher
+            section_name = parts[1]
+            manager.start_one(section_name)
+            bot.reply_to(message, f"🔍 *Started watching* `{section_name}`\n\nUse /watchlist to see status.", parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error starting sell watcher: {e}")
+        bot.reply_to(message, f"❌ Error: {e}")
+
+@bot.message_handler(commands=['stopsell'])
+def stop_sell_watcher(message):
+    """Stop auto-sell watcher for a config section"""
+    if not is_authorized(message):
+        return
+    
+    try:
+        parts = message.text.split()
+        
+        manager = get_portfolio_manager()
+        
+        if len(parts) < 2:
+            # Stop all watchers
+            manager.stop_all()
+            bot.reply_to(message, "🛑 *Stopped all portfolio watchers*", parse_mode='Markdown')
+        else:
+            # Stop specific watcher
+            section_name = parts[1]
+            manager.stop_one(section_name)
+            bot.reply_to(message, f"🛑 *Stopped watching* `{section_name}`", parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error stopping sell watcher: {e}")
+        bot.reply_to(message, f"❌ Error: {e}")
 
 # ========================================
 # Catch-all handler for unknown commands
