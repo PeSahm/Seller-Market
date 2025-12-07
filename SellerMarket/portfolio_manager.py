@@ -51,6 +51,30 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
+from pathlib import Path
+
+# Load .env file if exists (for Telegram credentials)
+try:
+    from dotenv import load_dotenv
+    # Try multiple locations for .env file
+    env_loaded = False
+    env_locations = [
+        Path('.env'),                          # Current working directory
+        Path(__file__).parent / '.env',        # Same directory as this script
+        Path(__file__).parent.parent / '.env', # Parent directory (repo root)
+    ]
+    
+    for env_path in env_locations:
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+            print(f"✓ Loaded .env from {env_path.absolute()}")
+            env_loaded = True
+            break
+    
+    if not env_loaded:
+        print(f"⚠ No .env file found. Searched: {[str(p.absolute()) for p in env_locations]}")
+except ImportError:
+    print("⚠ python-dotenv not installed. Install with: pip install python-dotenv")
 
 from broker_enum import BrokerCode
 from api_client import EphoenixAPIClient
@@ -316,11 +340,26 @@ class TelegramNotifier:
     def __init__(self):
         self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.user_id = os.getenv('TELEGRAM_USER_ID') or os.getenv('USER_ID')
+        self._logged_missing = False
+        
+        # Log configuration status on init
+        if self.bot_token and self.user_id:
+            logger.info(f"✓ Telegram configured: user_id={self.user_id[:4]}...")
+        else:
+            missing = []
+            if not self.bot_token:
+                missing.append('TELEGRAM_BOT_TOKEN')
+            if not self.user_id:
+                missing.append('TELEGRAM_USER_ID or USER_ID')
+            logger.warning(f"⚠ Telegram not configured. Missing: {', '.join(missing)}")
+            logger.info("  Set these in .env file or environment variables")
     
     def send(self, message: str) -> bool:
         """Send a notification to Telegram."""
         if not self.bot_token or not self.user_id:
-            logger.warning("Telegram credentials not configured")
+            if not self._logged_missing:
+                logger.warning("Telegram credentials not configured - notifications disabled")
+                self._logged_missing = True
             return False
         
         try:
@@ -331,7 +370,12 @@ class TelegramNotifier:
                 'parse_mode': 'Markdown'
             }
             response = requests.post(url, json=payload, timeout=10)
-            return response.status_code == 200
+            if response.status_code == 200:
+                logger.debug(f"Telegram notification sent")
+                return True
+            else:
+                logger.error(f"Telegram API error: {response.status_code}")
+                return False
         except Exception as e:
             logger.error(f"Failed to send Telegram notification: {e}")
             return False
@@ -666,20 +710,28 @@ class PortfolioWatcher:
     def _check_and_act(self):
         """Check market conditions and take action if needed."""
         phase = get_market_phase()
+        now = datetime.now()
         
         # Notify on phase change
         if self._last_market_phase != phase:
             self._last_market_phase = phase
             self._freeze_notified = False
+            logger.info(f"{'='*60}")
+            logger.info(f"📍 MARKET PHASE: {phase.name}")
+            logger.info(f"{'='*60}")
             if phase != MarketPhase.CLOSED:
                 self.notifier.send(f"⏰ *Market phase changed*: {phase.name}")
         
         # Skip if market is closed
         if phase == MarketPhase.CLOSED:
-            logger.debug("Market closed, skipping check")
+            logger.info(f"[{now.strftime('%H:%M:%S')}] Market CLOSED - waiting...")
             return
         
+        # Log current check
+        logger.info(f"[{now.strftime('%H:%M:%S')}] Checking {self.config.isin} (Phase: {phase.name})")
+        
         # Get current position from portfolio
+        logger.debug("Fetching portfolio positions...")
         positions = self.api_client.get_portfolio_positions()
         position = next(
             (p for p in positions if p.isin == self.config.isin),
@@ -689,24 +741,40 @@ class PortfolioWatcher:
         if not position or position.quantity <= 0:
             # Position is empty - all shares sold!
             if self._target_quantity > 0:
+                logger.info(f"✅ ALL SHARES SOLD! Target was {self._target_quantity:,}")
                 self.notifier.send(
                     f"✅ *All shares sold* for {self.config.isin}\n"
                     f"Total sold: {self._target_quantity:,} shares"
                 )
                 self._running = False
+            else:
+                logger.info(f"No position found for {self.config.isin}")
             return
         
         # Update target quantity if not set (first run)
         if self._target_quantity == 0:
             self._target_quantity = position.quantity
+            logger.info(f"{'='*60}")
+            logger.info(f"📊 TRACKING POSITION: {self.config.isin}")
+            logger.info(f"   Quantity: {self._target_quantity:,} shares")
+            logger.info(f"   Symbol: {position.symbol}")
+            logger.info(f"{'='*60}")
             self.notifier.send(
                 f"📊 *Tracking position* {self.config.isin}\n"
                 f"Quantity: {self._target_quantity:,} shares"
             )
-            logger.info(f"Target quantity set to {self._target_quantity} for {self.config.isin}")
         
         # Get market conditions (best limits)
+        logger.debug("Fetching market data (best limits)...")
         market = self.api_client.get_best_limits(self.config.isin)
+        
+        # Log market state
+        logger.info(f"   Position: {position.quantity:,} shares")
+        logger.info(f"   Market: {market.market_pressure.upper()} | Last: {market.last_price:,.0f} | Min: {market.min_price:,.0f} | Max: {market.max_price:,.0f}")
+        if market.best_limits:
+            bl = market.best_limits[0]
+            logger.info(f"   Best Limit: Buy {bl.buy_volume:,}@{bl.buy_price:,.0f} | Sell {bl.sell_volume:,}@{bl.sell_price:,.0f}")
+        logger.info(f"   Pending orders: {len(self._pending_orders)}")
         
         # Update pending orders status
         self._update_pending_orders()
@@ -1118,8 +1186,43 @@ def main():
         type=str,
         help='Specific config section to run (default: all sections)'
     )
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Enable verbose (DEBUG) logging'
+    )
     
     args = parser.parse_args()
+    
+    # Set debug level if verbose
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
+    
+    # Show startup banner
+    print("\n" + "=" * 60)
+    print("📊 PORTFOLIO MANAGER - Auto-Sell System")
+    print("=" * 60)
+    print(f"⏰ Current time: {datetime.now().strftime('%H:%M:%S')}")
+    print(f"📈 Market phase: {get_market_phase().name}")
+    
+    # Show environment status
+    print("\n📁 Configuration:")
+    print(f"   Config file: {args.config}")
+    if args.section:
+        print(f"   Section: {args.section}")
+    
+    # Check Telegram configuration
+    telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
+    telegram_user = os.getenv('TELEGRAM_USER_ID') or os.getenv('USER_ID')
+    print("\n📱 Telegram:")
+    if telegram_token and telegram_user:
+        print(f"   ✓ Token: {telegram_token[:10]}...{telegram_token[-5:]}")
+        print(f"   ✓ User ID: {telegram_user}")
+    else:
+        print("   ⚠ Not configured (set TELEGRAM_BOT_TOKEN and TELEGRAM_USER_ID)")
+    
+    print("=" * 60 + "\n")
     
     manager = PortfolioManager(args.config)
     
