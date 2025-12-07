@@ -977,7 +977,7 @@ class TestPreMarketNormal:
         # Test with PREMARKET phase directly
         price, reason = watcher_with_mocked_time._determine_sell_action(market_condition, MarketPhase.PREMARKET)
         
-        assert reason == "premarket_normal"
+        assert reason == "premarket_normal_urgent"
         assert price == pytest.approx(5247.0 * 0.99)
 
 
