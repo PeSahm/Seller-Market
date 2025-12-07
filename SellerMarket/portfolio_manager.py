@@ -1226,7 +1226,8 @@ class PortfolioManager:
                 'isin': watcher.config.isin,
                 'account': f"{watcher.config.username}@{watcher.config.broker}",
                 'target_quantity': watcher._target_quantity,
-                'pending_orders': len(watcher._pending_orders)
+                'pending_orders': len(watcher._pending_orders),
+                'total_sold': watcher._target_quantity  # TODO: track actual sold quantity
             }
             for key, watcher in self.watchers.items()
         }
