@@ -783,6 +783,55 @@ class TestPortfolioWatcher:
         assert reason == "queue_demand_low_premarket"
         assert price == sample_market_condition.best_buy_price
     
+    def test_determine_sell_action_price_floor_at_min_price(self, mock_watcher, sample_market_condition):
+        """Test that sell price never goes below daily minimum price.
+        
+        Edge case: When last_price * sell_discount < min_price, 
+        the bot should use min_price instead.
+        """
+        # Set up scenario where discounted price would be below min
+        sample_market_condition.is_queued = False
+        sample_market_condition.last_price = 3200.0
+        sample_market_condition.min_price = 3180.0  # -0.63% from last
+        mock_watcher.config.sell_discount = 0.99  # -1% discount
+        
+        # Calculated price = 3200 * 0.99 = 3168 < min_price (3180)
+        price, reason = mock_watcher._determine_sell_action(sample_market_condition, MarketPhase.TRADING)
+        
+        # Should use min_price as floor
+        assert price == sample_market_condition.min_price
+        assert price == 3180.0
+        assert reason == "normal_market_sell"
+    
+    def test_determine_sell_action_price_floor_premarket(self, mock_watcher, sample_market_condition):
+        """Test min price floor in premarket phase."""
+        sample_market_condition.is_queued = False
+        sample_market_condition.last_price = 5000.0
+        sample_market_condition.min_price = 4980.0  # Very tight range
+        mock_watcher.config.sell_discount = 0.99  # Would give 4950
+        
+        # Calculated price = 5000 * 0.99 = 4950 < min_price (4980)
+        price, reason = mock_watcher._determine_sell_action(sample_market_condition, MarketPhase.PREMARKET)
+        
+        assert price == sample_market_condition.min_price
+        assert price == 4980.0
+        assert reason == "premarket_normal_urgent"
+    
+    def test_determine_sell_action_price_above_min_ok(self, mock_watcher, sample_market_condition):
+        """Test that normal discounted price is used when above min."""
+        sample_market_condition.is_queued = False
+        sample_market_condition.last_price = 5000.0
+        sample_market_condition.min_price = 4500.0  # Wide range (-10%)
+        mock_watcher.config.sell_discount = 0.99  # -1% discount
+        
+        # Calculated price = 5000 * 0.99 = 4950 > min_price (4500)
+        price, reason = mock_watcher._determine_sell_action(sample_market_condition, MarketPhase.TRADING)
+        
+        # Should use calculated discounted price
+        assert price == pytest.approx(5000.0 * 0.99)
+        assert price == 4950.0
+        assert reason == "normal_market_sell"
+    
     def test_get_pending_volume(self, mock_watcher):
         """Test pending volume calculation."""
         mock_watcher._pending_orders = [
