@@ -427,7 +427,8 @@ class PortfolioAPIClient(EphoenixAPIClient):
             
         except Exception as e:
             logger.error(f"Failed to get portfolio positions: {e}")
-            raise
+            # Return empty list instead of raising - allows continued operation
+            return []
     
     def get_best_limits(self, isin: str) -> MarketCondition:
         """
@@ -513,7 +514,8 @@ class PortfolioAPIClient(EphoenixAPIClient):
             
         except Exception as e:
             logger.error(f"Failed to get best limits for {isin}: {e}")
-            raise
+            # Return None instead of raising - caller should handle this
+            return None
     
     def cancel_order(self, serial_number: int) -> bool:
         """
@@ -732,7 +734,16 @@ class PortfolioWatcher:
         
         # Get current position from portfolio
         logger.debug("Fetching portfolio positions...")
-        positions = self.api_client.get_portfolio_positions()
+        try:
+            positions = self.api_client.get_portfolio_positions()
+        except Exception as e:
+            logger.error(f"API error getting positions: {e}")
+            positions = []
+        
+        if not positions:
+            logger.warning("   ⚠ Could not fetch portfolio - will retry next cycle")
+            return
+        
         position = next(
             (p for p in positions if p.isin == self.config.isin),
             None
@@ -766,7 +777,15 @@ class PortfolioWatcher:
         
         # Get market conditions (best limits)
         logger.debug("Fetching market data (best limits)...")
-        market = self.api_client.get_best_limits(self.config.isin)
+        try:
+            market = self.api_client.get_best_limits(self.config.isin)
+        except Exception as e:
+            logger.error(f"API error getting market data: {e}")
+            market = None
+        
+        if market is None:
+            logger.warning("   ⚠ Could not fetch market data - will retry next cycle")
+            return
         
         # Log market state
         logger.info(f"   Position: {position.quantity:,} shares")
@@ -847,7 +866,12 @@ class PortfolioWatcher:
         cancelled_count = 0
         for order in self._pending_orders:
             if order.serial_number and order.state in (OrderState.ADDED, OrderState.ADDING):
-                success = self.api_client.cancel_order(order.serial_number)
+                try:
+                    success = self.api_client.cancel_order(order.serial_number)
+                except Exception as e:
+                    logger.error(f"API error cancelling order {order.serial_number}: {e}")
+                    success = False
+                
                 if success:
                     cancelled_count += 1
                     logger.info(f"Cancelled order {order.serial_number}")
@@ -957,8 +981,12 @@ class PortfolioWatcher:
             reason: Reason for selling
         """
         # Get max allowed volume per order
-        instrument_info = self.api_client.get_instrument_info(self.config.isin)
-        max_volume = instrument_info.get('max_volume', 400000)
+        try:
+            instrument_info = self.api_client.get_instrument_info(self.config.isin)
+            max_volume = instrument_info.get('max_volume', 400000)
+        except Exception as e:
+            logger.error(f"API error getting instrument info: {e}")
+            max_volume = 400000  # Use safe default
         
         # Calculate number of orders needed
         orders_needed = (quantity + max_volume - 1) // max_volume
@@ -976,11 +1004,15 @@ class PortfolioWatcher:
         for i in range(orders_needed):
             order_volume = min(remaining, max_volume)
             
-            result = self.api_client.place_sell_order(
-                isin=self.config.isin,
-                price=price,
-                volume=order_volume
-            )
+            try:
+                result = self.api_client.place_sell_order(
+                    isin=self.config.isin,
+                    price=price,
+                    volume=order_volume
+                )
+            except Exception as e:
+                logger.error(f"API error placing order {i+1}/{orders_needed}: {e}")
+                result = None
             
             if result:
                 serial = result.get('serialNumber')
@@ -993,7 +1025,9 @@ class PortfolioWatcher:
                 ))
                 logger.info(f"Order {i+1}/{orders_needed} placed: {order_volume} shares, serial {serial}")
             else:
+                logger.error(f"Failed to place order {i+1}/{orders_needed}")
                 self.notifier.send(f"❌ *Failed* to place order {i+1}/{orders_needed}")
+                # Continue trying remaining orders instead of stopping
             
             remaining -= order_volume
     
@@ -1010,7 +1044,13 @@ class PortfolioWatcher:
             if order.serial_number is None:
                 continue
             
-            status = self.api_client.get_order_status(order.serial_number)
+            try:
+                status = self.api_client.get_order_status(order.serial_number)
+            except Exception as e:
+                logger.error(f"API error checking order {order.serial_number}: {e}")
+                # Keep order in list if we can't check its status
+                updated_orders.append(order)
+                continue
             
             if status is None:
                 # Order not in open orders - it was executed or cancelled
