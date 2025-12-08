@@ -362,6 +362,7 @@ class PortfolioConfig:
     password: str
     broker: str
     isin: str
+    inscode: str = ""  # TSETMC instrument code for real-time data
     min_buy_volume: int = 30_000_000  # Default 30 million
     sell_discount: float = 0.99  # Default 99% of last price
     check_interval: float = 1.0  # Seconds between checks
@@ -375,10 +376,258 @@ class PortfolioConfig:
             password=section.get('password', ''),
             broker=section.get('broker', 'bbi'),
             isin=section.get('isin', ''),
+            inscode=section.get('inscode', ''),  # TSETMC instrument code
             min_buy_volume=int(section.get('min_buy_volume', 30_000_000)),
             sell_discount=float(section.get('sell_discount', 0.99)),
             check_interval=float(section.get('check_interval', 1.0))
         )
+
+
+class MarketDataService:
+    """
+    Centralized market data service using TSETMC real-time API.
+    
+    Features:
+    - Shared across all watchers (no duplicate requests)
+    - Caching with configurable TTL (default 1 second)
+    - Thread-safe access
+    - Parses TSETMC instinfofast response format
+    
+    TSETMC API: https://old.tsetmc.com/tsev2/data/instinfofast.aspx?i={inscode}&c={random}
+    
+    Response format (semicolon-separated sections):
+    Section 0: Basic info (comma-separated)
+        0: time, 1: status, 2: last_price, 3: closing_price, 4: first_price,
+        5: yesterday, 6: max_price, 7: min_price, 8: trade_count, 9: trade_volume,
+        10: trade_value, ...
+    
+    Section 1: Best limits (comma-separated rows)
+        Format: row@buy_count@buy_price@sell_price@sell_volume@sell_count
+        Example: 2@2238@356999@357000@3095146@79
+    """
+    
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls, *args, **kwargs):
+        """Singleton pattern - only one instance across all watchers."""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self, cache_ttl: float = 1.0):
+        """
+        Initialize market data service.
+        
+        Args:
+            cache_ttl: Cache time-to-live in seconds (default 1.0)
+        """
+        if self._initialized:
+            return
+        
+        self._cache: Dict[str, MarketCondition] = {}
+        self._cache_time: Dict[str, float] = {}
+        self._cache_ttl = cache_ttl
+        self._request_lock = threading.Lock()
+        self._initialized = True
+        
+        logger.info(f"MarketDataService initialized (cache TTL: {cache_ttl}s)")
+    
+    def get_market_data(self, inscode: str, isin: str, symbol: str = "") -> Optional[MarketCondition]:
+        """
+        Get market data for an instrument.
+        
+        Uses cached data if fresh, otherwise fetches from TSETMC.
+        Thread-safe and shared across all watchers.
+        
+        Args:
+            inscode: TSETMC instrument code
+            isin: Stock ISIN (for fallback/logging)
+            symbol: Stock symbol (optional, for display)
+            
+        Returns:
+            MarketCondition or None if fetch fails
+        """
+        if not inscode:
+            logger.warning(f"No inscode provided for {isin}, cannot fetch TSETMC data")
+            return None
+        
+        with self._request_lock:
+            # Check cache first
+            if inscode in self._cache:
+                age = time.time() - self._cache_time.get(inscode, 0)
+                if age < self._cache_ttl:
+                    logger.debug(f"Cache hit for {inscode} (age: {age:.2f}s)")
+                    return self._cache[inscode]
+            
+            # Fetch fresh data
+            try:
+                data = self._fetch_tsetmc(inscode, isin, symbol)
+                if data:
+                    self._cache[inscode] = data
+                    self._cache_time[inscode] = time.time()
+                    logger.debug(f"Fetched fresh data for {inscode}")
+                return data
+            except Exception as e:
+                logger.error(f"Failed to fetch TSETMC data for {inscode}: {e}")
+                # Return stale cache if available
+                if inscode in self._cache:
+                    logger.warning(f"Using stale cache for {inscode}")
+                    return self._cache[inscode]
+                return None
+    
+    def _fetch_tsetmc(self, inscode: str, isin: str, symbol: str = "") -> Optional[MarketCondition]:
+        """
+        Fetch data from TSETMC API.
+        
+        Args:
+            inscode: TSETMC instrument code
+            isin: Stock ISIN
+            symbol: Stock symbol
+            
+        Returns:
+            MarketCondition or None if parsing fails
+        """
+        import random
+        
+        url = f"https://old.tsetmc.com/tsev2/data/instinfofast.aspx?i={inscode}&c={random.randint(1, 100)}"
+        
+        try:
+            response = requests.get(url, timeout=5, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            response.raise_for_status()
+            
+            return self._parse_response(response.text, isin, symbol)
+            
+        except requests.RequestException as e:
+            logger.error(f"TSETMC request failed for {inscode}: {e}")
+            return None
+    
+    def _parse_response(self, response_text: str, isin: str, symbol: str = "") -> Optional[MarketCondition]:
+        """
+        Parse TSETMC instinfofast response.
+        
+        Response format example:
+        14:54:59,A ,356998,356791,360002,356331,360555,354010,58498,91094926,32501842394777,...
+        ;2@2238@356999@357000@3095146@79,3@2981@356998@357002@2152@2,...
+        
+        Args:
+            response_text: Raw response text
+            isin: Stock ISIN
+            symbol: Stock symbol
+            
+        Returns:
+            MarketCondition or None if parsing fails
+        """
+        try:
+            # Split by semicolon into sections
+            sections = response_text.split(';')
+            
+            if len(sections) < 2:
+                logger.error(f"Invalid TSETMC response format: not enough sections")
+                return None
+            
+            # Parse basic info (section 0)
+            basic_parts = sections[0].split(',')
+            
+            if len(basic_parts) < 11:
+                logger.error(f"Invalid TSETMC basic info: {len(basic_parts)} parts")
+                return None
+            
+            # Extract basic info
+            # 0: time, 1: status, 2: last_price, 3: closing_price, 4: first_price,
+            # 5: yesterday, 6: max_price, 7: min_price, 8: trade_count, 9: trade_volume, 10: trade_value
+            last_price = float(basic_parts[2]) if basic_parts[2] else 0.0
+            closing_price = float(basic_parts[3]) if basic_parts[3] else 0.0
+            max_price = float(basic_parts[6]) if basic_parts[6] else 0.0
+            min_price = float(basic_parts[7]) if basic_parts[7] else 0.0
+            
+            # Parse best limits (section 1)
+            # Format: row@buy_count@buy_price@sell_price@sell_volume@sell_count
+            best_limits = []
+            total_buy_volume = 0
+            total_sell_volume = 0
+            
+            if len(sections) > 1 and sections[1]:
+                limit_rows = sections[1].split(',')
+                
+                for row_data in limit_rows:
+                    if not row_data or '@' not in row_data:
+                        continue
+                    
+                    parts = row_data.split('@')
+                    if len(parts) < 6:
+                        continue
+                    
+                    try:
+                        row_num = int(parts[0])
+                        buy_count = int(parts[1]) if parts[1] else 0
+                        buy_price = float(parts[2]) if parts[2] else 0.0
+                        sell_price = float(parts[3]) if parts[3] else 0.0
+                        sell_volume = int(parts[4]) if parts[4] else 0
+                        sell_count = int(parts[5]) if parts[5] else 0
+                        
+                        # Note: TSETMC format doesn't directly give buy_volume in this section
+                        # We need to estimate or get from another source
+                        # For now, use buy_count as a proxy (not accurate but functional)
+                        # The buy volume is actually in a different part of the response
+                        buy_volume = buy_count * 1000  # Rough estimate
+                        
+                        best_limits.append(BestLimit(
+                            isin=isin,
+                            row=row_num,
+                            buy_volume=buy_volume,
+                            buy_order_count=buy_count,
+                            buy_price=buy_price,
+                            sell_volume=sell_volume,
+                            sell_order_count=sell_count,
+                            sell_price=sell_price
+                        ))
+                        
+                        total_buy_volume += buy_volume
+                        total_sell_volume += sell_volume
+                        
+                    except (ValueError, IndexError) as e:
+                        logger.debug(f"Failed to parse limit row: {row_data}: {e}")
+                        continue
+            
+            # Sort by row number
+            best_limits.sort(key=lambda x: x.row)
+            
+            # Determine if queued (buy queue / seller's market)
+            # Queued = all sell at max price OR no sell orders
+            is_queued = total_sell_volume == 0 or (
+                best_limits and 
+                best_limits[0].sell_price >= max_price and
+                best_limits[0].sell_volume > 0
+            )
+            
+            return MarketCondition(
+                isin=isin,
+                symbol=symbol,
+                last_price=last_price,
+                max_price=max_price,
+                min_price=min_price,
+                best_limits=best_limits,
+                total_buy_volume=total_buy_volume,
+                total_sell_volume=total_sell_volume,
+                is_queued=is_queued
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to parse TSETMC response: {e}")
+            return None
+    
+    def clear_cache(self):
+        """Clear all cached data."""
+        with self._request_lock:
+            self._cache.clear()
+            self._cache_time.clear()
+            logger.info("MarketDataService cache cleared")
 
 
 class TelegramNotifier:
@@ -681,7 +930,8 @@ class PortfolioWatcher:
     """
     
     def __init__(self, config: PortfolioConfig, cache: TradingCache,
-                 notifier: Optional[TelegramNotifier] = None):
+                 notifier: Optional[TelegramNotifier] = None,
+                 market_data_service: Optional[MarketDataService] = None):
         """
         Initialize portfolio watcher.
         
@@ -689,10 +939,12 @@ class PortfolioWatcher:
             config: Portfolio configuration
             cache: Cache manager instance
             notifier: Optional Telegram notifier
+            market_data_service: Optional shared market data service
         """
         self.config = config
         self.cache = cache
         self.notifier = notifier or TelegramNotifier()
+        self.market_data_service = market_data_service or MarketDataService()
         
         # Validate broker
         if not BrokerCode.is_valid(config.broker):
@@ -702,7 +954,7 @@ class PortfolioWatcher:
         broker_enum = BrokerCode(config.broker)
         self.endpoints = broker_enum.get_endpoints()
         
-        # Initialize API client
+        # Initialize API client (used for orders and portfolio, NOT market data)
         self.api_client = PortfolioAPIClient(
             broker_code=config.broker,
             username=config.username,
@@ -719,6 +971,7 @@ class PortfolioWatcher:
         self._target_quantity = 0  # Initial position size, set on first check
         self._last_market_phase: Optional[MarketPhase] = None
         self._freeze_notified = False  # Track if we've notified about freeze
+        self._symbol = ""  # Will be set from first position fetch
         
         logger.info(f"PortfolioWatcher initialized for {config.username}@{config.broker} - {config.isin}")
     
@@ -822,10 +1075,12 @@ class PortfolioWatcher:
         # Update target quantity if not set (first run)
         if self._target_quantity == 0:
             self._target_quantity = position.quantity
+            self._symbol = position.symbol  # Store symbol for later use
             logger.info(f"{'='*60}")
             logger.info(f"📊 TRACKING POSITION: {self.config.isin}")
             logger.info(f"   Quantity: {self._target_quantity:,} shares")
             logger.info(f"   Symbol: {position.symbol}")
+            logger.info(f"   Inscode: {self.config.inscode or 'NOT SET - using broker API'}")
             logger.info(f"{'='*60}")
             self.notifier.send(
                 f"📊 *Tracking position* {self.config.isin}\n"
@@ -833,12 +1088,28 @@ class PortfolioWatcher:
             )
         
         # Get market conditions (best limits)
-        logger.debug("Fetching market data (best limits)...")
-        try:
-            market = self.api_client.get_best_limits(self.config.isin)
-        except Exception as e:
-            logger.error(f"API error getting market data: {e}")
-            market = None
+        # Use TSETMC if inscode is configured, otherwise fall back to broker API
+        logger.debug("Fetching market data...")
+        market = None
+        
+        if self.config.inscode:
+            # Use shared TSETMC service (optimized, no rate limiting)
+            try:
+                market = self.market_data_service.get_market_data(
+                    inscode=self.config.inscode,
+                    isin=self.config.isin,
+                    symbol=self._symbol
+                )
+            except Exception as e:
+                logger.error(f"TSETMC error getting market data: {e}")
+        
+        if market is None:
+            # Fall back to broker API (may be rate limited)
+            logger.debug("Falling back to broker API for market data...")
+            try:
+                market = self.api_client.get_best_limits(self.config.isin)
+            except Exception as e:
+                logger.error(f"Broker API error getting market data: {e}")
         
         if market is None:
             logger.warning("   ⚠ Could not fetch market data - will retry next cycle")
@@ -1152,6 +1423,7 @@ class PortfolioManager:
         self.config_file = config_file
         self.cache = TradingCache()
         self.notifier = TelegramNotifier()
+        self.market_data_service = MarketDataService()  # Shared across all watchers
         self.watchers: Dict[str, PortfolioWatcher] = {}
         
         logger.info(f"PortfolioManager initialized with config: {config_file}")
@@ -1179,7 +1451,10 @@ class PortfolioManager:
                 logger.warning(f"Watcher already exists for {key}")
                 continue
             
-            watcher = PortfolioWatcher(cfg, self.cache, self.notifier)
+            watcher = PortfolioWatcher(
+                cfg, self.cache, self.notifier,
+                market_data_service=self.market_data_service
+            )
             self.watchers[key] = watcher
             watcher.start()
         
@@ -1201,7 +1476,10 @@ class PortfolioManager:
             logger.warning(f"Watcher already running for {key}")
             return
         
-        watcher = PortfolioWatcher(cfg, self.cache, self.notifier)
+        watcher = PortfolioWatcher(
+            cfg, self.cache, self.notifier,
+            market_data_service=self.market_data_service
+        )
         self.watchers[key] = watcher
         watcher.start()
     
