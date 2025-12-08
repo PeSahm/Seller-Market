@@ -1076,44 +1076,40 @@ class PortfolioWatcher:
         if self._target_quantity == 0:
             self._target_quantity = position.quantity
             self._symbol = position.symbol  # Store symbol for later use
+            
+            # Validate inscode is configured
+            if not self.config.inscode:
+                error_msg = f"inscode not configured for {self.config.isin} - required for TSETMC market data"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
             logger.info(f"{'='*60}")
             logger.info(f"📊 TRACKING POSITION: {self.config.isin}")
             logger.info(f"   Quantity: {self._target_quantity:,} shares")
             logger.info(f"   Symbol: {position.symbol}")
-            logger.info(f"   Inscode: {self.config.inscode or 'NOT SET - using broker API'}")
+            logger.info(f"   Inscode: {self.config.inscode}")
             logger.info(f"{'='*60}")
             self.notifier.send(
                 f"📊 *Tracking position* {self.config.isin}\n"
                 f"Quantity: {self._target_quantity:,} shares"
             )
         
-        # Get market conditions (best limits)
-        # Use TSETMC if inscode is configured, otherwise fall back to broker API
-        logger.debug("Fetching market data...")
-        market = None
-        
-        if self.config.inscode:
-            # Use shared TSETMC service (optimized, no rate limiting)
-            try:
-                market = self.market_data_service.get_market_data(
-                    inscode=self.config.inscode,
-                    isin=self.config.isin,
-                    symbol=self._symbol
-                )
-            except Exception as e:
-                logger.error(f"TSETMC error getting market data: {e}")
+        # Get market conditions from TSETMC (required)
+        logger.debug("Fetching market data from TSETMC...")
+        try:
+            market = self.market_data_service.get_market_data(
+                inscode=self.config.inscode,
+                isin=self.config.isin,
+                symbol=self._symbol
+            )
+        except Exception as e:
+            logger.error(f"TSETMC error getting market data: {e}")
+            raise
         
         if market is None:
-            # Fall back to broker API (may be rate limited)
-            logger.debug("Falling back to broker API for market data...")
-            try:
-                market = self.api_client.get_best_limits(self.config.isin)
-            except Exception as e:
-                logger.error(f"Broker API error getting market data: {e}")
-        
-        if market is None:
-            logger.warning("   ⚠ Could not fetch market data - will retry next cycle")
-            return
+            error_msg = f"Failed to fetch market data from TSETMC for {self.config.inscode}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
         
         # Log market state
         logger.info(f"   Position: {position.quantity:,} shares")
