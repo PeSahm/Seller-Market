@@ -1243,10 +1243,14 @@ class PortfolioManager:
         }
     
     def get_all_positions(self) -> List[Dict[str, Any]]:
-        """Get current positions from all watched accounts."""
+        """Get current positions from all configured accounts.
+        
+        Works both with active watchers and by loading configs directly.
+        """
         positions = []
         seen_accounts = set()
         
+        # First, try from active watchers
         for watcher in self.watchers.values():
             account_key = f"{watcher.config.username}@{watcher.config.broker}"
             if account_key in seen_accounts:
@@ -1265,6 +1269,42 @@ class PortfolioManager:
                     })
             except Exception as e:
                 logger.error(f"Failed to get positions for {account_key}: {e}")
+        
+        # If no watchers, load configs and fetch directly
+        if not self.watchers:
+            try:
+                configs = self.load_configs()
+                for cfg in configs:
+                    account_key = f"{cfg.username}@{cfg.broker}"
+                    if account_key in seen_accounts:
+                        continue
+                    seen_accounts.add(account_key)
+                    
+                    try:
+                        # Create temporary API client to fetch positions
+                        broker_enum = BrokerCode(cfg.broker)
+                        endpoints = broker_enum.get_endpoints()
+                        api_client = PortfolioAPIClient(
+                            broker_code=cfg.broker,
+                            username=cfg.username,
+                            password=cfg.password,
+                            captcha_decoder=decode_captcha,
+                            endpoints=endpoints,
+                            cache=self.cache
+                        )
+                        account_positions = api_client.get_portfolio_positions()
+                        for pos in account_positions:
+                            positions.append({
+                                'account': account_key,
+                                'isin': pos.isin,
+                                'symbol': pos.symbol,
+                                'quantity': pos.quantity,
+                                'average_price': pos.average_price
+                            })
+                    except Exception as e:
+                        logger.error(f"Failed to get positions for {account_key}: {e}")
+            except Exception as e:
+                logger.error(f"Failed to load configs: {e}")
         
         return positions
 
