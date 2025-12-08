@@ -969,9 +969,11 @@ class PortfolioWatcher:
         self._thread: Optional[threading.Thread] = None
         self._pending_orders: List[SellOrder] = []
         self._target_quantity = 0  # Initial position size, set on first check
+        self._current_quantity = 0  # Cached current quantity (updated before orders)
         self._last_market_phase: Optional[MarketPhase] = None
         self._freeze_notified = False  # Track if we've notified about freeze
         self._symbol = ""  # Will be set from first position fetch
+        self._position_initialized = False  # Track if initial position fetched
         
         logger.info(f"PortfolioWatcher initialized for {config.username}@{config.broker} - {config.isin}")
     
@@ -1042,40 +1044,35 @@ class PortfolioWatcher:
         # Log current check
         logger.info(f"[{now.strftime('%H:%M:%S')}] Checking {self.config.isin} (Phase: {phase.name})")
         
-        # Get current position from portfolio
-        logger.debug("Fetching portfolio positions...")
-        try:
-            positions = self.api_client.get_portfolio_positions()
-        except Exception as e:
-            logger.error(f"API error getting positions: {e}")
-            positions = []
-        
-        if not positions:
-            logger.warning("   ⚠ Could not fetch portfolio - will retry next cycle")
-            return
-        
-        position = next(
-            (p for p in positions if p.isin == self.config.isin),
-            None
-        )
-        
-        if not position or position.quantity <= 0:
-            # Position is empty - all shares sold!
-            if self._target_quantity > 0:
-                logger.info(f"✅ ALL SHARES SOLD! Target was {self._target_quantity:,}")
-                self.notifier.send(
-                    f"✅ *All shares sold* for {self.config.isin}\n"
-                    f"Total sold: {self._target_quantity:,} shares"
-                )
-                self._running = False
-            else:
+        # =========================================================================
+        # INITIAL POSITION FETCH (only once at startup)
+        # =========================================================================
+        if not self._position_initialized:
+            logger.debug("Fetching initial portfolio position...")
+            try:
+                positions = self.api_client.get_portfolio_positions()
+            except Exception as e:
+                logger.error(f"API error getting initial positions: {e}")
+                return
+            
+            if not positions:
+                logger.warning("   ⚠ Could not fetch portfolio - will retry next cycle")
+                return
+            
+            position = next(
+                (p for p in positions if p.isin == self.config.isin),
+                None
+            )
+            
+            if not position or position.quantity <= 0:
                 logger.info(f"No position found for {self.config.isin}")
-            return
-        
-        # Update target quantity if not set (first run)
-        if self._target_quantity == 0:
+                return
+            
+            # Initialize position tracking
             self._target_quantity = position.quantity
-            self._symbol = position.symbol  # Store symbol for later use
+            self._current_quantity = position.quantity
+            self._symbol = position.symbol
+            self._position_initialized = True
             
             # Validate inscode is configured
             if not self.config.inscode:
@@ -1111,8 +1108,8 @@ class PortfolioWatcher:
             logger.error(error_msg)
             raise RuntimeError(error_msg)
         
-        # Log market state
-        logger.info(f"   Position: {position.quantity:,} shares")
+        # Log market state (use cached quantity)
+        logger.info(f"   Position: {self._current_quantity:,} shares (cached)")
         logger.info(f"   Market: {market.market_pressure.upper()} | Last: {market.last_price:,.0f} | Min: {market.min_price:,.0f} | Max: {market.max_price:,.0f}")
         if market.best_limits:
             bl = market.best_limits[0]
@@ -1128,7 +1125,7 @@ class PortfolioWatcher:
                 wait_time = seconds_until_can_modify()
                 self.notifier.send(
                     f"🔒 *Order freeze* until 09:02:00\n"
-                    f"Position: {position.quantity:,} shares\n"
+                    f"Position: {self._current_quantity:,} shares\n"
                     f"Pending orders: {len(self._pending_orders)}\n"
                     f"Wait time: {wait_time:.0f}s"
                 )
@@ -1143,9 +1140,7 @@ class PortfolioWatcher:
             return
         
         # =================================================================
-        # SAFER APPROACH: Use portfolio as source of truth
-        # Cancel all pending orders if price changed, then place new ones
-        # for the ACTUAL remaining quantity from portfolio
+        # BEFORE PLACING ORDERS: Refresh portfolio for accurate quantity
         # =================================================================
         
         # Check if we need to reprice (price changed significantly)
@@ -1155,13 +1150,40 @@ class PortfolioWatcher:
             # Cancel all pending orders - we'll recalculate from portfolio
             self._cancel_all_pending_orders()
         
-        # Use portfolio quantity as source of truth (already fetched above)
-        # This is the ACTUAL remaining shares we own
-        quantity_to_sell = position.quantity
-        
-        # Only place new orders if we have shares and no pending orders
-        if quantity_to_sell > 0 and not self._pending_orders:
-            self._execute_sell(market, sell_price, quantity_to_sell, sell_reason)
+        # Only place new orders if we have no pending orders
+        if not self._pending_orders:
+            # Fetch fresh portfolio position right before placing order
+            logger.debug("Fetching fresh portfolio position before order...")
+            try:
+                positions = self.api_client.get_portfolio_positions()
+            except Exception as e:
+                logger.error(f"API error getting positions before order: {e}")
+                return
+            
+            if not positions:
+                logger.warning("   ⚠ Could not fetch portfolio before order - will retry")
+                return
+            
+            position = next(
+                (p for p in positions if p.isin == self.config.isin),
+                None
+            )
+            
+            if not position or position.quantity <= 0:
+                # Position is empty - all shares sold!
+                logger.info(f"✅ ALL SHARES SOLD! Target was {self._target_quantity:,}")
+                self.notifier.send(
+                    f"✅ *All shares sold* for {self.config.isin}\n"
+                    f"Total sold: {self._target_quantity:,} shares"
+                )
+                self._running = False
+                return
+            
+            # Update cached quantity
+            self._current_quantity = position.quantity
+            
+            # Place orders for actual remaining quantity
+            self._execute_sell(market, sell_price, position.quantity, sell_reason)
     
     def _check_needs_repricing(self, new_price: float) -> bool:
         """
