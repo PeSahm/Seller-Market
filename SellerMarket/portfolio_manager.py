@@ -459,14 +459,24 @@ class PortfolioAPIClient(EphoenixAPIClient):
             positions = []
             data = response.json()
             
+            # API returns {"result": [...], "message": "...", "isError": false}
+            # Extract the result array
+            if isinstance(data, dict):
+                if data.get('isError', False):
+                    logger.error(f"Portfolio API error: {data.get('message', 'Unknown error')}")
+                    return []
+                items = data.get('result', [])
+            else:
+                items = data if isinstance(data, list) else []
+            
             # Parse portfolio response
-            for item in data if isinstance(data, list) else [data]:
+            for item in items:
                 if isinstance(item, dict) and 'isin' in item:
                     positions.append(PortfolioPosition(
                         isin=item.get('isin', ''),
                         symbol=item.get('symbol', ''),
-                        quantity=int(item.get('quantity', 0)),
-                        average_price=float(item.get('averagePrice', 0))
+                        quantity=int(float(item.get('remainVolume', 0))),  # remainVolume is the available quantity
+                        average_price=float(item.get('buyAvgPrice', 0))   # buyAvgPrice is the average buy price
                     ))
             
             logger.info(f"Retrieved {len(positions)} portfolio positions")
