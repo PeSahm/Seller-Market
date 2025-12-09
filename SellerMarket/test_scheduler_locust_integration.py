@@ -48,27 +48,30 @@ def test_command_building():
     assert '--host' in full_command_args
     assert '--processes' in full_command_args, "--processes should be in command"
     
-    # Verify that each parameter is a separate element
+    # Load actual config to compare values
+    config = load_locust_config()
+    
+    # Verify that each parameter is a separate element with correct values from config
     users_index = full_command_args.index('--users')
     assert users_index + 1 < len(full_command_args)
-    assert full_command_args[users_index + 1] == '10'  # Should be string
+    assert full_command_args[users_index + 1] == str(config['users'])
     
     spawn_rate_index = full_command_args.index('--spawn-rate')
     assert spawn_rate_index + 1 < len(full_command_args)
-    assert full_command_args[spawn_rate_index + 1] == '10'
+    assert full_command_args[spawn_rate_index + 1] == str(config['spawn_rate'])
     
     run_time_index = full_command_args.index('--run-time')
     assert run_time_index + 1 < len(full_command_args)
-    assert full_command_args[run_time_index + 1] == '30s'
+    assert full_command_args[run_time_index + 1] == config['run_time']
     
     host_index = full_command_args.index('--host')
     assert host_index + 1 < len(full_command_args)
-    assert full_command_args[host_index + 1] == 'https://abc.com'
+    assert full_command_args[host_index + 1] == config['host']
     
     # Verify --processes parameter
     processes_index = full_command_args.index('--processes')
     assert processes_index + 1 < len(full_command_args)
-    assert full_command_args[processes_index + 1] == '4', "processes should be '4'"
+    assert full_command_args[processes_index + 1] == str(config['processes'])
     
     print("\n✅ Command built successfully")
 

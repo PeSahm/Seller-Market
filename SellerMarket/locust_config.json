@@ -4,5 +4,7 @@
     "spawn_rate": 10,
     "run_time": "120s",
     "host": "https://abc.com",
-    "html_report": "report.html"}
+    "processes": 1,
+    "_comment_processes": "Number of worker processes for distributed load. Use -1 for auto-detect CPU cores. Note: --processes requires Linux/macOS (uses fork())"
+  }
 }
