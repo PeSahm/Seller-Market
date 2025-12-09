@@ -16,6 +16,8 @@ class BrokerCode(Enum):
     TEJARAT = "tejarat"  # Tejarat
     EBB = "ebb"  # Eghtesad Bidar
     IBTRADER = "ib"  # IbTrader
+    HAMERZ = "hbc"  # Hamerz
+    RABIN = "rabin"  # Rabin
     
     @classmethod
     def get_broker_name(cls, code: str) -> str:
@@ -27,7 +29,9 @@ class BrokerCode(Enum):
             "karamad": "Karamad",
             "tejarat": "Tejarat",
             "ebb": "EBB",
-            "ib": "IbTrader"
+            "ib": "IbTrader",
+            "hbc": "Hamerz",
+            "rabin": "Rabin"
         }
         return names.get(code, code)
     
