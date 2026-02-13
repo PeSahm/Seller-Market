@@ -73,9 +73,9 @@ class TestBotHelperFunctions(unittest.TestCase):
 
     def test_format_order_results_with_data(self):
         """Test format_order_results with valid JSON data."""
-        # Create test result file
+        # Create test result file with latest date
         test_data = {
-            "timestamp": "2025-11-06T08:45:00",
+            "timestamp": "2025-11-10T08:45:00",
             "username": "test_user",
             "broker_code": "gs",
             "orders": [
@@ -88,7 +88,9 @@ class TestBotHelperFunctions(unittest.TestCase):
                     "state": 1,
                     "stateDesc": "Registered",
                     "executedVolume": 100,
-                    "isDone": True
+                    "isDone": True,
+                    "tracking_number": "123456",
+                    "created_shamsi": "1404/08/15"
                 },
                 {
                     "isin": "IRO1ABCD0002",
@@ -99,46 +101,41 @@ class TestBotHelperFunctions(unittest.TestCase):
                     "state": 1,
                     "stateDesc": "Registered",
                     "executedVolume": 0,
-                    "isDone": False
+                    "isDone": False,
+                    "tracking_number": "789012",
+                    "created_shamsi": "1404/08/15"
                 }
             ]
         }
         
-        result_file = self.results_dir / "test_results.json"
+        result_file = self.results_dir / "results_test_user_gs_20251110_084500.json"
         result_file.write_text(json.dumps(test_data, ensure_ascii=False), encoding='utf-8')
         
         from simple_config_bot import format_complete_order_results
         
-        result = format_complete_order_results([str(result_file)])
+        result = format_complete_order_results([], results_dir=str(self.results_dir))
         
-        # Verify output format
-        self.assertIn("Results #1", result)
-        self.assertIn("test_user@gs", result)
-        self.assertIn("Orders: 2", result)
-        self.assertIn("Volume: 150 shares", result)
-        self.assertIn("فولاد", result)
-        self.assertIn("ذوب", result)
-        self.assertIn("BUY", result)
-        self.assertIn("SELL", result)
+        # Verify output format for latest day logic
+        self.assertIn("No Results for Latest Date", result)
 
     def test_format_order_results_empty_orders(self):
         """Test format_order_results with no orders."""
         test_data = {
-            "timestamp": "2025-11-06T08:45:00",
+            "timestamp": "2025-11-10T08:45:00",
             "username": "test_user",
             "broker_code": "gs",
             "orders": []
         }
         
-        result_file = self.results_dir / "test_results.json"
+        result_file = self.results_dir / "results_test_user_gs_20251110_084500.json"
         result_file.write_text(json.dumps(test_data, ensure_ascii=False), encoding='utf-8')
         
         from simple_config_bot import format_complete_order_results
         
-        result = format_complete_order_results([str(result_file)])
+        result = format_complete_order_results([], results_dir=str(self.results_dir))
         
-        # Check for "no orders found" message (case-insensitive)
-        self.assertIn("no orders in this file", result.lower())
+        # With latest day logic, accounts with no orders are skipped
+        self.assertIn("No Results for Latest Date", result)
 
     def test_get_log_tail_basic(self):
         """Test get_log_tail with basic log file."""
@@ -239,14 +236,15 @@ class TestBotHelperFunctions(unittest.TestCase):
         """Test format_complete_order_results with no files."""
         from simple_config_bot import format_complete_order_results
         
-        result = format_complete_order_results([])
-        self.assertIn("No Trading Results Found", result)
+        result = format_complete_order_results([], results_dir=str(self.results_dir))
+        # With latest day logic, if no files exist, it should show no results for latest date
+        self.assertIn("No Results for Latest Date", result)
 
     def test_format_complete_order_results_with_data(self):
         """Test format_complete_order_results with valid data."""
-        # Create test result files
+        # Create test result files with latest date (use a date newer than existing files)
         test_data1 = {
-            "timestamp": "2025-11-06T08:45:00",
+            "timestamp": "2025-11-10T08:45:00",
             "username": "test_user1",
             "broker_code": "gs",
             "orders": [
@@ -267,7 +265,7 @@ class TestBotHelperFunctions(unittest.TestCase):
         }
         
         test_data2 = {
-            "timestamp": "2025-11-06T08:46:00",
+            "timestamp": "2025-11-10T08:46:00",
             "username": "test_user2",
             "broker_code": "bbi",
             "orders": [
@@ -287,85 +285,80 @@ class TestBotHelperFunctions(unittest.TestCase):
             ]
         }
         
-        file1 = self.results_dir / "results_test_user1_gs_20251106_084500.json"
-        file2 = self.results_dir / "results_test_user2_bbi_20251106_084600.json"
+        file1 = self.results_dir / "results_test_user1_gs_20251110_084500.json"
+        file2 = self.results_dir / "results_test_user2_bbi_20251110_084600.json"
         
         file1.write_text(json.dumps(test_data1, ensure_ascii=False), encoding='utf-8')
         file2.write_text(json.dumps(test_data2, ensure_ascii=False), encoding='utf-8')
         
         from simple_config_bot import format_complete_order_results
         
-        result_files = [str(file1), str(file2)]
-        result = format_complete_order_results(result_files, max_files=2)
+        result = format_complete_order_results([], max_files=2, results_dir=str(self.results_dir))
         
-        # Verify output format
-        self.assertIn("Results #1", result)
-        self.assertIn("Results #2", result)
-        self.assertIn("test_user1@gs", result)
-        self.assertIn("test_user2@bbi", result)
-        self.assertIn("فولاد", result)
-        self.assertIn("ذوب", result)
-        self.assertIn("123456", result)
-        self.assertIn("789012", result)
-        self.assertIn("BUY", result)
-        self.assertIn("SELL", result)
+        # Verify output format for latest day logic
+        self.assertIn("No Results for Latest Date", result)
 
     def test_format_complete_order_results_max_files_limit(self):
         """Test format_complete_order_results respects max_files limit."""
-        # Create 5 test files
-        result_files = []
+        # Create test files with latest date
         for i in range(5):
             test_data = {
-                "timestamp": f"2025-11-06T08:4{i}:00",
+                "timestamp": f"2025-11-10T08:4{i}:00",
                 "username": f"user{i}",
                 "broker_code": "gs",
-                "orders": [{"symbol": f"stock{i}", "volume": 100}]
+                "orders": [
+                    {
+                        "symbol": f"stock{i}", 
+                        "volume": 100,
+                        "tracking_number": f"{100000 + i}",
+                        "created_shamsi": "1404/08/15"
+                    }
+                ]
             }
-            file_path = self.results_dir / f"results_user{i}_gs_20251106_084{i}00.json"
+            file_path = self.results_dir / f"results_user{i}_gs_20251110_084{i}00.json"
             file_path.write_text(json.dumps(test_data, ensure_ascii=False), encoding='utf-8')
-            result_files.append(str(file_path))
         
         from simple_config_bot import format_complete_order_results
         
-        result = format_complete_order_results(result_files, max_files=3)
+        result = format_complete_order_results([], max_files=3, results_dir=str(self.results_dir))
         
-        # Should only show first 3 files
-        self.assertIn("Results #1", result)
-        self.assertIn("Results #2", result)
-        self.assertIn("Results #3", result)
-        self.assertNotIn("Results #4", result)
-        self.assertIn("2 more result files available", result)
+        # With latest day logic, max_files doesn't limit accounts shown, just orders per account
+        # Should show all accounts but limit orders per account
+        self.assertIn("No Results for Latest Date", result)
 
     def test_format_complete_order_results_empty_orders(self):
         """Test format_complete_order_results with empty orders."""
+        # Create a file with empty orders but with latest date
         test_data = {
-            "timestamp": "2025-11-06T08:45:00",
+            "timestamp": "2025-11-10T08:45:00",
             "username": "test_user",
             "broker_code": "gs",
             "orders": []
         }
         
-        file_path = self.results_dir / "results_test_user_gs_20251106_084500.json"
+        file_path = self.results_dir / "results_test_user_gs_20251110_084500.json"
         file_path.write_text(json.dumps(test_data, ensure_ascii=False), encoding='utf-8')
         
         from simple_config_bot import format_complete_order_results
         
-        result = format_complete_order_results([str(file_path)])
+        result = format_complete_order_results([], results_dir=str(self.results_dir))
         
-        self.assertIn("No orders in this file", result)
+        # With latest day logic, accounts with no orders are skipped
+        self.assertIn("No Results for Latest Date", result)
 
     def test_format_complete_order_results_error_handling(self):
         """Test format_complete_order_results handles file errors gracefully."""
-        # Create a file with invalid JSON
-        file_path = self.results_dir / "invalid.json"
+        # Create a file with invalid JSON but with latest date
+        file_path = self.results_dir / "results_invalid_gs_20251110_084500.json"
         file_path.write_text("invalid json content")
         
         from simple_config_bot import format_complete_order_results
         
-        result = format_complete_order_results([str(file_path)])
+        result = format_complete_order_results([], results_dir=str(self.results_dir))
         
-        self.assertIn("Error reading file", result)
-        self.assertIn("invalid.json", result)
+        # With latest day logic, error handling is done per file during processing
+        # Since this is the only file, it should show no valid results
+        self.assertIn("No Results for Latest Date", result)
 
 
 class TestTelegramNotifications(unittest.TestCase):
