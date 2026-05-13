@@ -123,8 +123,10 @@ class JobScheduler:
             current_time = now.time()
             today = now.date()
             
-            # Check if already executed today
-            job_key = f"{job['name']}_{today.isoformat()}"
+            # Check if already executed today for this scheduled time.
+            # Key includes job_time_str so that updating the schedule on the same day
+            # produces a new key and allows the job to run again at the new time.
+            job_key = f"{job['name']}_{today.isoformat()}_{job_time_str}"
             if job_key in self.executed_today:
                 return False
             
@@ -208,8 +210,11 @@ class JobScheduler:
             # Mark job as executed BEFORE running to prevent multiple attempts on the same day.
             # This is intentional: scheduled jobs (cache warmup, trading) should only run once per day
             # regardless of success/failure. Failures are logged but don't trigger retries.
+            # Key includes the scheduled time so that updating job['time'] mid-day produces a new
+            # key and allows the job to fire again at the new schedule.
             now = datetime.now()
-            job_key = f"{job_name}_{now.date().isoformat()}"
+            job_time_str = job.get('time', '')
+            job_key = f"{job_name}_{now.date().isoformat()}_{job_time_str}"
             self.executed_today[job_key] = now
             
             # Execute command with current environment variables (shell=False for security)
@@ -255,11 +260,12 @@ class JobScheduler:
                     if self.should_run_job(job):
                         self.execute_job(job)
                 
-                # Clean up old execution records (older than today)
-                today = datetime.now().date().isoformat()
+                # Clean up old execution records (older than today).
+                # Filter by the stored execution datetime since the key no longer ends with the date.
+                today_date = datetime.now().date()
                 self.executed_today = {
-                    k: v for k, v in self.executed_today.items() 
-                    if k.endswith(today)
+                    k: v for k, v in self.executed_today.items()
+                    if v.date() == today_date
                 }
                 
                 # Sleep for 1 second before next check
@@ -302,10 +308,10 @@ class JobScheduler:
         The run loop already rereads the config file on each iteration (every 10 seconds),
         so this method just ensures that execution tracking is up-to-date.
         """
-        today = datetime.now().date().isoformat()
-        # Keep only jobs that were already executed today
+        today_date = datetime.now().date()
+        # Keep only jobs that were already executed today (filter by stored timestamp).
         self.executed_today = {
             k: v for k, v in self.executed_today.items()
-            if k.endswith(today)
+            if v.date() == today_date
         }
         logger.info("📅 Scheduler configuration reloaded, execution cache refreshed")
