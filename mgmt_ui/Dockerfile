@@ -21,20 +21,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Copy project metadata first to leverage layer caching
+# Build context is the mgmt_ui/ directory itself (see docker-compose context: .).
+# The repo layout is flat: app/, alembic/, scripts/ live directly under mgmt_ui/.
 COPY pyproject.toml README.md ./
+COPY app ./app
+COPY alembic ./alembic
+COPY alembic.ini ./
+COPY scripts ./scripts
 
-# Create venv we can copy into the runtime stage
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-RUN pip install --upgrade pip setuptools wheel
-
-# Copy source so editable install resolves the package
-COPY mgmt_ui ./mgmt_ui
-
-# Install the project (editable so the venv has all deps resolved)
-RUN pip install -e .
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install .
 
 ############################
 # Stage 2: runtime
@@ -74,4 +73,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8000/health || exit 1
 
-CMD ["uvicorn", "mgmt_ui.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# `app` is the top-level package (flat layout); CWD = /app so `from app.xxx` resolves.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
