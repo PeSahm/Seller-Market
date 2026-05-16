@@ -41,6 +41,6 @@ class SettingsUpdate(BaseModel):
         v = v.strip()
         if not v:
             raise ValueError("agent_image_tag is required")
-        if any(c in _FORBIDDEN_TAG_CHARS for c in v):
+        if any(c.isspace() or c in _FORBIDDEN_TAG_CHARS for c in v):
             raise ValueError("agent_image_tag contains invalid characters")
         return v

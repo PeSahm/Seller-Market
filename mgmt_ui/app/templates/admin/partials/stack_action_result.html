@@ -1,6 +1,6 @@
 {% if result.ok %}
 <div class="flash flash--success">
-  <strong>✓ {{ result.message|default('Action completed.') }}</strong>
+  <strong>✓ {{ result.message|default('Action completed.', true) }}</strong>
   <p class="text-small text-muted">Stack is now <strong>{{ result.status }}</strong>.</p>
   {% if result.log_tail %}
   <details>
@@ -12,7 +12,7 @@
 {% else %}
 <div class="flash flash--error">
   <strong>✗ Action failed</strong>
-  <p class="text-small">{{ result.message }}</p>
+  <p class="text-small">{{ result.message|default('Action failed.', true) }}</p>
   {% if result.log_tail %}
   <details>
     <summary>docker compose output (tail)</summary>
