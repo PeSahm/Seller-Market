@@ -31,10 +31,10 @@ async def ready(db: AsyncSession = Depends(get_db)) -> JSONResponse:
         if value != 1:
             raise RuntimeError(f"Unexpected SELECT 1 result: {value!r}")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("readiness check failed: %s", exc)
+        logger.warning("readiness check failed", exc_info=exc)
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"status": "unavailable", "version": VERSION, "error": str(exc)},
+            content={"status": "unavailable", "version": VERSION, "error": "database not ready"},
         )
     return JSONResponse(
         status_code=status.HTTP_200_OK,
