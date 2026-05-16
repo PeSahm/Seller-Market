@@ -424,6 +424,14 @@ async def agent_customer_update(
         )
     except OptimisticLockError:
         # Another change won the race. Tell the user, return 409.
+        # Re-read the row so the form shows the *current* server-side state
+        # (including the bumped version) on retry — but re-verify tenant
+        # access against the refreshed row. If a future move-customer-
+        # between-agents flow happened mid-edit, ownership might have
+        # changed; we must NOT leak a row the user no longer owns.
+        fresh = await services_customers.get_customer(db, customer_id)
+        if fresh is None or not _can_access_customer(user, fresh):
+            raise HTTPException(status_code=404, detail="customer not found")
         ctx = _ctx(request, user, current_tab="/agent/customers")
         ctx["form_error"] = (
             "Another change won the race. Reload the page and try again."
@@ -431,10 +439,7 @@ async def agent_customer_update(
         ctx["form_values"] = sticky
         ctx["brokers"] = BROKERS
         ctx["mode"] = "edit"
-        # Re-read the row so the form shows the *current* server-side state
-        # (including the bumped version) on retry.
-        fresh = await services_customers.get_customer(db, customer_id)
-        ctx["customer"] = fresh if fresh is not None else customer
+        ctx["customer"] = fresh
         return templates.TemplateResponse(
             "agent/customer_form.html",
             ctx,
