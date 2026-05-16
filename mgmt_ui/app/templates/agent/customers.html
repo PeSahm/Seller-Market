@@ -2,6 +2,72 @@
 {% block page_title %}My customers{% endblock %}
 
 {% block page_body %}
-<h1 class="h1">My customers</h1>
-<p class="text-muted text-small">Coming in Phase 4 &mdash; see plan.</p>
+<div class="page-header">
+  <h1 class="h1">My customers</h1>
+  <a class="btn btn--primary" href="/agent/customers/new">+ Add customer</a>
+</div>
+
+<p class="text-muted text-small">
+  Customers are your individual trading accounts. Each row maps to one
+  <code>[section]</code> in the bot's <code>config.ini</code> on the trading
+  server. The mgmt UI generates the section name automatically and encrypts
+  your broker password at rest. Server assignment is decided by your admin —
+  newly-added customers stay in <strong>Pending</strong> until an admin
+  routes them to a server.
+</p>
+
+{% if not customers %}
+<div class="card">
+  <p class="text-muted">No customers yet.</p>
+  <p class="text-small text-muted">
+    Click <strong>+ Add customer</strong> to declare your first one.
+  </p>
+</div>
+{% else %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>Display name</th>
+      <th>Broker</th>
+      <th>ISIN</th>
+      <th>Side</th>
+      <th>Server</th>
+      <th>Status</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for c in customers %}
+    {% set srv = servers_by_id.get(c.server_id) if c.server_id else None %}
+    <tr>
+      <td>
+        <a href="/agent/customers/{{ c.id }}" dir="auto">{{ c.display_name }}</a>
+      </td>
+      <td><span class="badge">{{ c.broker }}</span></td>
+      <td><code class="text-small">{{ c.isin }}</code></td>
+      <td>{{ "Buy" if c.side == 1 else "Sell" }}</td>
+      <td>
+        {% if srv %}
+          <span class="badge badge--up" dir="auto">{{ srv.name }}</span>
+        {% else %}
+          <span class="badge badge--pending">pending</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if c.assignment_status == "active" %}
+          <span class="badge badge--up">active</span>
+        {% elif c.assignment_status == "pending" %}
+          <span class="badge badge--pending">pending</span>
+        {% else %}
+          <span class="badge">{{ c.assignment_status }}</span>
+        {% endif %}
+      </td>
+      <td>
+        <a class="btn btn--ghost btn--sm" href="/agent/customers/{{ c.id }}">view →</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 {% endblock %}

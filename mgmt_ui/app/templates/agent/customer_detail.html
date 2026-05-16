@@ -1,0 +1,100 @@
+{#
+  Customer detail page.
+
+  Identity card on the left + action buttons on the right. The "Server"
+  field is a READ-ONLY badge — agents cannot reassign servers, that's an
+  admin decision. The Fernet ciphertext (``password_enc``) is NEVER
+  rendered.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}{{ customer.display_name }}{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1" dir="auto">{{ customer.display_name }}</h1>
+    <p class="text-muted text-small">
+      <span class="badge">{{ customer.broker }}</span>
+      <code class="text-small">{{ customer.isin }}</code>
+      · {{ "Buy" if customer.side == 1 else "Sell" }}
+    </p>
+  </div>
+  <div class="header-actions">
+    <a class="btn btn--primary btn--sm" href="/agent/customers/{{ customer.id }}/edit">Edit</a>
+    <a class="btn btn--ghost btn--sm" href="/agent/customers/{{ customer.id }}/duplicate">Duplicate with new ISIN</a>
+    <form method="post" action="/agent/customers/{{ customer.id }}/delete"
+          onsubmit="return confirm('Soft-delete this customer? Trading will stop on the next render cycle.');">
+      <button class="btn btn--danger btn--sm" type="submit">Delete</button>
+    </form>
+  </div>
+</div>
+
+<section class="card">
+  <h2 class="h2">Identity</h2>
+  <dl class="kv">
+    <dt>Display name</dt>
+    <dd dir="auto">{{ customer.display_name }}</dd>
+
+    <dt>Broker</dt>
+    <dd><span class="badge">{{ customer.broker }}</span></dd>
+
+    <dt>ISIN</dt>
+    <dd><code>{{ customer.isin }}</code></dd>
+
+    <dt>Side</dt>
+    <dd>
+      {% if customer.side == 1 %}
+        <span class="badge badge--up">Buy</span>
+      {% else %}
+        <span class="badge badge--down">Sell</span>
+      {% endif %}
+    </dd>
+
+    <dt>Broker username</dt>
+    <dd dir="auto"><code>{{ customer.username }}</code></dd>
+
+    <dt>Status</dt>
+    <dd>
+      {% if customer.assignment_status == "active" %}
+        <span class="badge badge--up">active</span>
+      {% elif customer.assignment_status == "pending" %}
+        <span class="badge badge--pending">pending</span>
+      {% else %}
+        <span class="badge">{{ customer.assignment_status }}</span>
+      {% endif %}
+      {% if not customer.enabled %}
+        <span class="badge badge--down">disabled</span>
+      {% endif %}
+    </dd>
+
+    <dt>Server</dt>
+    <dd>
+      {% if server %}
+        <span class="badge badge--up" dir="auto">Assigned to: {{ server.name }}</span>
+      {% else %}
+        <span class="badge badge--pending">Pending assignment</span>
+      {% endif %}
+      <p class="text-small text-muted">
+        Server assignment is decided by your admin — you can't change it here.
+      </p>
+    </dd>
+
+    <dt>Section name</dt>
+    <dd>
+      <code class="text-small">{{ customer.section_name }}</code>
+      <p class="text-small text-muted">
+        How this customer appears in <code>config.ini</code> on the trading
+        server. Generated automatically; not editable.
+      </p>
+    </dd>
+
+    {% if customer.comment %}
+    <dt>Comment</dt>
+    <dd dir="auto">{{ customer.comment }}</dd>
+    {% endif %}
+
+    <dt>Version</dt>
+    <dd class="text-small text-muted">v{{ customer.version }} · created {{ customer.created_at.strftime('%Y-%m-%d %H:%M UTC') }} · updated {{ customer.updated_at.strftime('%Y-%m-%d %H:%M UTC') }}</dd>
+  </dl>
+</section>
+{% endblock %}
