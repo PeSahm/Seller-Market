@@ -37,6 +37,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -88,6 +89,48 @@ def _key_path_for(server_id: UUID) -> Path:
     return _KEY_DIR / f"sm_{server_id}"
 
 
+# Canonical UUID string form (lowercase hex with hyphens) is what
+# ``str(UUID(...))`` returns. The regex enforces no shell-special chars and
+# no separators even if a future refactor accidentally passes a non-UUID.
+_SERVER_KEY_NAME_RE = re.compile(
+    r"^sm_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+def _resolve_key_path(server_id: UUID) -> Path:
+    """Return the on-disk key path for ``server_id``, asserting containment.
+
+    Defense-in-depth against path-injection (CodeQL py/path-injection):
+
+    - The resolved path's parent MUST equal the resolved key directory.
+    - The filename MUST match ``sm_<canonical-uuid>``.
+
+    If either check fails, raise ``ValueError`` — the caller decides whether
+    to log and abort or to treat as a security event.
+
+    The ``UUID`` type hint already gives us strong validation at the HTTP
+    boundary (FastAPI rejects non-UUID path params), but encoding the
+    invariant here means CodeQL's dataflow analysis sees a barrier before
+    the value reaches a filesystem call, and it survives a future refactor
+    that loosens the type.
+    """
+    candidate = _key_path_for(server_id)
+    # ``resolve()`` works on non-existent paths on Python 3.6+; no need for
+    # ``strict=False`` gymnastics. It collapses ``..`` segments and symlinks.
+    resolved = candidate.resolve()
+    key_dir_resolved = _KEY_DIR.resolve()
+    if resolved.parent != key_dir_resolved:
+        raise ValueError(
+            f"key path escapes key dir: parent={resolved.parent!r} "
+            f"expected={key_dir_resolved!r}"
+        )
+    if not _SERVER_KEY_NAME_RE.fullmatch(resolved.name):
+        raise ValueError(
+            f"key filename does not match sm_<uuid> pattern: {resolved.name!r}"
+        )
+    return resolved
+
+
 def _write_key_file(server_id: UUID, private_key: str) -> Path:
     """Write the private key to its on-disk location with 0600 perms.
 
@@ -103,7 +146,9 @@ def _write_key_file(server_id: UUID, private_key: str) -> Path:
     create flow.
     """
     _KEY_DIR.mkdir(parents=True, exist_ok=True)
-    path = _key_path_for(server_id)
+    # Route through the asserting validator so CodeQL sees a barrier between
+    # the UUID input and the ``os.open`` call below (py/path-injection).
+    path = _resolve_key_path(server_id)
     # Ensure the key payload ends with a newline — some loaders are picky.
     payload = private_key if private_key.endswith("\n") else private_key + "\n"
     # Use a low-level open with O_CREAT|O_TRUNC|O_WRONLY so we can set 0600
@@ -132,8 +177,24 @@ def _write_key_file(server_id: UUID, private_key: str) -> Path:
 
 
 def _delete_key_file(server_id: UUID) -> None:
-    """Remove the on-disk key for a server if present. Never raises."""
-    path = _key_path_for(server_id)
+    """Remove the on-disk key for a server if present. Never raises.
+
+    Routes through :func:`_resolve_key_path` so any path that would escape
+    the key directory is rejected before reaching ``unlink``. A failed
+    containment check is a security-relevant signal, not a routine cleanup
+    failure, so we log it at ERROR with a distinct message — that way the
+    alert surfaces in monitoring instead of being lost in INFO noise.
+    """
+    try:
+        path = _resolve_key_path(server_id)
+    except ValueError:
+        logger.error(
+            "refusing to delete key file: path containment check failed for "
+            "server_id=%r",
+            server_id,
+            exc_info=True,
+        )
+        return
     try:
         path.unlink(missing_ok=True)
     except Exception:  # noqa: BLE001
