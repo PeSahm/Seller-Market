@@ -1,0 +1,59 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Add agent{% endblock %}
+
+{% block page_body %}
+<h1 class="h1">Add agent</h1>
+<p class="text-muted text-small">
+  Agents have their own login and manage their own customers. The password is
+  hashed with bcrypt and never stored in plaintext; we can't recover it later,
+  so share it through a safe channel before saving.
+</p>
+
+{% if form_error %}
+<div class="flash flash--error">
+  <strong>✗ Invalid input</strong>
+  <p class="text-small">{{ form_error }}</p>
+</div>
+{% endif %}
+
+{% set fv = form_values|default({}) %}
+
+<form class="agent-form" method="post" action="/admin/agents">
+  <div class="field">
+    <label class="label" for="username">Username</label>
+    <input class="input" id="username" name="username" required dir="auto"
+           value="{{ fv.username|default('') }}"
+           placeholder="e.g. agent-mostafa" maxlength="255"
+           autocomplete="off">
+    <p class="text-small text-muted">
+      Must be unique. Used as the agent's login.
+    </p>
+  </div>
+
+  <div class="field">
+    <label class="label" for="password">Password</label>
+    <input class="input" id="password" name="password" type="password" required
+           minlength="8" maxlength="128" autocomplete="new-password">
+    <p class="text-small text-muted">
+      At least 8 characters. Not echoed back to this form if validation fails —
+      you'll need to retype it.
+    </p>
+  </div>
+
+  <div class="field">
+    <label class="label" for="telegram_user_id">Telegram user ID (optional)</label>
+    <input class="input" id="telegram_user_id" name="telegram_user_id"
+           value="{{ fv.telegram_user_id|default('') }}"
+           placeholder="numeric Telegram ID, e.g. 123456789"
+           maxlength="64" autocomplete="off">
+    <p class="text-small text-muted">
+      Leave blank to skip. Bot integration lands in Phase 4.
+    </p>
+  </div>
+
+  <div class="form-actions">
+    <a class="btn btn--ghost" href="/admin/agents">Cancel</a>
+    <button class="btn btn--primary" type="submit">Add agent</button>
+  </div>
+</form>
+{% endblock %}
