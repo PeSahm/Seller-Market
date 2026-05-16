@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
+from typing import Optional
 
 from fastapi import Depends, FastAPI, Request, status
 from fastapi.exceptions import HTTPException
@@ -17,6 +19,7 @@ from app.routers import auth as auth_router
 from app.routers import health as health_router
 from app.security.deps import get_current_user
 from app.settings import get_settings
+from app.workers.health import run_health_worker
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +94,42 @@ def create_app() -> FastAPI:
             "found" if part2_present else "missing(dev fallback)",
             settings.fernet_key_part2_path,
         )
+
+    # --------------------------------------------------------------
+    # Background workers
+    # --------------------------------------------------------------
+    # The health worker is a single in-process asyncio task. We park its
+    # handle + stop event on the FastAPI ``app.state`` to keep this module
+    # free of module-level globals (which matter when create_app() is called
+    # more than once, e.g. in test harnesses).
+    app.state.health_stop = asyncio.Event()
+    app.state.health_task = None  # type: Optional[asyncio.Task[None]]
+
+    @app.on_event("startup")
+    async def _start_health_worker() -> None:
+        if not settings.enable_health_worker:
+            logger.info("health worker disabled via settings")
+            return
+        app.state.health_task = asyncio.create_task(
+            run_health_worker(app.state.health_stop),
+            name="health-worker",
+        )
+
+    @app.on_event("shutdown")
+    async def _stop_health_worker() -> None:
+        task: Optional[asyncio.Task[None]] = app.state.health_task
+        if task is None:
+            return
+        app.state.health_stop.set()
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("health worker did not stop in 5s; cancelling")
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
 
     return app
 
