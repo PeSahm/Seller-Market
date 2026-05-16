@@ -79,6 +79,8 @@ from app.models.stacks import AgentStack
 from app.schemas.stack import StackActionResult
 from app.services.rendering import (
     CustomerRow,
+    LocustConfigRow,
+    SchedulerJobRow,
     StackRenderContext,
     render_compose_yaml,
     render_config_ini,
@@ -287,19 +289,31 @@ async def _build_render_context(
 ) -> StackRenderContext:
     """Build the per-stack render context.
 
-    Phase 4: customers are loaded from the DB, broker passwords decrypted via
-    :func:`app.services.customers.decrypt_password` (which emits an audit log
-    entry on each decrypt — the only path that crosses the encrypted
-    boundary). ``scheduler_jobs`` / ``scheduler_enabled`` / ``locust`` remain
-    Phase 5 placeholders.
+    Phase 5: everything is wired up. Customers come from the customers
+    service (with broker passwords decrypted at the source so the rendering
+    layer never touches Fernet), scheduler job rows come from the
+    scheduler_jobs service, and the locust override (if any) comes from the
+    locust_configs service.
 
     * ``agent_image_tag`` and ``ocr_service_url`` are read from the
       ``settings`` table with hard-coded defaults.
     * ``server_base_dir`` comes from the server row that owns the stack.
-    * ``customers`` are loaded by :func:`_load_stack_customers` — enabled
-      rows whose ``stack_id`` points at this stack, with broker passwords
-      decrypted at the source so the rendering layer stays oblivious to
-      Fernet entirely.
+    * ``customers`` are loaded by :func:`_load_stack_customers`.
+    * ``scheduler_jobs`` are loaded from the scheduler_jobs service and
+      projected into :class:`SchedulerJobRow`. The DB stores ``time`` as
+      ``sa.Time``; the renderer wants the ``"HH:MM:SS"`` string form, so we
+      coerce here at the seam.
+    * ``scheduler_enabled`` is derived: the rendered
+      ``scheduler_config.json`` carries a top-level ``"enabled"`` flag that
+      the bot's scheduler treats as a global kill-switch. We set it truthy
+      iff at least one job row is enabled — a stack with every job paused
+      is effectively a paused stack.
+    * ``locust`` is the per-agent override row (or None to fall back to
+      fleet defaults inside the renderer).
+
+    Service imports are lazy to match the existing customer-service pattern
+    — keeps module-load free of any indirect cycle through services that
+    may grow a dependency back into this module.
 
     Raises:
         LookupError: if the stack's server row has gone missing — should be
@@ -321,16 +335,55 @@ async def _build_render_context(
 
     customers = await _load_stack_customers(db, stack.id)
 
+    # Phase 5: real scheduler jobs + locust config. Lazy imports mirror the
+    # services_customers pattern in _load_stack_customers — keeps the
+    # module import graph acyclic regardless of what those services pull in.
+    from app.services import (  # noqa: WPS433
+        locust_configs as services_locust,
+    )
+    from app.services import (  # noqa: WPS433
+        scheduler_jobs as services_scheduler,
+    )
+
+    scheduler_db_rows = await services_scheduler.list_jobs(
+        db, stack_id=stack.id
+    )
+    scheduler_rows = tuple(
+        SchedulerJobRow(
+            name=j.name,
+            # DB stores sa.Time → renderer wants "HH:MM:SS" string.
+            time=j.time.strftime("%H:%M:%S"),
+            enabled=j.enabled,
+            command=j.command,
+        )
+        for j in scheduler_db_rows
+    )
+    # The stack is "scheduler-enabled" iff at least one job is enabled. This
+    # is an admin-level toggle that lives on the rendered
+    # scheduler_config.json's top-level "enabled" key; falsey here means the
+    # whole scheduler is paused regardless of individual job rows.
+    scheduler_enabled = any(j.enabled for j in scheduler_db_rows)
+
+    locust_db = await services_locust.get_locust_config(db, stack.id)
+    locust_row: LocustConfigRow | None = None
+    if locust_db is not None:
+        locust_row = LocustConfigRow(
+            users=locust_db.users,
+            spawn_rate=locust_db.spawn_rate,
+            run_time=locust_db.run_time,
+            host=locust_db.host,
+            processes=locust_db.processes,
+        )
+
     return StackRenderContext(
         agent_id=stack.agent_id,
         server_base_dir=server.base_dir,
         agent_image_tag=image_tag,
         ocr_service_url=ocr_url,
         customers=customers,
-        # Scheduler / locust still placeholders until Phase 5.
-        scheduler_jobs=(),
-        scheduler_enabled=False,
-        locust=None,
+        scheduler_jobs=scheduler_rows,
+        scheduler_enabled=scheduler_enabled,
+        locust=locust_row,
     )
 
 
@@ -1216,6 +1269,210 @@ async def render_config_ini_for_stack_preview(
     return (current, new_content)
 
 
+# ---------------------------------------------------------------------------
+# Phase 5: scheduler / locust push + preview
+# ---------------------------------------------------------------------------
+
+
+async def _push_rendered_json_for_stack(
+    db: AsyncSession,
+    stack_id: UUID,
+    actor_id: Optional[UUID],
+    *,
+    filename: str,
+    render_fn,
+    audit_action: str,
+    flash_message: str,
+) -> StackActionResult:
+    """Shared body for the two Phase-5 push helpers.
+
+    Both ``push_scheduler_config_for_stack`` and
+    ``push_locust_config_for_stack`` do the exact same dance — only the
+    filename, renderer, audit action, and success message differ. Keeping
+    the shared structure in one private helper means the lock + audit + SFTP
+    semantics can never drift between the two public functions.
+
+    See :func:`push_config_ini_for_stack` for the rationale behind each
+    step (per-server advisory lock on a dedicated session, stack-scope
+    guard, audit before commit, best-effort lock release in ``finally``).
+    """
+    stack = await get_stack(db, stack_id)
+    if stack is None:
+        raise LookupError(f"stack not found: {stack_id}")
+    server = await db.get(Server, stack.server_id)
+    if server is None:
+        raise LookupError(f"server not found: {stack.server_id}")
+
+    lock_key = _compose_lock_key(server.id)
+    async with AsyncSessionLocal() as lock_session:
+        if not await try_acquire_session_lock(lock_session, lock_key):
+            raise RuntimeError(
+                "another compose op is in flight for this server"
+            )
+        try:
+            ctx = await _build_render_context(db, stack)
+            new_content = render_fn(ctx)
+            remote_path = f"{stack.stack_dir}/{filename}"
+            _assert_stack_path_in_scope(stack, remote_path)
+            sftp_atomic_write, _ = _import_sftp()
+            await sftp_atomic_write(server, remote_path, new_content)
+            await _write_audit(
+                db,
+                actor_id=actor_id,
+                action=audit_action,
+                target_id=stack.id,
+                before=None,
+                after={"path": remote_path, "len": len(new_content)},
+            )
+            await db.commit()
+            return StackActionResult(
+                ok=True,
+                stack_id=stack.id,
+                status=stack.status,
+                message=flash_message,
+            )
+        finally:
+            try:
+                await release_session_lock(lock_session, lock_key)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                logger.exception(
+                    "failed to release compose lock key=%s", lock_key
+                )
+
+
+async def push_scheduler_config_for_stack(
+    db: AsyncSession,
+    stack_id: UUID,
+    actor_id: Optional[UUID],
+) -> StackActionResult:
+    """Render ``scheduler_config.json`` from the stack's current
+    ``scheduler_jobs`` rows and SFTP-push it under the per-server compose
+    advisory lock.
+
+    The bot's ``scheduler.py`` re-reads this file every ~1 second of its
+    poll loop, so the change takes effect within ~1s of the push — no
+    container restart needed.
+
+    Raises:
+        LookupError: stack or server row missing.
+        RuntimeError: another compose op is in flight for this server.
+        SSHError: an SFTP failure bubbles up so the caller can show it.
+        PathOutOfScopeError: defensive — should never happen because we
+            construct the path from ``stack.stack_dir``.
+    """
+    return await _push_rendered_json_for_stack(
+        db,
+        stack_id,
+        actor_id,
+        filename="scheduler_config.json",
+        render_fn=render_scheduler_config,
+        audit_action="stack.push_scheduler_config",
+        flash_message="scheduler_config.json pushed",
+    )
+
+
+async def push_locust_config_for_stack(
+    db: AsyncSession,
+    stack_id: UUID,
+    actor_id: Optional[UUID],
+) -> StackActionResult:
+    """Render ``locust_config.json`` from the stack's locust_config row and
+    SFTP-push it under the per-server compose advisory lock.
+
+    Effective on the NEXT scheduled trade run — the bot's
+    ``locustfile_new.py`` reads this file at process start, not
+    continuously. The push itself is immediate; only the *effect* waits for
+    the next scheduled run.
+
+    Raises:
+        LookupError: stack or server row missing.
+        RuntimeError: another compose op is in flight for this server.
+        SSHError: an SFTP failure bubbles up so the caller can show it.
+        PathOutOfScopeError: defensive — see push_scheduler_config_for_stack.
+    """
+    return await _push_rendered_json_for_stack(
+        db,
+        stack_id,
+        actor_id,
+        filename="locust_config.json",
+        render_fn=render_locust_config,
+        audit_action="stack.push_locust_config",
+        flash_message="locust_config.json pushed",
+    )
+
+
+async def render_scheduler_config_for_stack_preview(
+    db: AsyncSession,
+    stack_id: UUID,
+) -> tuple[str, str]:
+    """Return ``(current_remote_content, new_rendered_content)`` for the
+    scheduler diff-preview UI.
+
+    No redaction is applied — ``scheduler_config.json`` carries no secrets
+    (no passwords, no tokens). On SFTP read failure (file missing, server
+    unreachable, stack not yet provisioned) the current half is the empty
+    string.
+    """
+    stack = await get_stack(db, stack_id)
+    if stack is None:
+        raise LookupError(f"stack not found: {stack_id}")
+    server = await db.get(Server, stack.server_id)
+    if server is None:
+        raise LookupError(f"server not found: {stack.server_id}")
+
+    ctx = await _build_render_context(db, stack)
+    new_content = render_scheduler_config(ctx)
+
+    _, sftp_read_text = _import_sftp()
+    current = ""
+    try:
+        current = await sftp_read_text(
+            server, f"{stack.stack_dir}/scheduler_config.json"
+        )
+    except SSHError as exc:
+        logger.info(
+            "preview: sftp_read_text failed stack=%s file=scheduler_config.json: %s",
+            stack_id,
+            exc,
+        )
+    return (current, new_content)
+
+
+async def render_locust_config_for_stack_preview(
+    db: AsyncSession,
+    stack_id: UUID,
+) -> tuple[str, str]:
+    """Return ``(current_remote_content, new_rendered_content)`` for the
+    locust diff-preview UI.
+
+    No redaction is applied — ``locust_config.json`` carries no secrets.
+    On SFTP read failure the current half is the empty string.
+    """
+    stack = await get_stack(db, stack_id)
+    if stack is None:
+        raise LookupError(f"stack not found: {stack_id}")
+    server = await db.get(Server, stack.server_id)
+    if server is None:
+        raise LookupError(f"server not found: {stack.server_id}")
+
+    ctx = await _build_render_context(db, stack)
+    new_content = render_locust_config(ctx)
+
+    _, sftp_read_text = _import_sftp()
+    current = ""
+    try:
+        current = await sftp_read_text(
+            server, f"{stack.stack_dir}/locust_config.json"
+        )
+    except SSHError as exc:
+        logger.info(
+            "preview: sftp_read_text failed stack=%s file=locust_config.json: %s",
+            stack_id,
+            exc,
+        )
+    return (current, new_content)
+
+
 __all__ = [
     "deprovision_stack",
     "find_or_create_stack",
@@ -1223,7 +1480,11 @@ __all__ = [
     "list_stacks",
     "provision_stack",
     "push_config_ini_for_stack",
+    "push_locust_config_for_stack",
+    "push_scheduler_config_for_stack",
     "redeploy_stack",
     "render_config_ini_for_stack_preview",
+    "render_locust_config_for_stack_preview",
+    "render_scheduler_config_for_stack_preview",
     "stack_files_preview",
 ]

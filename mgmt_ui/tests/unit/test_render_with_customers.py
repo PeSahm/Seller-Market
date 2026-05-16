@@ -87,12 +87,17 @@ def _make_db(customer_rows: list[SimpleNamespace]) -> MagicMock:
       ``scalar_one_or_none`` returns ``None`` (so the defaults kick in).
     * ``db.execute(<select Customer...>)`` — return a fake Result whose
       ``scalars().all()`` returns ``customer_rows``.
+    * ``db.execute(<select SchedulerJob...>)`` — Phase 5; return a fake
+      Result with an empty ``scalars().all()`` so no jobs are projected.
+    * ``db.execute(<select LocustConfig...>)`` — Phase 5; return a fake
+      Result whose ``scalar_one_or_none`` returns ``None`` so the locust
+      override falls back to fleet defaults.
 
-    We can't easily distinguish the two ``execute`` calls by inspecting the
+    We can't easily distinguish the ``execute`` calls by inspecting the
     statement (it's a SQLAlchemy ``Select`` and pattern-matching against it
-    would be brittle). Instead we use a side_effect that returns settings
-    results first (settings_store reads happen before _load_stack_customers),
-    then the customer result.
+    would be brittle). Instead we use a side_effect that returns results in
+    call order: two settings reads, the customer read, the scheduler-jobs
+    read, then the locust-config read.
     """
     db = MagicMock()
 
@@ -104,14 +109,29 @@ def _make_db(customer_rows: list[SimpleNamespace]) -> MagicMock:
     scalars_mock.all = MagicMock(return_value=customer_rows)
     customers_result.scalars = MagicMock(return_value=scalars_mock)
 
-    # The settings_store currently uses `select(Setting)` + scalar_one_or_none()
-    # in its own code path; but our shim in stacks.py uses
-    # `select(Setting.value)` via _read_setting. Both ultimately go through
-    # db.execute → scalar_one_or_none(). The customer query uses
-    # scalars().all(). We rely on call ordering — two settings reads, then
-    # one customer read.
+    # Phase 5: empty scheduler-jobs list — none of these render tests care
+    # about scheduler output.
+    scheduler_result = MagicMock()
+    scheduler_scalars = MagicMock()
+    scheduler_scalars.all = MagicMock(return_value=[])
+    scheduler_result.scalars = MagicMock(return_value=scheduler_scalars)
+
+    # Phase 5: no locust override — the renderer falls back to its built-in
+    # fleet defaults, which is exactly what the customer-section tests want.
+    locust_result = MagicMock()
+    locust_result.scalar_one_or_none = MagicMock(return_value=None)
+
+    # Call order matches the body of ``_build_render_context``:
+    # _read_setting × 2 → _load_stack_customers → list_jobs →
+    # get_locust_config.
     db.execute = AsyncMock(
-        side_effect=[settings_result, settings_result, customers_result]
+        side_effect=[
+            settings_result,
+            settings_result,
+            customers_result,
+            scheduler_result,
+            locust_result,
+        ]
     )
     db.get = AsyncMock(return_value=_fake_server())
     return db
