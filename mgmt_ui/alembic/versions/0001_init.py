@@ -624,4 +624,5 @@ def downgrade() -> None:
     for enum in reversed(_ALL_ENUMS):
         enum.drop(bind, checkfirst=True)
 
-    op.execute('DROP EXTENSION IF EXISTS "pgcrypto"')
+    # Intentionally not dropping pgcrypto — extension lifecycle is operator-managed,
+    # may be used by other schemas in the same database.
