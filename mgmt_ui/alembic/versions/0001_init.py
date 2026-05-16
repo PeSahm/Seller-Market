@@ -239,7 +239,7 @@ def upgrade() -> None:
         sa.Column(
             "stack_id",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("agent_stacks.id", ondelete="CASCADE"),
+            sa.ForeignKey("agent_stacks.id", ondelete="SET NULL"),
             nullable=True,
         ),
         sa.Column(
@@ -271,6 +271,14 @@ def upgrade() -> None:
             server_default=sa.func.now(),
         ),
         sa.CheckConstraint("side IN (1, 2)", name="ck_customers_side"),
+        sa.UniqueConstraint(
+            "agent_id",
+            "username",
+            "broker",
+            "isin",
+            "side",
+            name="uq_customers_agent_account_broker_isin_side",
+        ),
     )
     op.create_index("ix_customers_agent_id", "customers", ["agent_id"])
     op.create_index("ix_customers_stack_id", "customers", ["stack_id"])

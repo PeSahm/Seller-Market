@@ -51,6 +51,14 @@ class Customer(Base):
     __tablename__ = "customers"
     __table_args__ = (
         CheckConstraint("side IN (1, 2)", name="ck_customers_side"),
+        sa.UniqueConstraint(
+            "agent_id",
+            "username",
+            "broker",
+            "isin",
+            "side",
+            name="uq_customers_agent_account_broker_isin_side",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -71,7 +79,7 @@ class Customer(Base):
     )
     stack_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("agent_stacks.id", ondelete="CASCADE"),
+        ForeignKey("agent_stacks.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
