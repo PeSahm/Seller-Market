@@ -92,3 +92,22 @@ def test_parse_lowercase_state_key_returns_up() -> None:
     """
     stdout = '{"name": "agent_app", "state": "Running"}'
     assert _parse_compose_status(stdout) == "up"
+
+
+def test_parse_non_string_state_does_not_crash() -> None:
+    """Non-string ``State`` values (numeric, null, etc.) must not crash the
+    parser.
+
+    Some docker compose versions / build modes have been observed to emit
+    numeric or null states under edge conditions (e.g. partially-initialized
+    containers). The parser must coerce them rather than letting an
+    ``AttributeError`` from ``.lower()`` abort the entire tick.
+    """
+    payload = '[{"State": 1}, {"State": null}, {"State": "running"}]'
+    assert _parse_compose_status(payload) == "up"
+
+
+def test_parse_only_non_string_states_returns_down() -> None:
+    """All non-string / non-running states still resolve to ``down`` cleanly."""
+    payload = '[{"State": 1}, {"State": null}, {"State": {"nested": "obj"}}]'
+    assert _parse_compose_status(payload) == "down"

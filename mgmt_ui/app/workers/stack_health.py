@@ -30,7 +30,7 @@ import json
 import logging
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.db import AsyncSessionLocal
 from app.models.servers import Server
@@ -81,7 +81,15 @@ def _parse_compose_status(stdout: str) -> str:
                 candidates.append(obj)
 
     for c in candidates:
-        state = (c.get("State") or c.get("state") or "").lower()
+        # Defensive: some compose builds emit numeric / null / object values
+        # under edge conditions. Coerce non-strings rather than crashing the
+        # whole tick on a single weird container.
+        raw_state = c.get("State") or c.get("state") or ""
+        state = (
+            raw_state.lower()
+            if isinstance(raw_state, str)
+            else str(raw_state).lower()
+        )
         if state == "running":
             return "up"
     return "down"
@@ -131,11 +139,26 @@ async def _check_one(stack_id: UUID) -> None:
 
             # Transient transitions are owned by the service layer — don't
             # let a momentary ``ps`` mismatch race the create / teardown
-            # flow.
-            if stack.status in ("provisioning", "deprovisioning"):
-                return
-            if new_status != stack.status:
-                stack.status = new_status
+            # flow. The SSH roundtrip above is slow (5-15s), and the row may
+            # have been flipped to ``provisioning`` / ``deprovisioning`` by
+            # the service layer while we were waiting. A read-then-write
+            # against our stale ``stack`` snapshot would silently clobber
+            # that transition. Use a conditional UPDATE so the database
+            # itself enforces "only overwrite if not transitional and value
+            # actually changes".
+            stmt = (
+                update(AgentStack)
+                .where(AgentStack.id == stack_id)
+                .where(
+                    AgentStack.status.not_in(
+                        ("provisioning", "deprovisioning")
+                    )
+                )
+                .where(AgentStack.status != new_status)
+                .values(status=new_status)
+            )
+            result = await db.execute(stmt)
+            if result.rowcount:
                 await db.commit()
     except Exception:  # noqa: BLE001 — never let one stack's failure kill the loop
         logger.exception(
