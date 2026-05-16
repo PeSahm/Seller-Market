@@ -33,13 +33,9 @@ from app.models.settings import Setting
 # and after an admin first visits the settings page.
 DEFAULTS: dict[str, str] = {
     "ocr_service_url": "http://5.10.248.55:18080",
-    # Default points at the locally-built image that `docker compose build`
-    # produces from SellerMarket/Dockerfile on each trading server. This works
-    # out-of-the-box on any server where the existing root-level deployment
-    # has been built (matches the image name in SellerMarket/docker-compose.yml).
-    # Switch this to a registry tag (e.g. ghcr.io/<org>/<repo>:<tag>) once you
-    # publish a slim scheduler-only image.
-    "agent_image_tag": "sellermarket-trading-bot:latest",
+    # Published trading-bot image — same one the existing root-level
+    # deployment uses. See https://github.com/PeSahm/Seller-Market/pkgs/container/seller-market
+    "agent_image_tag": "ghcr.io/pesahm/seller-market:latest",
 }
 
 

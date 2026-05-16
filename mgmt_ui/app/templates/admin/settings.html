@@ -31,25 +31,17 @@
     <label class="label" for="agent_image_tag">Agent stack image tag</label>
     <input class="input" id="agent_image_tag" name="agent_image_tag"
            value="{{ settings_values.agent_image_tag }}"
-           placeholder="sellermarket-trading-bot:latest"
+           placeholder="ghcr.io/pesahm/seller-market:latest"
            maxlength="255" required>
     <p class="text-small text-muted">
       Docker image used in every per-agent <code>docker-compose.yml</code>.
-      Two options:
+      Default points at the published GHCR package
+      (<a href="https://github.com/PeSahm/Seller-Market/pkgs/container/seller-market"
+          target="_blank" rel="noopener">seller-market</a>) — every trading
+      server will <code>docker pull</code> on first provision. Pin to a specific
+      tag (e.g. <code>:1.2.3</code>) in production so a mistaken <code>:latest</code>
+      push doesn't silently roll out.
     </p>
-    <ul class="text-small text-muted" style="margin: 0 0 0 1.2em;">
-      <li>
-        <strong>Locally-built</strong> (default <code>sellermarket-trading-bot:latest</code>) —
-        each trading server must have run <code>docker compose build</code> once in
-        <code>/root/seller-market/</code>. Works out-of-the-box on servers that
-        already host the existing deployment.
-      </li>
-      <li>
-        <strong>Registry tag</strong> (e.g. <code>ghcr.io/&lt;org&gt;/seller-market:1.2.3</code>) —
-        cleaner for multi-server fleets; needs a release workflow that publishes
-        the image once and lets every server <code>docker pull</code>.
-      </li>
-    </ul>
   </div>
 
   <div class="form-actions">
