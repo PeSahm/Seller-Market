@@ -70,8 +70,18 @@ async def _check_one(server_id: UUID) -> None:
 
 
 async def _tick_once() -> None:
-    """One round: list non-deleted servers, dispatch a task per server, await all."""
+    """One round: list non-deleted servers, dispatch a task per server, await all.
+
+    The ``Server`` model has no ``deleted_at`` column yet (Phase 2 hard-deletes
+    instead). When Phase 9 adds the column, the line below switches to::
+
+        select(Server.id).where(Server.deleted_at.is_(None))
+
+    For now the unfiltered select is correct because deleted rows physically
+    don't exist.
+    """
     async with AsyncSessionLocal() as db:
+        # TODO(phase-9): add .where(Server.deleted_at.is_(None)) once soft-delete lands.
         rows = await db.execute(select(Server.id))
         ids = [r[0] for r in rows.all()]
     if not ids:
