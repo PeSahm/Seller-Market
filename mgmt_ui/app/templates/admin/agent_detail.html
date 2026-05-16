@@ -1,0 +1,50 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}{{ agent.username }}{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1" dir="auto">{{ agent.username }}</h1>
+    <p class="text-muted text-small">agent · created {{ agent.created_at.strftime('%Y-%m-%d') }}</p>
+  </div>
+  <div class="header-actions">
+    <form method="post" action="/admin/agents/{{ agent.id }}/delete"
+          onsubmit="return confirm('Soft-delete this agent? Their customers and stacks stay until Phase 4 cleanup.');">
+      <button class="btn btn--danger btn--sm" type="submit">Delete</button>
+    </form>
+  </div>
+</div>
+
+<section class="card">
+  <h2 class="h2">Identity</h2>
+  <dl class="kv">
+    <dt>Username</dt>
+    <dd dir="auto"><code>{{ agent.username }}</code></dd>
+    <dt>Telegram ID</dt>
+    <dd>
+      {% if agent.telegram_user_id %}<code>{{ agent.telegram_user_id }}</code>
+      {% else %}<span class="text-muted">not set</span>{% endif %}
+    </dd>
+    <dt>Status</dt>
+    <dd>
+      {% if agent.deleted_at %}<span class="badge badge--down">deleted</span>
+      {% else %}<span class="badge badge--up">active</span>{% endif %}
+    </dd>
+  </dl>
+</section>
+
+<section class="card" style="margin-top: 16px;">
+  <h2 class="h2">Customers</h2>
+  <p class="text-muted text-small">
+    Coming in Phase 4 — customer CRUD with auto-generated config.ini section names.
+  </p>
+</section>
+
+<section class="card" style="margin-top: 16px;">
+  <h2 class="h2">Stacks</h2>
+  <p class="text-muted text-small">
+    A stack is an on-server deployment of this agent's bot. See
+    <a href="/admin/stacks">/admin/stacks</a>.
+  </p>
+</section>
+{% endblock %}

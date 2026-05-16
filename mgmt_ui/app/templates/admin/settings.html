@@ -4,6 +4,48 @@
 {% block page_body %}
 <h1 class="h1">Settings</h1>
 <p class="text-muted text-small">
-  Coming in Phase 1.5 (admin-configurable OCR URL etc.) &mdash; see plan.
+  Global configuration for every agent stack on every server. Changes take effect
+  on the next stack <strong>Redeploy</strong>.
 </p>
+
+{% if form_error %}
+<div class="flash flash--error">
+  <strong>✗ Invalid input</strong>
+  <p class="text-small">{{ form_error }}</p>
+</div>
+{% endif %}
+
+<form class="server-form" method="post" action="/admin/settings">
+  <div class="field">
+    <label class="label" for="ocr_service_url">OCR service URL</label>
+    <input class="input" id="ocr_service_url" name="ocr_service_url"
+           value="{{ settings_values.ocr_service_url }}"
+           placeholder="http://5.10.248.55:18080" maxlength="512" required>
+    <p class="text-small text-muted">
+      Shared captcha-decoder for every agent stack. The mgmt UI does not deploy
+      this service &mdash; point at your existing OCR endpoint.
+    </p>
+  </div>
+
+  <div class="field">
+    <label class="label" for="agent_image_tag">Agent stack image tag</label>
+    <input class="input" id="agent_image_tag" name="agent_image_tag"
+           value="{{ settings_values.agent_image_tag }}"
+           placeholder="ghcr.io/pesahm/seller-market:latest"
+           maxlength="255" required>
+    <p class="text-small text-muted">
+      Docker image used in every per-agent <code>docker-compose.yml</code>.
+      Default points at the published GHCR package
+      (<a href="https://github.com/PeSahm/Seller-Market/pkgs/container/seller-market"
+          target="_blank" rel="noopener">seller-market</a>) — every trading
+      server will <code>docker pull</code> on first provision. Pin to a specific
+      tag (e.g. <code>:1.2.3</code>) in production so a mistaken <code>:latest</code>
+      push doesn't silently roll out.
+    </p>
+  </div>
+
+  <div class="form-actions">
+    <button class="btn btn--primary" type="submit">Save</button>
+  </div>
+</form>
 {% endblock %}

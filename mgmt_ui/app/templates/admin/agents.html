@@ -2,6 +2,42 @@
 {% block page_title %}Agents{% endblock %}
 
 {% block page_body %}
-<h1 class="h1">Agents</h1>
-<p class="text-muted text-small">Coming in Phase 4 &mdash; see plan.</p>
+<div class="page-header">
+  <h1 class="h1">Agents</h1>
+  <a class="btn btn--primary" href="/admin/agents/new">+ Add agent</a>
+</div>
+<p class="text-muted text-small">
+  Agents declare and run trades for their own customers. Full agent-side workflow
+  (customer ownership, stack assignment, runs, history) lands in Phase 4.
+</p>
+
+{% if not agents %}
+<div class="card">
+  <p class="text-muted">No agents yet.</p>
+</div>
+{% else %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>Username</th>
+      <th>Telegram ID</th>
+      <th>Created</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for a in agents %}
+    <tr>
+      <td><a href="/admin/agents/{{ a.id }}" dir="auto">{{ a.username }}</a></td>
+      <td class="text-small">
+        {% if a.telegram_user_id %}<code>{{ a.telegram_user_id }}</code>
+        {% else %}<span class="text-muted">—</span>{% endif %}
+      </td>
+      <td class="text-small text-muted">{{ a.created_at.strftime('%Y-%m-%d') }}</td>
+      <td><a class="btn btn--ghost btn--sm" href="/admin/agents/{{ a.id }}">view →</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 {% endblock %}

@@ -58,12 +58,43 @@
     <p class="text-muted text-small">Coming in Phase 4 — agent accounts, customer assignment, distribution policies.</p>
   </article>
 
-  {# Stacks — Phase 3 #}
+  {# Stacks — live data from Phase 3 #}
   <article class="card">
     <div class="card-header">
       <h2 class="h3">Stacks</h2>
+      <a class="btn btn--ghost btn--sm" href="/admin/stacks">view all →</a>
     </div>
-    <p class="text-muted text-small">Coming in Phase 3 — per-agent Docker stacks deployed to each server.</p>
+    {% if stack_summary.total == 0 %}
+      <p class="text-muted text-small">No stacks yet.</p>
+      <p class="text-small"><a href="/admin/stacks/new">+ Provision your first stack</a></p>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-value">{{ stack_summary.total }}</div>
+          <div class="metric-label text-muted text-small">total</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--up">{{ stack_summary.up }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">up</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--down">{{ stack_summary.down }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">down</div>
+        </div>
+        {% if stack_summary.provisioning %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--pending">{{ stack_summary.provisioning }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">provisioning</div>
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
   </article>
 
   {# Pending customers — Phase 4 #}

@@ -43,6 +43,9 @@ class Settings(BaseSettings):
 
     # Background workers
     enable_health_worker: bool = Field(default=True, alias="ENABLE_HEALTH_WORKER")
+    enable_stack_health_worker: bool = Field(
+        default=True, alias="ENABLE_STACK_HEALTH_WORKER"
+    )
 
 
 @lru_cache(maxsize=1)

@@ -61,6 +61,39 @@ async def acquire_advisory_lock(
     return acquired
 
 
+async def try_acquire_session_lock(session: AsyncSession, key: int) -> bool:
+    """Try to acquire a *session-scoped* PostgreSQL advisory lock.
+
+    Unlike :func:`acquire_advisory_lock` (which by default uses the
+    transaction-scoped variant and is released on ``COMMIT`` / ``ROLLBACK``),
+    a session-scoped lock survives commits and stays held until either the
+    connection closes or :func:`release_session_lock` is called.
+
+    This is what callers want when they need to hold a lock across multiple
+    transactions on the *same* asyncpg connection (e.g. mark a row as
+    ``in-progress`` and commit, then do remote SSH work, then commit a final
+    status update — all under one continuous lock).
+
+    Returns True if the lock was acquired, False otherwise.
+    """
+    stmt = text("SELECT pg_try_advisory_lock(:key)")
+    result = await session.execute(stmt, {"key": key})
+    return bool(result.scalar())
+
+
+async def release_session_lock(session: AsyncSession, key: int) -> None:
+    """Release a session-scoped advisory lock previously acquired on ``session``.
+
+    Pairs with :func:`try_acquire_session_lock`. Must be called on the same
+    session (= same underlying connection) that acquired the lock — otherwise
+    Postgres returns ``false`` (a no-op release) and the lock leaks until the
+    holding connection closes.
+    """
+    await session.execute(
+        text("SELECT pg_advisory_unlock(:key)"), {"key": key}
+    )
+
+
 def hash_lock_key(*parts: str | int) -> int:
     """Produce a stable signed 64-bit integer suitable for pg advisory locks.
 
