@@ -11,6 +11,7 @@ deal with form parsing, validation, and template selection.
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 from uuid import UUID
 
@@ -33,6 +34,8 @@ from app.services import servers as services_servers
 from app.services import settings_store
 from app.services import stacks as services_stacks
 from app.services.ssh.exceptions import SSHError
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin-ui"], include_in_schema=False)
 
@@ -480,7 +483,9 @@ async def admin_stack_create(
     if server is None:
         raise HTTPException(status_code=404, detail="server not found")
     agent = await services_agents.get_agent(db, agent_id)
-    if agent is None or agent.role != "agent":
+    if agent is None or agent.role != "agent" or agent.deleted_at is not None:
+        # Treat soft-deleted as "not found" to keep the surface uniform and
+        # prevent enumeration of deleted records.
         raise HTTPException(status_code=404, detail="agent not found")
 
     stack = await services_stacks.find_or_create_stack(
@@ -524,10 +529,11 @@ async def admin_stack_detail(
     files: dict[str, str] = {}
     try:
         files = await services_stacks.stack_files_preview(db, stack_id)
-    except Exception:
-        # Best-effort: SSH might fail (server down, not yet provisioned, etc.).
-        # The page should still render so the admin can take action.
-        files = {}
+    except SSHError as exc:
+        # Server unreachable, key rejected, file missing, etc. — expected when
+        # the stack hasn't been provisioned yet or the server is offline.
+        # Log + degrade so the admin can still see the page and take action.
+        logger.info("stack_files_preview failed for stack=%s: %s", stack_id, exc)
 
     ctx = _ctx(request, user, current_tab="/admin/stacks")
     ctx["stack"] = stack
