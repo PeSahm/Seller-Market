@@ -10,11 +10,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 from dataclasses import dataclass
 from typing import Optional
 
+import paramiko
+
 from app.models.servers import Server
-from app.services.ssh.exceptions import RemoteCommandError
+from app.services.ssh.exceptions import (
+    AuthenticationError,
+    RemoteCommandError,
+    SSHConnectionError,
+)
 from app.services.ssh.pool import ssh_pool
 
 logger = logging.getLogger(__name__)
@@ -67,27 +74,40 @@ async def run_command(
     async with ssh_pool.session(server) as client:
 
         def _exec() -> RemoteResult:
-            stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
             try:
-                if stdin_data is not None:
-                    stdin.write(stdin_data)
-                    stdin.flush()
-                # Always half-close stdin so the remote command sees EOF.
+                stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
                 try:
-                    stdin.channel.shutdown_write()
-                except Exception:  # noqa: BLE001
-                    pass
-                # recv_exit_status blocks until the remote side closes the
-                # channel, which is what we want for short commands.
-                exit_code = stdout.channel.recv_exit_status()
-                out = stdout.read().decode("utf-8", errors="replace")
-                err = stderr.read().decode("utf-8", errors="replace")
-            finally:
-                try:
-                    stdin.close()
-                except Exception:  # noqa: BLE001
-                    pass
-            return RemoteResult(exit_code=exit_code, stdout=out, stderr=err)
+                    if stdin_data is not None:
+                        stdin.write(stdin_data)
+                        stdin.flush()
+                    # Always half-close stdin so the remote command sees EOF.
+                    try:
+                        stdin.channel.shutdown_write()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    # Drain stdout/stderr BEFORE recv_exit_status to avoid a
+                    # deadlock when the remote command's output exceeds the
+                    # paramiko channel window (~2 MiB). Both reads block until
+                    # EOF, which the remote side signals at process exit.
+                    out = stdout.read().decode("utf-8", errors="replace")
+                    err = stderr.read().decode("utf-8", errors="replace")
+                    exit_code = stdout.channel.recv_exit_status()
+                finally:
+                    try:
+                        stdin.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                return RemoteResult(exit_code=exit_code, stdout=out, stderr=err)
+            except paramiko.AuthenticationException as exc:
+                raise AuthenticationError(str(exc)) from exc
+            except paramiko.SSHException as exc:
+                raise SSHConnectionError(str(exc)) from exc
+            except (socket.timeout, TimeoutError) as exc:
+                raise SSHConnectionError(
+                    f"command timed out: {command!r}"
+                ) from exc
+            except (socket.error, OSError) as exc:
+                raise SSHConnectionError(str(exc)) from exc
 
         result = await asyncio.to_thread(_exec)
 
