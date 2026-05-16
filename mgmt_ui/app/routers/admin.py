@@ -134,7 +134,10 @@ async def admin_server_create(
             raise ValueError(f"unknown ssh_auth: {ssh_auth!r}")
     except (ValidationError, ValueError) as exc:
         ctx = _ctx(request, user, current_tab="/admin/servers")
-        ctx["form_error"] = str(exc)
+        if isinstance(exc, ValidationError):
+            ctx["form_error"] = "Invalid input. Please review the form fields and try again."
+        else:
+            ctx["form_error"] = str(exc)
         # Note: we intentionally drop ``password`` and ``private_key`` from the
         # re-rendered form — secrets MUST NOT round-trip through the HTML.
         ctx["form_values"] = {**common, "ssh_auth": ssh_auth}
@@ -180,7 +183,7 @@ async def admin_server_detail(
 
     ctx = _ctx(request, user, current_tab="/admin/servers")
     ctx["server"] = server
-    ctx["skew_samples"] = skew_samples
+    ctx["clock_skew_samples"] = skew_samples
     return templates.TemplateResponse("admin/server_detail.html", ctx)
 
 
