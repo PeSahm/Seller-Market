@@ -1,0 +1,145 @@
+{#
+  Per-stack scheduler-jobs editor (Phase 5).
+
+  Renders two forms — one for ``cache_warmup``, one for ``run_trading``.
+  Each form posts independently so an operator can save one job without
+  re-validating the other. Missing rows render with ``version=0`` as the
+  "this is a create" sentinel; the upsert service knows what to do.
+
+  Inputs:
+    stack            — AgentStack row
+    jobs_by_name     — dict[str, SchedulerJob] indexed by ``name``; missing
+                       keys render as empty forms
+    form_error       — Optional[str], shown above whichever form was being
+                       saved when the error happened (we don't know which
+                       one from the template alone, so the banner sits
+                       above both forms with the job name in the message)
+    form_values      — Optional sticky dict ({name, time, enabled, version})
+                       returned from a POST that hit a validation /
+                       optimistic-lock error. Overrides the corresponding
+                       row's values for one job only — the other job
+                       re-renders from its persisted row.
+    before_text /
+      after_text /
+      diff_lines /
+      diff_error     — diff-preview machinery shared with the customer
+                       assign page; see admin/partials/config_diff.html
+    save_url_prefix  — URL prefix for the per-job POST. Admin uses
+                       ``/admin/stacks/{id}/scheduler``; agent route passes
+                       ``/agent/stacks/{id}/scheduler``. Template appends
+                       ``/<name>`` for each job.
+    back_url         — Cancel-button target. Admin → stack detail;
+                       agent → /agent/stacks.
+
+  The page is intentionally shared between admin and agent: it never
+  hard-codes the URL prefix. The routes set ``save_url_prefix`` /
+  ``back_url`` to point at the right namespace.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Scheduler &mdash; {{ stack.compose_project }}{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Scheduler jobs</h1>
+    <p class="text-muted text-small">
+      <code>{{ stack.compose_project }}</code>
+    </p>
+  </div>
+  <a class="btn btn--ghost btn--sm" href="{{ back_url }}">&larr; back</a>
+</div>
+
+{% if form_error %}
+<div class="flash flash--error">
+  <strong>&#x2717; Couldn&rsquo;t save</strong>
+  <p class="text-small">{{ form_error }}</p>
+</div>
+{% endif %}
+
+<p class="text-muted text-small">
+  Changes take effect within ~1&nbsp;second of save &mdash; the trading bot
+  re-reads <code>scheduler_config.json</code> every poll. If you change a
+  job&rsquo;s time AND that job has already fired today, the bot will fire
+  it again at the new time (the dedupe key includes the time string).
+</p>
+
+<div class="server-detail-grid">
+  {% for name in ("cache_warmup", "run_trading") %}
+    {% set job = jobs_by_name.get(name) %}
+    {#
+      Sticky-form override: only apply form_values when the POST that failed
+      was editing THIS job (form_values.name == name). Otherwise the row's
+      own persisted values win, so an unrelated POST doesn't reset the
+      other form.
+    #}
+    {% set sticky = form_values if form_values and form_values.get('name') == name else None %}
+    {% set t_value = sticky.time if sticky else (job.time.strftime('%H:%M:%S') if job and job.time else '') %}
+    {% set enabled_value = sticky.enabled if sticky else (job.enabled if job else true) %}
+    {% set version_value = sticky.version if sticky else (job.version if job else 0) %}
+    <section class="card">
+      <h2 class="h2">
+        <code>{{ name }}</code>
+        {% if job %}
+          <span class="badge badge--up">v{{ job.version }}</span>
+        {% else %}
+          <span class="badge badge--pending">not set</span>
+        {% endif %}
+      </h2>
+      <p class="text-small text-muted">
+        {% if name == 'cache_warmup' %}
+          Pre-warms the broker session cache before market open.
+        {% else %}
+          Kicks off the locust run that places the day&rsquo;s orders.
+        {% endif %}
+      </p>
+
+      <form method="post" action="{{ save_url_prefix }}/{{ name }}">
+        <div class="field">
+          <label class="label" for="time__{{ name }}">Fire time (HH:MM:SS)</label>
+          <input class="input" id="time__{{ name }}" name="time"
+                 type="text" pattern="^([01]?\d|2[0-3]):[0-5]\d:[0-5]\d$"
+                 placeholder="08:30:00"
+                 value="{{ t_value }}"
+                 maxlength="8" required>
+          <p class="text-small text-muted">
+            24-hour, zero-padded. Seconds are required.
+          </p>
+        </div>
+
+        <div class="field">
+          <label class="label">
+            <input type="checkbox" name="enabled"
+                   {% if enabled_value %}checked{% endif %}>
+            Enabled
+          </label>
+          <p class="text-small text-muted">
+            Disabled jobs stay in the DB but the bot skips them.
+          </p>
+        </div>
+
+        <input type="hidden" name="version" value="{{ version_value }}">
+
+        <div class="flash flash--info text-small" style="margin-bottom: 12px;">
+          &#9432; If you change this time AND <code>{{ name }}</code> has
+          already fired today, the bot will fire it again at the new time
+          (the dedupe key includes <code>HH:MM:SS</code>).
+        </div>
+
+        <div class="form-actions">
+          <button class="btn btn--primary btn--sm" type="submit">
+            Save {{ name }}
+          </button>
+        </div>
+      </form>
+    </section>
+  {% endfor %}
+</div>
+
+<section class="card" style="margin-top: 16px;">
+  <h2 class="h2">scheduler_config.json diff preview</h2>
+  {% if diff_error %}
+    <p class="text-small text-muted">{{ diff_error }}</p>
+  {% endif %}
+  {% include "admin/partials/config_diff.html" %}
+</section>
+{% endblock %}

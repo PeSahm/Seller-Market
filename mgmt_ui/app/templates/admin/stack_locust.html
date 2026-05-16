@@ -1,0 +1,123 @@
+{#
+  Per-stack locust-config editor (Phase 5).
+
+  Inputs:
+    stack            — AgentStack row
+    locust           — LocustConfig row or None
+    processes_cap    — int, the global admin-set cap from settings
+    form_error       — Optional[str]
+    form_values      — Optional sticky dict on validation / 409
+    before_text /
+      after_text /
+      diff_lines /
+      diff_error     — diff-preview machinery, same partial as the scheduler/customer pages
+    save_url         — POST target. Admin: /admin/stacks/{id}/locust. Agent: /agent/stacks/{id}/locust.
+    back_url         — Cancel-button target.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Locust &mdash; {{ stack.compose_project }}{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Locust config</h1>
+    <p class="text-muted text-small"><code>{{ stack.compose_project }}</code></p>
+  </div>
+  <a class="btn btn--ghost btn--sm" href="{{ back_url }}">&larr; back</a>
+</div>
+
+{% if form_error %}
+<div class="flash flash--error">
+  <strong>&#x2717; Couldn&rsquo;t save</strong>
+  <p class="text-small">{{ form_error }}</p>
+</div>
+{% endif %}
+
+<p class="text-muted text-small">
+  Controls the load-test parameters the trading bot uses for its
+  <code>run_trading</code> job. Saved values take effect on the
+  <strong>next</strong> scheduled run &mdash; locust reads
+  <code>locust_config.json</code> at process start, not continuously.
+</p>
+
+{% set fv = form_values|default({}) %}
+{% set users_value = fv.users if fv.users is defined else (locust.users if locust else 10) %}
+{% set spawn_rate_value = fv.spawn_rate if fv.spawn_rate is defined else (locust.spawn_rate if locust else 10) %}
+{% set run_time_value = fv.run_time if fv.run_time is defined else (locust.run_time if locust else '120s') %}
+{% set host_value = fv.host if fv.host is defined else (locust.host if locust else 'https://abc.com') %}
+{% set processes_value = fv.processes if fv.processes is defined else (locust.processes if locust else 1) %}
+{% set version_value = fv.version if fv.version is defined else (locust.version if locust else 0) %}
+
+<form class="server-form" method="post" action="{{ save_url }}">
+  <div class="field-row">
+    <div class="field field--grow">
+      <label class="label" for="users">Concurrent users</label>
+      <input class="input" id="users" name="users" type="number"
+             min="1" max="10000" required
+             value="{{ users_value }}">
+      <p class="text-small text-muted">
+        How many simulated users locust spawns. Each user maps to one trading
+        account from <code>config.ini</code>.
+      </p>
+    </div>
+    <div class="field field--grow">
+      <label class="label" for="spawn_rate">Spawn rate</label>
+      <input class="input" id="spawn_rate" name="spawn_rate" type="number"
+             min="1" max="1000" required
+             value="{{ spawn_rate_value }}">
+      <p class="text-small text-muted">Users started per second.</p>
+    </div>
+  </div>
+
+  <div class="field-row">
+    <div class="field field--grow">
+      <label class="label" for="run_time">Run time</label>
+      <input class="input" id="run_time" name="run_time" required
+             value="{{ run_time_value }}"
+             placeholder="120s"
+             pattern="^\d+[smh]$" maxlength="16">
+      <p class="text-small text-muted">
+        Format: <code>&lt;int&gt;&lt;s|m|h&gt;</code>. Must be under
+        <strong>600&nbsp;s</strong> &mdash; the scheduler kills any subprocess
+        that exceeds that timeout.
+      </p>
+    </div>
+    <div class="field field--grow">
+      <label class="label" for="processes">Processes</label>
+      <input class="input" id="processes" name="processes" type="number"
+             min="1" max="{{ processes_cap }}" required
+             value="{{ processes_value }}">
+      <p class="text-small text-muted">
+        Locust worker processes. Cap: <strong>{{ processes_cap }}</strong>
+        (admin-set in Settings).
+      </p>
+    </div>
+  </div>
+
+  <div class="field">
+    <label class="label" for="host">Host</label>
+    <input class="input" id="host" name="host" required
+           value="{{ host_value }}"
+           placeholder="https://abc.com" maxlength="512">
+    <p class="text-small text-muted">
+      Base URL the load is directed at. Must start with
+      <code>http://</code> or <code>https://</code>.
+    </p>
+  </div>
+
+  <input type="hidden" name="version" value="{{ version_value }}">
+
+  <div class="form-actions">
+    <a class="btn btn--ghost" href="{{ back_url }}">Cancel</a>
+    <button class="btn btn--primary" type="submit">Save</button>
+  </div>
+</form>
+
+<section class="card" style="margin-top: 16px;">
+  <h2 class="h2">locust_config.json diff preview</h2>
+  {% if diff_error %}
+    <p class="text-small text-muted">{{ diff_error }}</p>
+  {% endif %}
+  {% include "admin/partials/config_diff.html" %}
+</section>
+{% endblock %}

@@ -14,6 +14,8 @@
     </p>
   </div>
   <div class="header-actions">
+    <a class="btn btn--ghost btn--sm" href="/admin/stacks/{{ stack.id }}/scheduler">Scheduler&hellip;</a>
+    <a class="btn btn--ghost btn--sm" href="/admin/stacks/{{ stack.id }}/locust">Locust&hellip;</a>
     <button class="btn btn--primary btn--sm"
             hx-post="/admin/stacks/{{ stack.id }}/redeploy"
             hx-target="#stack-action-result"

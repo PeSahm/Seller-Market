@@ -18,6 +18,7 @@ keeps every other field except the password; the user has to retype it.
 """
 from __future__ import annotations
 
+import difflib
 import logging
 from typing import Optional
 from uuid import UUID
@@ -25,10 +26,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import Response
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.models.customers import Customer
+from app.models.stacks import AgentStack
 from app.models.users import User
 from app.routers.dashboard import _ctx, templates
 from app.schemas.customer import (
@@ -37,10 +40,19 @@ from app.schemas.customer import (
     CustomerDuplicate,
     CustomerUpdate,
 )
+from app.schemas.locust import LocustUpsert
+from app.schemas.scheduler import SchedulerJobUpsert
 from app.security.deps import get_current_user
 from app.services import customers as services_customers
+from app.services import locust_configs as services_locust
+from app.services import scheduler_jobs as services_scheduler
 from app.services import servers as services_servers
+from app.services import settings_store
+from app.services import stacks as services_stacks
 from app.services.customers import OptimisticLockError
+from app.services.locust_configs import OptimisticLockError as LocustLockError
+from app.services.scheduler_jobs import OptimisticLockError as SchedulerLockError
+from app.services.ssh.exceptions import SSHError
 
 logger = logging.getLogger(__name__)
 
@@ -114,9 +126,28 @@ async def agent_dashboard(
 async def agent_stacks(
     request: Request,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
+    """List the current agent's stacks (one per server they've been deployed on).
+
+    Mirrors the admin stacks list but filters by ``agent_id`` for agents and
+    shows the whole fleet to admins acting-as-agent. Each row exposes the
+    Phase-5 editors ("Edit schedule" / "Edit locust") so the agent doesn't
+    have to round-trip through admin to tune their own bot.
+    """
     _require_agent_or_admin(user)
-    return _render(request, user, "agent/stacks.html", "/agent/stacks")
+    all_stacks = await services_stacks.list_stacks(db)
+    if user.role == "agent":
+        stacks = [s for s in all_stacks if s.agent_id == user.id]
+    else:
+        stacks = all_stacks
+    servers_by_id = {
+        s.id: s for s in await services_servers.list_servers(db)
+    }
+    ctx = _ctx(request, user, current_tab="/agent/stacks")
+    ctx["stacks"] = stacks
+    ctx["servers_by_id"] = servers_by_id
+    return templates.TemplateResponse("agent/stacks.html", ctx)
 
 
 @router.get("/history")
@@ -592,3 +623,404 @@ async def agent_customer_duplicate(
         status_code=status.HTTP_303_SEE_OTHER,
         headers={"Location": redirect_to},
     )
+
+
+# ---------------------------------------------------------------------------
+# Stacks scheduler + locust (Phase 5)
+# ---------------------------------------------------------------------------
+#
+# Per-stack scheduler / locust editors scoped to the *current* agent. The
+# admin equivalents live in :mod:`app.routers.admin`; we mirror the routes
+# here so an agent can self-serve without an admin acting as them.
+#
+# Tenant guard: every route loads the stack first, then refuses (404) unless
+# ``stack.agent_id == user.id`` (or the caller is an admin). We deliberately
+# surface 404 rather than 403 so an agent guessing UUIDs can't enumerate the
+# stacks of other tenants.
+#
+# Templates are SHARED with the admin pages (``admin/stack_scheduler.html``
+# and ``admin/stack_locust.html``) — they don't hard-code their own URL
+# prefix, the router passes ``save_url`` / ``save_url_prefix`` /
+# ``back_url`` so the same template renders correctly under either prefix.
+
+
+def _flash_redirect(request: Request, location: str) -> Response:
+    """303 / HX-Redirect helper for the agent-side Phase-5 routes.
+
+    Same shape as the admin module's helper (kept local so we don't reach
+    across modules just for a 6-line redirect builder).
+    """
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": location})
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER,
+        headers={"Location": location},
+    )
+
+
+def _compute_json_diff(before_text: str, after_text: str) -> list[str]:
+    """Unified-diff helper for the scheduler / locust preview blocks.
+
+    Local copy of the admin module's ``_compute_config_diff`` (without the
+    ``config.ini`` password-redaction pass, which neither file needs). We
+    keep a tiny local helper instead of cross-importing to avoid coupling
+    the two router modules.
+    """
+    if before_text == after_text:
+        return []
+    return list(
+        difflib.unified_diff(
+            before_text.splitlines(keepends=False),
+            after_text.splitlines(keepends=False),
+            fromfile="current (remote)",
+            tofile="proposed",
+            lineterm="",
+        )
+    )
+
+
+async def _load_stack_for_agent(
+    db: AsyncSession, user: User, stack_id: UUID
+):
+    """Resolve a stack id and enforce the per-agent tenant guard.
+
+    Returns the stack on success. Raises an ``HTTPException(404)`` on either
+    "no such stack" OR "not your stack" — we never let an agent learn that
+    *someone else's* stack id is valid.
+    """
+    stack = await services_stacks.get_stack(db, stack_id)
+    if stack is None:
+        raise HTTPException(status_code=404, detail="stack not found")
+    if user.role != "admin" and stack.agent_id != user.id:
+        raise HTTPException(status_code=404, detail="stack not found")
+    return stack
+
+
+@router.get("/stacks/{stack_id}/scheduler")
+async def agent_stack_scheduler(
+    stack_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Render the scheduler editor for one of the current agent's stacks.
+
+    Tenant-guarded — see :func:`_load_stack_for_agent`. Template, context
+    shape, and diff-preview behaviour are identical to the admin route; the
+    only delta is the URL prefix (``/agent`` vs ``/admin``) passed in
+    ``save_url_prefix`` so the template knows where the form posts.
+    """
+    _require_agent_or_admin(user)
+    stack = await _load_stack_for_agent(db, user, stack_id)
+
+    jobs = await services_scheduler.list_jobs(db, stack_id=stack_id)
+    jobs_by_name = {j.name: j for j in jobs}
+
+    before_text = ""
+    after_text = ""
+    diff_lines: list[str] = []
+    diff_error: Optional[str] = None
+    try:
+        before_text, after_text = (
+            await services_stacks.render_scheduler_config_for_stack_preview(
+                db, stack_id
+            )
+        )
+        diff_lines = _compute_json_diff(before_text, after_text)
+    except SSHError as exc:
+        diff_error = (
+            "Could not fetch the current remote file for preview: "
+            f"{exc}"
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    ctx = _ctx(request, user, current_tab="/agent/stacks")
+    ctx["stack"] = stack
+    ctx["jobs_by_name"] = jobs_by_name
+    ctx["form_error"] = None
+    ctx["form_values"] = {}
+    ctx["before_text"] = before_text
+    ctx["after_text"] = after_text
+    ctx["diff_lines"] = diff_lines
+    ctx["diff_error"] = diff_error
+    ctx["save_url_prefix"] = f"/agent/stacks/{stack_id}/scheduler"
+    ctx["back_url"] = "/agent/stacks"
+    return templates.TemplateResponse("admin/stack_scheduler.html", ctx)
+
+
+@router.post("/stacks/{stack_id}/scheduler/{name}")
+async def agent_stack_scheduler_save(
+    stack_id: UUID,
+    name: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    time: str = Form(...),
+    enabled: Optional[str] = Form(None),
+    version: int = Form(...),
+):
+    """Upsert one of the two scheduler jobs (tenant-guarded).
+
+    Same form semantics as the admin route: ``enabled`` is a checkbox
+    ("on" or absent), ``version=0`` is the create sentinel. SSH push
+    failure is best-effort.
+    """
+    _require_agent_or_admin(user)
+    stack = await _load_stack_for_agent(db, user, stack_id)
+    if name not in ("cache_warmup", "run_trading"):
+        raise HTTPException(status_code=400, detail="unknown job name")
+
+    enabled_bool = enabled == "on"
+
+    async def _rerender(message: str, code: int):
+        # Re-read both jobs so the un-edited form re-syncs to its current
+        # row (with the fresh version). The edited form gets the sticky
+        # values from the request payload.
+        jobs = await services_scheduler.list_jobs(db, stack_id=stack_id)
+        jobs_by_name = {j.name: j for j in jobs}
+        before_text = ""
+        after_text = ""
+        diff_lines: list[str] = []
+        diff_error: Optional[str] = None
+        try:
+            before_text, after_text = (
+                await services_stacks.render_scheduler_config_for_stack_preview(
+                    db, stack_id
+                )
+            )
+            diff_lines = _compute_json_diff(before_text, after_text)
+        except SSHError as exc:
+            diff_error = (
+                "Could not fetch the current remote file for preview: "
+                f"{exc}"
+            )
+        ctx = _ctx(request, user, current_tab="/agent/stacks")
+        ctx["stack"] = stack
+        ctx["jobs_by_name"] = jobs_by_name
+        ctx["form_error"] = message
+        ctx["form_values"] = {
+            "name": name,
+            "time": time,
+            "enabled": enabled_bool,
+            "version": version,
+        }
+        ctx["before_text"] = before_text
+        ctx["after_text"] = after_text
+        ctx["diff_lines"] = diff_lines
+        ctx["diff_error"] = diff_error
+        ctx["save_url_prefix"] = f"/agent/stacks/{stack_id}/scheduler"
+        ctx["back_url"] = "/agent/stacks"
+        return templates.TemplateResponse(
+            "admin/stack_scheduler.html", ctx, status_code=code,
+        )
+
+    try:
+        payload = SchedulerJobUpsert(
+            time=time, enabled=enabled_bool, version=version,
+        )
+    except (ValidationError, ValueError) as exc:
+        message = (
+            "Invalid input. Please review the form fields and try again."
+            if isinstance(exc, ValidationError)
+            else str(exc)
+        )
+        return await _rerender(message, status.HTTP_400_BAD_REQUEST)
+
+    try:
+        await services_scheduler.upsert_job(
+            db, stack_id, name, payload, actor_id=user.id
+        )
+    except SchedulerLockError:
+        return await _rerender(
+            "This job was changed by someone else while you were editing. "
+            "Reload the page and re-apply your changes.",
+            status.HTTP_409_CONFLICT,
+        )
+    except ValueError as exc:
+        return await _rerender(str(exc), status.HTTP_400_BAD_REQUEST)
+
+    try:
+        await services_stacks.push_scheduler_config_for_stack(
+            db, stack_id, actor_id=user.id
+        )
+    except SSHError as exc:
+        logger.warning(
+            "agent_stack_scheduler_save: push failed stack=%s: %s",
+            stack_id, exc,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return _flash_redirect(request, f"/agent/stacks/{stack_id}/scheduler")
+
+
+@router.get("/stacks/{stack_id}/locust")
+async def agent_stack_locust(
+    stack_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Render the locust-config editor for one of the current agent's stacks."""
+    _require_agent_or_admin(user)
+    stack = await _load_stack_for_agent(db, user, stack_id)
+
+    locust = await services_locust.get_locust_config(db, stack_id)
+    processes_cap = int(
+        await settings_store.get_setting(db, "agent_locust_processes_cap")
+    )
+
+    before_text = ""
+    after_text = ""
+    diff_lines: list[str] = []
+    diff_error: Optional[str] = None
+    try:
+        before_text, after_text = (
+            await services_stacks.render_locust_config_for_stack_preview(
+                db, stack_id
+            )
+        )
+        diff_lines = _compute_json_diff(before_text, after_text)
+    except SSHError as exc:
+        diff_error = (
+            "Could not fetch the current remote file for preview: "
+            f"{exc}"
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    ctx = _ctx(request, user, current_tab="/agent/stacks")
+    ctx["stack"] = stack
+    ctx["locust"] = locust
+    ctx["processes_cap"] = processes_cap
+    ctx["form_error"] = None
+    ctx["form_values"] = {}
+    ctx["before_text"] = before_text
+    ctx["after_text"] = after_text
+    ctx["diff_lines"] = diff_lines
+    ctx["diff_error"] = diff_error
+    ctx["save_url"] = f"/agent/stacks/{stack_id}/locust"
+    ctx["back_url"] = "/agent/stacks"
+    return templates.TemplateResponse("admin/stack_locust.html", ctx)
+
+
+@router.post("/stacks/{stack_id}/locust")
+async def agent_stack_locust_save(
+    stack_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    users: int = Form(...),
+    spawn_rate: int = Form(...),
+    run_time: str = Form(...),
+    host: str = Form(...),
+    processes: int = Form(...),
+    version: int = Form(...),
+):
+    """Upsert the locust config row for the current agent's stack."""
+    _require_agent_or_admin(user)
+    stack = await _load_stack_for_agent(db, user, stack_id)
+
+    sticky = {
+        "users": users,
+        "spawn_rate": spawn_rate,
+        "run_time": run_time,
+        "host": host,
+        "processes": processes,
+        "version": version,
+    }
+
+    async def _rerender(message: str, code: int):
+        locust = await services_locust.get_locust_config(db, stack_id)
+        processes_cap = int(
+            await settings_store.get_setting(
+                db, "agent_locust_processes_cap"
+            )
+        )
+        before_text = ""
+        after_text = ""
+        diff_lines: list[str] = []
+        diff_error: Optional[str] = None
+        try:
+            before_text, after_text = (
+                await services_stacks.render_locust_config_for_stack_preview(
+                    db, stack_id
+                )
+            )
+            diff_lines = _compute_json_diff(before_text, after_text)
+        except SSHError as exc:
+            diff_error = (
+                "Could not fetch the current remote file for preview: "
+                f"{exc}"
+            )
+        ctx = _ctx(request, user, current_tab="/agent/stacks")
+        ctx["stack"] = stack
+        ctx["locust"] = locust
+        ctx["processes_cap"] = processes_cap
+        ctx["form_error"] = message
+        ctx["form_values"] = sticky
+        ctx["before_text"] = before_text
+        ctx["after_text"] = after_text
+        ctx["diff_lines"] = diff_lines
+        ctx["diff_error"] = diff_error
+        ctx["save_url"] = f"/agent/stacks/{stack_id}/locust"
+        ctx["back_url"] = "/agent/stacks"
+        return templates.TemplateResponse(
+            "admin/stack_locust.html", ctx, status_code=code,
+        )
+
+    try:
+        payload = LocustUpsert(
+            users=users,
+            spawn_rate=spawn_rate,
+            run_time=run_time,
+            host=host,
+            processes=processes,
+            version=version,
+        )
+    except (ValidationError, ValueError) as exc:
+        message = (
+            "Invalid input. Please review the form fields and try again."
+            if isinstance(exc, ValidationError)
+            else str(exc)
+        )
+        return await _rerender(message, status.HTTP_400_BAD_REQUEST)
+
+    try:
+        await services_locust.upsert_locust_config(
+            db, stack_id, payload, actor_id=user.id
+        )
+    except LocustLockError:
+        return await _rerender(
+            "This locust config was changed by someone else while you were "
+            "editing. Reload the page and re-apply your changes.",
+            status.HTTP_409_CONFLICT,
+        )
+    except ValueError as exc:
+        return await _rerender(str(exc), status.HTTP_400_BAD_REQUEST)
+
+    try:
+        await services_stacks.push_locust_config_for_stack(
+            db, stack_id, actor_id=user.id
+        )
+    except SSHError as exc:
+        logger.warning(
+            "agent_stack_locust_save: push failed stack=%s: %s",
+            stack_id, exc,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return _flash_redirect(request, f"/agent/stacks/{stack_id}/locust")
+
+
+# Silence unused-import lint for AgentStack + select — referenced indirectly
+# via services_stacks; kept here for forward use by an "agent stack detail"
+# page in a later phase.
+_ = AgentStack
+_ = select
