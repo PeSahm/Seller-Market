@@ -1,0 +1,192 @@
+{#
+  Combined create/edit form for a customer row.
+
+  Mode dispatch:
+    mode == "create"  → POST /admin/customers
+                        agent_id is a <select>, all fields required.
+    mode == "edit"    → POST /admin/customers/<id>/edit
+                        agent_id is read-only display,
+                        every field optional ("leave blank to keep"),
+                        password placeholder explains it stays unchanged,
+                        ``version`` rides a hidden input for the optimistic
+                        lock.
+
+  Sticky-form contract: on a validation error the router re-renders this
+  template with the same ``form_values`` dict so the admin doesn't have to
+  retype everything. The ``password`` field is INTENTIONALLY excluded from
+  ``form_values`` — secrets must NEVER round-trip through the HTML.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}{% if mode == 'edit' %}Edit customer{% else %}Add customer{% endif %}{% endblock %}
+
+{% block page_body %}
+{% set fv = form_values|default({}) %}
+{% set is_edit = (mode == 'edit') %}
+
+<div class="page-header">
+  <div>
+    <h1 class="h1">
+      {% if is_edit %}Edit customer{% else %}Add customer{% endif %}
+    </h1>
+    <p class="text-muted text-small">
+      {% if is_edit %}
+        Changes are versioned. If another admin (or the owning agent) edits
+        this row in parallel, your save will be rejected with a 409 so you
+        can reload and re-apply.
+      {% else %}
+        Pick the owning agent, then enter broker credentials. The
+        <code>section_name</code> is generated automatically; the password is
+        Fernet-encrypted at rest and never echoed back to this form.
+      {% endif %}
+    </p>
+  </div>
+  {% if is_edit and customer %}
+  <a class="btn btn--ghost btn--sm" href="/admin/customers/{{ customer.id }}">← back</a>
+  {% else %}
+  <a class="btn btn--ghost btn--sm" href="/admin/customers">← back</a>
+  {% endif %}
+</div>
+
+{% if form_error %}
+<div class="flash flash--error">
+  <strong>✗ {% if is_edit %}Could not save{% else %}Invalid input{% endif %}</strong>
+  <p class="text-small">{{ form_error }}</p>
+</div>
+{% endif %}
+
+<form class="customer-form" method="post"
+      action="{% if is_edit %}/admin/customers/{{ customer.id }}/edit{% else %}/admin/customers{% endif %}">
+
+  {# --- Agent --- #}
+  <div class="field">
+    <label class="label" for="agent_id">Agent</label>
+    {% if is_edit %}
+      {# Read-only: re-assignment to a different agent is intentionally NOT
+         supported — it would orphan the password ciphertext under the
+         original agent's section_name. Create a fresh customer instead. #}
+      <input class="input" id="agent_id" type="text" readonly dir="auto"
+             value="{{ agent.username if agent else fv.agent_id }}">
+      <p class="text-small text-muted">
+        Agent ownership is fixed for the lifetime of a customer.
+      </p>
+    {% else %}
+      <select class="input" id="agent_id" name="agent_id" required>
+        <option value="" disabled {% if not fv.agent_id %}selected{% endif %}>— pick an agent —</option>
+        {% for a in agents %}
+          <option value="{{ a.id }}" dir="auto"
+                  {% if fv.agent_id and fv.agent_id == (a.id|string) %}selected{% endif %}>
+            {{ a.username }}
+          </option>
+        {% endfor %}
+      </select>
+    {% endif %}
+  </div>
+
+  {# --- Display name --- #}
+  <div class="field">
+    <label class="label" for="display_name">Display name</label>
+    <input class="input" id="display_name" name="display_name" dir="auto"
+           {% if not is_edit %}required{% endif %}
+           value="{{ fv.display_name|default('') }}"
+           placeholder="e.g. Ali — IRO3SAIPA — Buy" maxlength="255">
+  </div>
+
+  {# --- Broker --- #}
+  <div class="field">
+    <label class="label" for="broker">Broker</label>
+    <select class="input" id="broker" name="broker" {% if not is_edit %}required{% endif %}>
+      {% if is_edit %}
+        <option value="">— keep current ({{ fv.broker }}) —</option>
+      {% else %}
+        <option value="" disabled {% if not fv.broker %}selected{% endif %}>— pick a broker —</option>
+      {% endif %}
+      {% for b in ['gs','bbi','shahr','ib','karamad','tejarat','ebb','hbc','rabin','ayandeh'] %}
+        <option value="{{ b }}" {% if fv.broker == b and not is_edit %}selected{% endif %}>{{ b }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  {# --- ISIN + side --- #}
+  <div class="field-row">
+    <div class="field field--grow">
+      <label class="label" for="isin">ISIN</label>
+      <input class="input" id="isin" name="isin"
+             {% if not is_edit %}required{% endif %}
+             value="{{ fv.isin|default('') }}"
+             placeholder="e.g. IRO3SAIPA0001"
+             maxlength="32"
+             onblur="this.value = this.value.trim().toUpperCase();">
+      <p class="text-small text-muted">
+        ASCII alphanumeric only. Auto-uppercased on blur.
+      </p>
+    </div>
+    <div class="field field--narrow">
+      <label class="label">Side</label>
+      <label class="radio-row">
+        <input type="radio" name="side" value="1"
+               {% if fv.side|string == '1' or (not is_edit and not fv.side) %}checked{% endif %}>
+        Buy (1)
+      </label>
+      <label class="radio-row">
+        <input type="radio" name="side" value="2"
+               {% if fv.side|string == '2' %}checked{% endif %}>
+        Sell (2)
+      </label>
+    </div>
+  </div>
+
+  {# --- Broker credentials --- #}
+  <div class="field-row">
+    <div class="field field--grow">
+      <label class="label" for="username">Broker username</label>
+      <input class="input" id="username" name="username"
+             {% if not is_edit %}required{% endif %}
+             value="{{ fv.username|default('') }}"
+             placeholder="username at the brokerage"
+             maxlength="255" autocomplete="off" dir="auto">
+    </div>
+    <div class="field field--grow">
+      <label class="label" for="password">Broker password</label>
+      <input class="input" id="password" name="password" type="password"
+             {% if not is_edit %}required{% endif %}
+             placeholder="{% if is_edit %}Leave empty to keep current{% else %}broker login password{% endif %}"
+             maxlength="512" autocomplete="off">
+      <p class="text-small text-muted">
+        Fernet-encrypted at rest. Not echoed back if validation fails.
+      </p>
+    </div>
+  </div>
+
+  {# --- Comment --- #}
+  <div class="field">
+    <label class="label" for="comment">Comment (optional)</label>
+    <textarea class="input" id="comment" name="comment" rows="2" maxlength="1024" dir="auto">{{ fv.comment|default('') }}</textarea>
+  </div>
+
+  {# --- Enabled toggle (edit only) --- #}
+  {% if is_edit %}
+  <div class="field">
+    <label class="radio-row">
+      <input type="checkbox" name="enabled" {% if fv.enabled %}checked{% endif %}>
+      Enabled
+    </label>
+    <p class="text-small text-muted">
+      Unticking is a soft delete — the row stays for audit but is dropped from
+      the next <code>config.ini</code> render.
+    </p>
+  </div>
+  <input type="hidden" name="version" value="{{ fv.version }}">
+  {% endif %}
+
+  <div class="form-actions">
+    {% if is_edit and customer %}
+      <a class="btn btn--ghost" href="/admin/customers/{{ customer.id }}">Cancel</a>
+    {% else %}
+      <a class="btn btn--ghost" href="/admin/customers">Cancel</a>
+    {% endif %}
+    <button class="btn btn--primary" type="submit">
+      {% if is_edit %}Save changes{% else %}Add customer{% endif %}
+    </button>
+  </div>
+</form>
+{% endblock %}

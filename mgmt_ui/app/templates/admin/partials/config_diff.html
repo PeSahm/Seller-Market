@@ -1,0 +1,37 @@
+{#
+  Unified-diff renderer.
+
+  Inputs:
+    diff_lines  — list[str], output of difflib.unified_diff (already
+                  computed in the router; empty list = "no effective
+                  change"). The first character of each line tells us
+                  which CSS class to apply:
+                    "+"  addition       (config_diff__add)
+                    "-"  deletion       (config_diff__del)
+                    "@"  hunk header    (config_diff__hunk)
+                    " "  context        (no class)
+                    other (e.g. "---", "+++") get the header treatment.
+
+  This partial is intentionally Python-free: the diff computation lives
+  in the route (admin._compute_config_diff) so the template stays pure
+  presentational. Use ``{% include "admin/partials/config_diff.html" %}``
+  from the parent template after setting ``diff_lines`` in the context.
+#}
+{% if diff_lines %}
+<pre class="config-diff text-small" aria-label="config.ini unified diff"><code>{%- for line in diff_lines -%}
+{%- set first = line[:1] -%}
+{%- if first == '+' and line[:3] != '+++' -%}
+<span class="config-diff__add">{{ line }}</span>
+{% elif first == '-' and line[:3] != '---' -%}
+<span class="config-diff__del">{{ line }}</span>
+{% elif first == '@' -%}
+<span class="config-diff__hunk">{{ line }}</span>
+{% elif line[:3] == '---' or line[:3] == '+++' -%}
+<span class="config-diff__header">{{ line }}</span>
+{% else -%}
+{{ line }}
+{% endif -%}
+{%- endfor -%}</code></pre>
+{% else %}
+<p class="text-small text-muted">No effective change to <code>config.ini</code>.</p>
+{% endif %}

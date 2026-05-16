@@ -50,12 +50,45 @@
     {% endif %}
   </article>
 
-  {# Agents — Phase 4 #}
+  {# Customers — live data from Phase 4 #}
   <article class="card">
     <div class="card-header">
-      <h2 class="h3">Agents</h2>
+      <h2 class="h3">Customers</h2>
+      <a class="btn btn--ghost btn--sm" href="/admin/customers">view all →</a>
     </div>
-    <p class="text-muted text-small">Coming in Phase 4 — agent accounts, customer assignment, distribution policies.</p>
+    {% if not customer_summary or customer_summary.total == 0 %}
+      <p class="text-muted text-small">No customers yet.</p>
+      <p class="text-small"><a href="/admin/customers/new">+ Add your first customer</a></p>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-value">{{ customer_summary.total }}</div>
+          <div class="metric-label text-muted text-small">total</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--up">{{ customer_summary.active }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">active</div>
+        </div>
+        {% if customer_summary.assigned %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--pending">{{ customer_summary.assigned }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">assigned</div>
+        </div>
+        {% endif %}
+        {% if customer_summary.pending %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--pending">{{ customer_summary.pending }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">pending</div>
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
   </article>
 
   {# Stacks — live data from Phase 3 #}
@@ -97,12 +130,33 @@
     {% endif %}
   </article>
 
-  {# Pending customers — Phase 4 #}
+  {# Pending customers — live data from Phase 4 #}
   <article class="card">
     <div class="card-header">
       <h2 class="h3">Pending customers</h2>
+      <a class="btn btn--ghost btn--sm" href="/admin/customers/pending">review →</a>
     </div>
-    <p class="text-muted text-small">Coming in Phase 4 — admin inbox for agents' newly-declared customers awaiting server assignment.</p>
+    {% if not pending_summary or pending_summary.total == 0 %}
+      <p class="text-muted text-small">No pending customers — inbox is clear.</p>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--pending">{{ pending_summary.total }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">awaiting assignment</div>
+        </div>
+        {% if pending_summary.by_agent and pending_summary.by_agent|length > 1 %}
+        <div class="metric">
+          <div class="metric-value">{{ pending_summary.by_agent|length }}</div>
+          <div class="metric-label text-muted text-small">agents</div>
+        </div>
+        {% endif %}
+      </div>
+      <p class="text-small">
+        <a href="/admin/customers/pending">Open inbox →</a>
+      </p>
+    {% endif %}
   </article>
 
   {# Health signals — Phase 8 #}
