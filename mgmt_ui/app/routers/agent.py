@@ -147,25 +147,32 @@ async def agent_customers(
     request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    status: Optional[str] = None,
 ):
     """List the current agent's customers. Admin sees all; agents see only theirs.
+
+    ``status`` query param (linked from the dashboard's "N pending" badge)
+    narrows the list to ``pending`` / ``assigned`` / ``active`` rows.
+    Any other / empty value is treated as "no filter".
 
     We pre-load the server lookup dict so the table can render a read-only
     "Server" badge column without lazy-loading per row.
     """
     _require_agent_or_admin(user)
+    status_filter = status if status in {"pending", "assigned", "active"} else None
     if user.role == "admin":
         customers = await services_customers.list_customers(
-            db, include_disabled=False
+            db, status=status_filter, include_disabled=False
         )
     else:
         customers = await services_customers.list_customers(
-            db, agent_id=user.id, include_disabled=False
+            db, agent_id=user.id, status=status_filter, include_disabled=False
         )
     servers_by_id = {s.id: s for s in await services_servers.list_servers(db)}
     ctx = _ctx(request, user, current_tab="/agent/customers")
     ctx["customers"] = customers
     ctx["servers_by_id"] = servers_by_id
+    ctx["filter_status"] = status_filter
     return templates.TemplateResponse("agent/customers.html", ctx)
 
 
