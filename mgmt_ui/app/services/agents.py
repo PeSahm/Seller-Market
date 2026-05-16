@@ -29,6 +29,7 @@ from typing import Optional
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditLog
@@ -181,22 +182,30 @@ async def create_agent(
         deleted_at=None,
     )
     db.add(agent)
-    # Flush so the DB-side default (gen_random_uuid) populates agent.id
-    # before we reference it in the audit row.
-    await db.flush()
+    try:
+        # Flush so the DB-side default (gen_random_uuid) populates agent.id
+        # before we reference it in the audit row.
+        await db.flush()
 
-    # Step 4: audit. _public_snapshot excludes password_hash by construction.
-    await _write_audit(
-        db,
-        actor_id=actor_id,
-        action="agent.create",
-        target_id=agent.id,
-        before=None,
-        after=_public_snapshot(agent),
-    )
+        # Step 4: audit. _public_snapshot excludes password_hash by construction.
+        await _write_audit(
+            db,
+            actor_id=actor_id,
+            action="agent.create",
+            target_id=agent.id,
+            before=None,
+            after=_public_snapshot(agent),
+        )
 
-    # Step 5: commit + refresh.
-    await db.commit()
+        # Step 5: commit + refresh.
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        # The DB-level UNIQUE constraint fired because a concurrent request
+        # beat us between the pre-check and the flush. Convert into the same
+        # ValueError the caller already handles.
+        raise ValueError("username already taken") from exc
+
     await db.refresh(agent)
     return agent
 
