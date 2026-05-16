@@ -66,7 +66,17 @@ def hash_lock_key(*parts: str | int) -> int:
 
     Uses BLAKE2b with an 8-byte digest for cross-version stability
     (unlike Python's built-in hash() which is randomized per process).
+
+    Each part is length-prefixed (4-byte big-endian length followed by its
+    UTF-8 bytes) before being fed into the hash. This prevents collisions
+    between different ``parts`` tuples that would otherwise serialize to the
+    same byte stream (e.g. ``("a|b",)`` vs ``("a", "b")``), so unrelated
+    resources cannot contend on the same advisory-lock key.
     """
-    s = "|".join(map(str, parts))
-    digest = hashlib.blake2b(s.encode("utf-8"), digest_size=8).digest()
+    h = hashlib.blake2b(digest_size=8)
+    for part in parts:
+        b = str(part).encode("utf-8")
+        h.update(len(b).to_bytes(4, "big"))
+        h.update(b)
+    digest = h.digest()
     return int.from_bytes(digest, "big", signed=True)
