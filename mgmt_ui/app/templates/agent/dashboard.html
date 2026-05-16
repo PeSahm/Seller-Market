@@ -5,9 +5,45 @@
 <h1 class="h1">Dashboard</h1>
 
 <div class="card-grid">
+  {# My customers — live data from Phase 4 #}
   <article class="card">
-    <h2 class="h3">My customers</h2>
-    <p class="text-muted text-small">(coming soon)</p>
+    <div class="card-header">
+      <h2 class="h3">My customers</h2>
+      <a class="btn btn--ghost btn--sm" href="/agent/customers">view all →</a>
+    </div>
+    {% if customer_summary.total == 0 %}
+      <p class="text-muted text-small">No customers yet.</p>
+      <p class="text-small"><a href="/agent/customers/new">+ Add your first customer</a></p>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-value">{{ customer_summary.total }}</div>
+          <div class="metric-label text-muted text-small">total</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--up">{{ customer_summary.active }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">active</div>
+        </div>
+        {% if customer_summary.pending %}
+        <div class="metric">
+          <div class="metric-value">
+            <a href="/agent/customers?status=pending">
+              <span class="badge badge--pending">{{ customer_summary.pending }}</span>
+            </a>
+          </div>
+          <div class="metric-label text-muted text-small">pending</div>
+        </div>
+        {% endif %}
+      </div>
+      {% if customer_summary.pending %}
+      <p class="text-small text-muted">
+        {{ customer_summary.pending }} customer{% if customer_summary.pending != 1 %}s{% endif %}
+        awaiting server assignment by your admin.
+      </p>
+      {% endif %}
+    {% endif %}
   </article>
 
   <article class="card">

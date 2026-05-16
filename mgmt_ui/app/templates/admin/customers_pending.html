@@ -1,0 +1,82 @@
+{#
+  Admin inbox: customers awaiting server assignment.
+
+  Inputs:
+    customers     — list[Customer] with assignment_status='pending'
+    agents_by_id  — dict[UUID, User], includes soft-deleted
+    servers       — list[Server] (every server, for the inline assign select)
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Pending customers{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Pending customers</h1>
+    <p class="text-muted text-small">
+      Customers that have been declared by an agent but not yet placed on
+      a server. Pick a target and click <strong>Assign</strong> — the
+      service will render the per-stack <code>config.ini</code> and SFTP it
+      out automatically.
+    </p>
+  </div>
+  <a class="btn btn--ghost btn--sm" href="/admin/customers">← all customers</a>
+</div>
+
+{% if not customers %}
+<div class="card">
+  <p class="text-muted">Inbox is empty — nothing pending.</p>
+  <p class="text-small text-muted">
+    New rows show up here when an agent submits a customer from their
+    dashboard, or when an admin creates one without going through the
+    auto-policy.
+  </p>
+</div>
+{% else %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>Display name</th>
+      <th>Agent</th>
+      <th>Broker</th>
+      <th>ISIN</th>
+      <th>Side</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for c in customers %}
+    {% set _agent = agents_by_id.get(c.agent_id) if agents_by_id else None %}
+    <tr>
+      <td>
+        <a href="/admin/customers/{{ c.id }}" dir="auto">{{ c.display_name }}</a>
+      </td>
+      <td>
+        {% if _agent %}
+          <a href="/admin/agents/{{ _agent.id }}" dir="auto">{{ _agent.username }}</a>
+          {% if _agent.deleted_at %}<span class="badge badge--down" title="agent soft-deleted">deleted</span>{% endif %}
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </td>
+      <td><code class="text-small">{{ c.broker }}</code></td>
+      <td><code class="text-small">{{ c.isin }}</code></td>
+      <td>
+        {% if c.side == 1 %}<span class="badge badge--up">Buy</span>
+        {% else %}<span class="badge badge--down">Sell</span>{% endif %}
+      </td>
+      <td>
+        {# Phase 4 requires the diff-preview flow before any push. The
+           inbox routes through /admin/customers/{id}/assign which shows
+           the proposed config.ini change side-by-side with the current
+           remote file, then asks for explicit confirmation. #}
+        <a class="btn btn--primary btn--sm" href="/admin/customers/{{ c.id }}/assign">
+          Preview &amp; assign…
+        </a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,75 @@
+{#
+  Duplicate-customer form.
+
+  Clones an existing customer to a new ISIN. The service layer carries
+  over broker, side, username, and Fernet ciphertext from the source
+  row — the agent only has to provide the new ISIN (and optionally a
+  new display name).
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Duplicate {{ source.display_name }}{% endblock %}
+
+{% block page_body %}
+{% set fv = form_values|default({}) %}
+
+<h1 class="h1">Duplicate customer</h1>
+<p class="text-muted text-small">
+  Clone <strong dir="auto">{{ source.display_name }}</strong> to a new ISIN.
+  Broker, side, username and password ciphertext are inherited from the
+  source — you only need to provide the new symbol.
+</p>
+
+{% if form_error %}
+<div class="flash flash--error">
+  <strong>✗ Invalid input</strong>
+  <p class="text-small">{{ form_error }}</p>
+</div>
+{% endif %}
+
+<section class="card">
+  <h2 class="h2">Source</h2>
+  <dl class="kv">
+    <dt>Display name</dt>
+    <dd dir="auto">{{ source.display_name }}</dd>
+    <dt>Broker</dt>
+    <dd><span class="badge">{{ source.broker }}</span></dd>
+    <dt>Side</dt>
+    <dd>{{ "Buy" if source.side == 1 else "Sell" }}</dd>
+    <dt>Current ISIN</dt>
+    <dd><code class="text-small">{{ source.isin }}</code></dd>
+  </dl>
+</section>
+
+<form class="customer-duplicate-form"
+      method="post"
+      action="/agent/customers/{{ source.id }}/duplicate"
+      style="margin-top: 16px;">
+
+  <div class="field">
+    <label class="label" for="isin">New ISIN</label>
+    <input class="input" id="isin" name="isin" required
+           value="{{ fv.isin|default('') }}"
+           placeholder="IRO3AYHZ0001"
+           maxlength="32"
+           style="text-transform: uppercase"
+           autocomplete="off">
+    <p class="text-small text-muted">ASCII alphanumeric — no spaces or punctuation.</p>
+  </div>
+
+  <div class="field">
+    <label class="label" for="new_display_name">New display name (optional)</label>
+    <input class="input" id="new_display_name" name="new_display_name" dir="auto"
+           value="{{ fv.new_display_name|default('') }}"
+           placeholder="{{ source.display_name }} (&lt;new ISIN&gt;)"
+           maxlength="255" autocomplete="off">
+    <p class="text-small text-muted">
+      Leave blank to auto-name the clone <code dir="auto">{{ source.display_name }} (&lt;new ISIN&gt;)</code>.
+    </p>
+  </div>
+
+  <div class="form-actions">
+    <a class="btn btn--ghost" href="/agent/customers/{{ source.id }}">Cancel</a>
+    <button class="btn btn--primary" type="submit">Duplicate</button>
+  </div>
+</form>
+{% endblock %}

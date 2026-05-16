@@ -1,0 +1,89 @@
+{#
+  Pick-a-server form with a server-side diff preview of the proposed
+  ``config.ini`` change.
+
+  Inputs:
+    customer     — Customer ORM row
+    servers      — list[Server], every server in the fleet (we don't filter
+                   on status here so the admin can intentionally place a
+                   customer on an offline server if they're about to bring
+                   it up)
+    recommended  — Server (or None) — the auto-policy resolver's pick. If
+                   not None, the matching <option> gets a hint badge.
+    diff_lines   — list[str] of unified-diff lines (already formatted on
+                   the server side). Empty list = no effective change.
+    diff_error   — Optional[str], shown above the diff if the preview
+                   couldn't be fetched (server unreachable, etc.).
+    before_text  — current remote contents of config.ini (for size hint)
+    after_text   — proposed new contents (for size hint)
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Assign {{ customer.display_name }}{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Assign customer</h1>
+    <p class="text-muted text-small" dir="auto">
+      <a href="/admin/customers/{{ customer.id }}">{{ customer.display_name }}</a>
+      · <code>{{ customer.broker }}</code> · <code>{{ customer.isin }}</code>
+      · {% if customer.side == 1 %}Buy{% else %}Sell{% endif %}
+    </p>
+  </div>
+  <a class="btn btn--ghost btn--sm" href="/admin/customers/{{ customer.id }}">← back</a>
+</div>
+
+{% if customer.server_id %}
+<div class="flash flash--info">
+  This customer is currently assigned to a server. Submitting this form will
+  <strong>move</strong> the customer — both the old and the new
+  <code>config.ini</code> will be re-pushed.
+</div>
+{% endif %}
+
+<form class="customer-assign-form"
+      method="post"
+      action="{% if customer.server_id %}/admin/customers/{{ customer.id }}/move{% else %}/admin/customers/{{ customer.id }}/assign{% endif %}">
+  <div class="field">
+    <label class="label" for="server_id">Target server</label>
+    <select class="input" id="server_id"
+            name="{% if customer.server_id %}new_server_id{% else %}server_id{% endif %}"
+            required>
+      <option value="" disabled {% if not recommended %}selected{% endif %}>— pick a server —</option>
+      {% for s in servers %}
+        <option value="{{ s.id }}"
+                {% if recommended and recommended.id == s.id %}selected{% endif %}>
+          {{ s.name }} ({{ s.host }}:{{ s.ssh_port }})
+          {% if recommended and recommended.id == s.id %} — recommended{% endif %}
+          {% if s.status == 'offline' %} [offline]{% endif %}
+        </option>
+      {% endfor %}
+    </select>
+    {% if recommended %}
+    <p class="text-small text-muted">
+      Recommended by the current distribution policy:
+      <strong dir="auto">{{ recommended.name }}</strong>. You can override.
+    </p>
+    {% else %}
+    <p class="text-small text-muted">
+      No automatic recommendation — pick a server manually.
+    </p>
+    {% endif %}
+  </div>
+
+  <section class="card" style="margin-top: 16px;">
+    <h2 class="h2">config.ini diff preview</h2>
+    {% if diff_error %}
+      <p class="text-small text-muted">{{ diff_error }}</p>
+    {% endif %}
+    {% include "admin/partials/config_diff.html" %}
+  </section>
+
+  <div class="form-actions" style="margin-top: 16px;">
+    <a class="btn btn--ghost" href="/admin/customers/{{ customer.id }}">Cancel</a>
+    <button class="btn btn--primary" type="submit">
+      {% if customer.server_id %}Move customer{% else %}Assign customer{% endif %}
+    </button>
+  </div>
+</form>
+{% endblock %}

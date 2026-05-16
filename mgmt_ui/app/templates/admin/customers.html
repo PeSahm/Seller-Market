@@ -2,6 +2,78 @@
 {% block page_title %}Customers{% endblock %}
 
 {% block page_body %}
-<h1 class="h1">Customers</h1>
-<p class="text-muted text-small">Coming in Phase 4 &mdash; see plan.</p>
+<div class="page-header">
+  <div>
+    <h1 class="h1">Customers</h1>
+    <p class="text-muted text-small">
+      Agent-owned trading accounts. Each row generates a <code>[section]</code>
+      block in the on-server <code>config.ini</code> once it has been assigned
+      to a server.
+    </p>
+  </div>
+  <div class="header-actions">
+    <a class="btn btn--ghost" href="/admin/customers/pending">Pending inbox</a>
+    <a class="btn btn--primary" href="/admin/customers/new">+ Add customer</a>
+  </div>
+</div>
+
+{# Filter chips — agent / status / broker round-trip via query string so the
+   filtered view is bookmarkable. #}
+<form method="get" action="/admin/customers" class="filter-bar">
+  <select name="agent_id" class="input">
+    <option value="">All agents</option>
+    {% for a in all_agents %}
+      <option value="{{ a.id }}" {% if filter_agent_id and filter_agent_id == a.id %}selected{% endif %} dir="auto">
+        {{ a.username }}{% if a.deleted_at %} (deleted){% endif %}
+      </option>
+    {% endfor %}
+  </select>
+  <select name="status" class="input">
+    <option value="">Any status</option>
+    {% for s in ['pending','assigned','active'] %}
+      <option value="{{ s }}" {% if filter_status == s %}selected{% endif %}>{{ s }}</option>
+    {% endfor %}
+  </select>
+  <select name="broker" class="input">
+    <option value="">Any broker</option>
+    {% for b in ['gs','bbi','shahr','ib','karamad','tejarat','ebb','hbc','rabin','ayandeh'] %}
+      <option value="{{ b }}" {% if filter_broker == b %}selected{% endif %}>{{ b }}</option>
+    {% endfor %}
+  </select>
+  <button class="btn btn--ghost btn--sm" type="submit">Filter</button>
+  {% if filter_agent_id or filter_status or filter_broker %}
+    <a class="btn btn--ghost btn--sm" href="/admin/customers">Clear</a>
+  {% endif %}
+</form>
+
+{% if not customers %}
+<div class="card">
+  <p class="text-muted">No customers match these filters.</p>
+  {% if not (filter_agent_id or filter_status or filter_broker) %}
+    <p class="text-small text-muted">
+      Click <strong>+ Add customer</strong> to create the first one, or have an
+      agent declare one from their dashboard.
+    </p>
+  {% endif %}
+</div>
+{% else %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>Display name</th>
+      <th>Agent</th>
+      <th>Broker</th>
+      <th>ISIN</th>
+      <th>Side</th>
+      <th>Server</th>
+      <th>Status</th>
+      <th>Section</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for c in customers %}{% include "admin/partials/customer_row.html" %}{% endfor %}
+  </tbody>
+</table>
+{% endif %}
 {% endblock %}
