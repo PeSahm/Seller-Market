@@ -17,7 +17,10 @@ from uuid import uuid4
 import pytest
 
 from app.services.ssh.exceptions import PathOutOfScopeError
-from app.services.stacks import _assert_stack_path_in_scope
+from app.services.stacks import (
+    _assert_rm_target_in_scope,
+    _assert_stack_path_in_scope,
+)
 
 
 # A representative agent UUID used in the test fixtures. We pick one at
@@ -122,3 +125,45 @@ def test_stack_path_guard_rejects_empty_stack_dir() -> None:
     stack = _FakeStack(stack_dir="")
     with pytest.raises(PathOutOfScopeError):
         _assert_stack_path_in_scope(stack, "/anything")
+
+
+# ---------------------------------------------------------------------------
+# rm -rf scope guard (the deprovision-time check)
+# ---------------------------------------------------------------------------
+#
+# ``_assert_rm_target_in_scope`` is the pure-function half of the
+# deprovision-time guard that decides whether the remote ``rm -rf
+# <stack_dir>`` is safe to run. The bug it closes is the sibling-prefix
+# bypass: a bare ``startswith(expected_prefix)`` check would let
+# ``<base>/<uuid>-evil`` slip through, because that string genuinely starts
+# with ``<base>/<uuid>``. The fix is to require either an exact match or
+# the prefix followed by ``"/"``, and those are exactly what these tests
+# exercise.
+
+
+def test_rm_rf_guard_rejects_sibling_prefix() -> None:
+    """``<expected_prefix>-evil`` must NOT pass the rm -rf guard.
+
+    If ``expected_prefix = /root/seller-market/agents/<uuid>``, then
+    ``/root/seller-market/agents/<uuid>-malicious`` would slip through a
+    naive ``startswith`` check. The guard mandates either an exact match
+    or ``expected_prefix + "/"``, which closes the sibling-prefix bypass.
+    """
+    base_dir = "/root/seller-market/agents"
+    evil_stack_dir = f"{base_dir}/{_AGENT_ID}-evil"
+    with pytest.raises(PathOutOfScopeError):
+        _assert_rm_target_in_scope(evil_stack_dir, base_dir, _AGENT_ID)
+
+
+def test_rm_rf_guard_allows_exact_match() -> None:
+    """``stack_dir == <base>/<agent_id>`` must be accepted.
+
+    The exact-match branch is what every well-formed stack hits: the row
+    is created by ``find_or_create_stack`` as ``<base>/<agent_id>`` with
+    no further nesting, so the guard must not insist on a trailing
+    component. This test pins that branch open.
+    """
+    base_dir = "/root/seller-market/agents"
+    stack_dir = f"{base_dir}/{_AGENT_ID}"
+    # Should not raise.
+    _assert_rm_target_in_scope(stack_dir, base_dir, _AGENT_ID)

@@ -18,10 +18,16 @@ Concurrency
 serialise on a Postgres advisory lock keyed on
 ``hash_lock_key("compose", server_id)``. Two admins clicking "provision" on
 two different agents that happen to live on the same server can't race each
-other into a half-applied compose graph. We use the *xact*-scoped variant
-(``pg_try_advisory_xact_lock``) so the lock releases automatically when the
-transaction commits or rolls back — no manual ``pg_advisory_unlock`` needed
-and no risk of a leaked lock surviving a crashed worker.
+other into a half-applied compose graph.
+
+We use the **session-scoped** variant (``pg_try_advisory_lock`` /
+``pg_advisory_unlock``) on a *dedicated* AsyncSession opened just for the
+lock. The transaction-scoped variant would release the lock on the very
+first ``commit()`` we issue (to flip status to ``provisioning``), leaving
+all the subsequent SFTP + ``docker compose up`` work unprotected. By
+holding the lock on a side-channel session, the regular ``db`` session can
+commit freely while the lock stays held until the ``finally`` block
+explicitly releases it after the remote work completes (or fails).
 
 If the lock can't be acquired immediately we raise ``RuntimeError`` rather
 than block: a stuck compose command can take a long time and the admin
@@ -59,7 +65,12 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import acquire_advisory_lock, hash_lock_key
+from app.db import (
+    AsyncSessionLocal,
+    hash_lock_key,
+    release_session_lock,
+    try_acquire_session_lock,
+)
 from app.models.audit import AuditLog
 from app.models.servers import Server
 from app.models.settings import Setting
@@ -207,6 +218,46 @@ def _assert_stack_path_in_scope(stack: AgentStack, remote_path: str) -> None:
         raise PathOutOfScopeError(
             f"refusing to operate outside stack scope: {remote_path!r} "
             f"(stack_dir={base!r})"
+        )
+
+
+def _assert_rm_target_in_scope(
+    stack_dir: str, base_dir: str, agent_id: UUID | str
+) -> None:
+    """Refuse a ``rm -rf`` whose target isn't the stack's own directory.
+
+    Pure-function half of the deprovision-time guard so it can be exercised
+    directly in unit tests without standing up a full ``deprovision_stack``
+    invocation. The deprovision flow calls this immediately before issuing
+    the remote ``rm -rf``.
+
+    Rules:
+
+    * ``base_dir`` MUST be a non-root, non-empty absolute path (trailing
+      slash is normalised away first).
+    * ``stack_dir`` MUST equal ``<base_dir>/<agent_id>`` exactly OR start
+      with that prefix followed by a literal ``"/"``. The trailing-slash
+      requirement is the load-bearing piece: a bare
+      ``stack_dir.startswith(expected_prefix)`` would happily accept
+      sibling directories like ``<base>/<uuid>-evil``.
+
+    Raises:
+        PathOutOfScopeError: if ``base_dir`` is unsafe or ``stack_dir`` is
+            outside the expected per-agent prefix.
+    """
+    base = (base_dir or "").rstrip("/")
+    if not base or base == "/":
+        raise PathOutOfScopeError(
+            f"refusing to rm-rf: server.base_dir is unsafe ({base_dir!r})"
+        )
+    expected_prefix = f"{base}/{agent_id}"
+    if not (
+        stack_dir == expected_prefix
+        or stack_dir.startswith(expected_prefix + "/")
+    ):
+        raise PathOutOfScopeError(
+            f"refusing to rm-rf: stack_dir {stack_dir!r} is not within "
+            f"expected prefix {expected_prefix!r}"
         )
 
 
@@ -433,28 +484,15 @@ async def find_or_create_stack(
 # ---------------------------------------------------------------------------
 
 
-async def _acquire_compose_lock(
-    db: AsyncSession, server_id: UUID
-) -> None:
-    """Acquire the per-server compose advisory lock or raise.
+def _compose_lock_key(server_id: UUID) -> int:
+    """Stable advisory-lock key for the per-server compose serialisation.
 
-    All three compose actions (provision, redeploy, deprovision) serialise on
-    this lock so two admins can't race each other into a corrupted compose
-    graph on the same server. The lock is xact-scoped so it releases
-    automatically on commit/rollback — no manual cleanup, no risk of a leaked
-    lock surviving a crash.
-
-    We use ``pg_try_advisory_xact_lock`` (non-blocking) rather than
-    ``pg_advisory_xact_lock`` so a stuck compose operation doesn't queue up
-    a wall of waiters; instead, the second admin gets a clear
-    "retry in a minute" error.
+    All three compose actions (provision, redeploy, deprovision) acquire
+    this key on a dedicated session so they can't race each other into a
+    corrupted compose graph on the same server. See the module docstring
+    for the rationale on session-scoped (vs. transaction-scoped) locks.
     """
-    key = hash_lock_key("compose", str(server_id))
-    acquired = await acquire_advisory_lock(db, key, transaction_scoped=True)
-    if not acquired:
-        raise RuntimeError(
-            "another compose op is in flight for this server, retry"
-        )
+    return hash_lock_key("compose", str(server_id))
 
 
 async def _render_all_files(
@@ -534,6 +572,12 @@ async def _compose_down(
     isn't in the current ``docker-compose.yml`` (e.g. a service that was
     renamed mid-deploy).
 
+    We pass ``-f <stack_dir>/docker-compose.yml`` explicitly. Without it,
+    ``docker compose down`` resolves the compose file relative to the SSH
+    session's CWD (typically the login shell's ``$HOME``), which won't
+    contain the file — so the command would silently target nothing and
+    deprovision would falsely report success.
+
     Like ``_compose_up``, we don't ``check=True`` so the caller can show the
     admin the actual stderr if it fails (e.g. "no such project" if the stack
     was never up — which is fine, the row can still be removed).
@@ -541,6 +585,7 @@ async def _compose_down(
     run_command = _import_ssh_commands()
     cmd = (
         f"docker compose -p {_shell_quote(stack.compose_project)} "
+        f"-f {_shell_quote(stack.stack_dir + '/docker-compose.yml')} "
         f"down --volumes --remove-orphans"
     )
     result = await run_command(server, cmd, timeout=120.0, check=False)
@@ -593,13 +638,15 @@ async def _do_compose_action(
 
     Both actions follow the same shape:
 
-    1. Acquire the per-server advisory lock.
+    1. Acquire the per-server advisory lock on a *dedicated* side-channel
+       session (so the lock survives the regular ``db`` session's commits).
     2. Flip status to ``provisioning``.
     3. Render all five files.
     4. (Optional) mkdir + touch on the remote — only on first provision.
     5. SFTP-push the files.
     6. ``docker compose up -d``.
     7. Flip status to ``up`` (success) or ``down`` (failure) and audit.
+    8. Release the advisory lock in ``finally``.
 
     The only difference is the audit action name and whether we run the
     directory preparation step. Keeping the logic in one place means
@@ -609,81 +656,105 @@ async def _do_compose_action(
     if stack is None:
         raise LookupError(f"stack {stack_id} not found")
 
-    # Hold the advisory lock for the duration of the action. Doing this
-    # before any other DB work means we'd block immediately if a second
-    # admin clicks "provision" — see _acquire_compose_lock for the
-    # try-not-block rationale.
-    await _acquire_compose_lock(db, stack.server_id)
+    lock_key = _compose_lock_key(stack.server_id)
 
-    server = await db.get(Server, stack.server_id)
-    if server is None:
-        raise LookupError(
-            f"server {stack.server_id} for stack {stack.id} is missing"
-        )
+    # Hold the advisory lock on a dedicated session for the WHOLE duration
+    # of the action — including all SFTP and docker-compose work that runs
+    # AFTER the ``db`` session commits the ``provisioning`` status flip.
+    # If we held it on ``db``, the first commit would release the
+    # (transaction-scoped) lock and concurrent provisions on the same
+    # server could interleave.
+    async with AsyncSessionLocal() as lock_session:
+        if not await try_acquire_session_lock(lock_session, lock_key):
+            raise RuntimeError(
+                "another compose op is in flight for this server, retry"
+            )
+        try:
+            server = await db.get(Server, stack.server_id)
+            if server is None:
+                raise LookupError(
+                    f"server {stack.server_id} for stack "
+                    f"{stack.id} is missing"
+                )
 
-    # Step 2: mark as in-progress so the UI can show a spinner.
-    before = _public_snapshot(stack)
-    stack.status = "provisioning"
-    await db.commit()
-    # Re-load the stack into the session so subsequent attribute access on
-    # ``stack`` works (commit expires attributes by default — but our
-    # session has expire_on_commit=False, so this is a no-op safety net).
-    await db.refresh(stack)
+            # Step 2: mark as in-progress so the UI can show a spinner.
+            before = _public_snapshot(stack)
+            stack.status = "provisioning"
+            await db.commit()
+            # Re-load the stack into the session so subsequent attribute
+            # access on ``stack`` works (commit expires attributes by
+            # default — but our session has expire_on_commit=False, so
+            # this is a no-op safety net).
+            await db.refresh(stack)
 
-    log_tail = ""
-    try:
-        files = await _render_all_files(db, stack)
-        if prepare_dirs:
-            await _prepare_remote_dirs(server, stack)
-        await _push_files(server, stack, files)
-        ok, log_tail = await _compose_up(server, stack)
-    except Exception as exc:
-        # Any failure before/during compose flips status to ``down`` so the
-        # next admin action knows we left the remote in an indeterminate
-        # state. We commit the status update before re-raising so the
-        # router can render the failure with a fresh DB row.
-        stack.status = "down"
-        await _write_audit(
-            db,
-            actor_id=actor_id,
-            action="stack.error",
-            target_id=stack.id,
-            before=before,
-            after=_public_snapshot(stack),
-        )
-        await db.commit()
-        logger.exception(
-            "compose action failed for stack %s: %s", stack.id, exc
-        )
-        raise
+            log_tail = ""
+            try:
+                files = await _render_all_files(db, stack)
+                if prepare_dirs:
+                    await _prepare_remote_dirs(server, stack)
+                await _push_files(server, stack, files)
+                ok, log_tail = await _compose_up(server, stack)
+            except Exception as exc:
+                # Any failure before/during compose flips status to
+                # ``down`` so the next admin action knows we left the
+                # remote in an indeterminate state. We commit the status
+                # update before re-raising so the router can render the
+                # failure with a fresh DB row.
+                stack.status = "down"
+                await _write_audit(
+                    db,
+                    actor_id=actor_id,
+                    action="stack.error",
+                    target_id=stack.id,
+                    before=before,
+                    after=_public_snapshot(stack),
+                )
+                await db.commit()
+                logger.exception(
+                    "compose action failed for stack %s: %s", stack.id, exc
+                )
+                raise
 
-    # Step 7: finalise status based on compose exit code.
-    if ok:
-        stack.status = "up"
-        stack.deployed_at = _now_utc()
-        message = "stack deployed"
-    else:
-        stack.status = "down"
-        message = "compose returned non-zero exit"
+            # Step 7: finalise status based on compose exit code.
+            if ok:
+                stack.status = "up"
+                stack.deployed_at = _now_utc()
+                message = "stack deployed"
+            else:
+                stack.status = "down"
+                message = "compose returned non-zero exit"
 
-    await _write_audit(
-        db,
-        actor_id=actor_id,
-        action=audit_action,
-        target_id=stack.id,
-        before=before,
-        after=_public_snapshot(stack),
-    )
-    await db.commit()
-    await db.refresh(stack)
+            await _write_audit(
+                db,
+                actor_id=actor_id,
+                action=audit_action,
+                target_id=stack.id,
+                before=before,
+                after=_public_snapshot(stack),
+            )
+            await db.commit()
+            await db.refresh(stack)
 
-    return StackActionResult(
-        ok=ok,
-        stack_id=stack.id,
-        status=stack.status,
-        message=message,
-        log_tail=log_tail,
-    )
+            return StackActionResult(
+                ok=ok,
+                stack_id=stack.id,
+                status=stack.status,
+                message=message,
+                log_tail=log_tail,
+            )
+        finally:
+            # Always release the session-scoped lock — even on exception
+            # paths — so a transient failure doesn't pin the lock until
+            # the connection eventually times out. A best-effort release
+            # is correct here: if release itself fails (e.g. the
+            # connection went away), the lock will be cleaned up by
+            # Postgres when the underlying session closes.
+            try:
+                await release_session_lock(lock_session, lock_key)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                logger.exception(
+                    "failed to release advisory lock key=%s", lock_key
+                )
 
 
 async def provision_stack(
@@ -737,20 +808,24 @@ async def deprovision_stack(
 
     Sequence:
 
-    1. Acquire the per-server advisory lock.
+    1. Acquire the per-server advisory lock on a dedicated session.
     2. Flip status to ``deprovisioning``.
-    3. ``docker compose down --volumes --remove-orphans``.
+    3. ``docker compose down --volumes --remove-orphans``. Capture the result.
     4. ``rm -rf <stack_dir>`` — but ONLY if the path passes two safety
        checks (see below). This is the most dangerous remote command in the
-       module; the checks are belt-and-braces.
-    5. Delete the ``agent_stacks`` row.
-    6. Audit ``stack.deprovision``.
+       module; the checks are belt-and-braces. Capture the result.
+    5. If either compose-down OR rm failed, return ``ok=False`` with the
+       captured log_tail and LEAVE the row in place (status stays
+       ``deprovisioning``). The admin can retry once they know why.
+    6. Only if both succeeded: delete the row, audit ``stack.deprovision``,
+       return ``ok=True``.
 
     ``rm -rf`` safety:
 
-    * ``stack.stack_dir`` MUST start with ``<server.base_dir>/<agent_id>``
-      (so a stack row with a mismatched ``stack_dir`` from a buggy migration
-      can't be used to nuke unrelated content).
+    * ``stack.stack_dir`` MUST equal ``<server.base_dir>/<agent_id>`` exactly
+      OR start with that prefix followed by ``"/"``. A naive prefix check
+      would let ``<base>/<agent_id>-evil`` slip past — using
+      ``startswith(prefix + "/")`` rules that out.
     * ``server.base_dir`` MUST NOT be ``/`` (defence against a server row
       that was somehow created with a root base_dir — the schema-level
       validator should already prevent this, but we re-check at the point
@@ -764,87 +839,139 @@ async def deprovision_stack(
     if stack is None:
         raise LookupError(f"stack {stack_id} not found")
 
-    await _acquire_compose_lock(db, stack.server_id)
+    lock_key = _compose_lock_key(stack.server_id)
 
-    server = await db.get(Server, stack.server_id)
-    if server is None:
-        raise LookupError(
-            f"server {stack.server_id} for stack {stack.id} is missing"
-        )
+    async with AsyncSessionLocal() as lock_session:
+        if not await try_acquire_session_lock(lock_session, lock_key):
+            raise RuntimeError(
+                "another compose op is in flight for this server, retry"
+            )
+        try:
+            server = await db.get(Server, stack.server_id)
+            if server is None:
+                raise LookupError(
+                    f"server {stack.server_id} for stack "
+                    f"{stack.id} is missing"
+                )
 
-    before = _public_snapshot(stack)
-    stack.status = "deprovisioning"
-    await db.commit()
-    await db.refresh(stack)
+            before = _public_snapshot(stack)
+            stack.status = "deprovisioning"
+            await db.commit()
+            await db.refresh(stack)
 
-    # Step 3: compose down. We don't bail on a non-zero exit — "no such
-    # project" is a valid result if the stack was never up, and we still
-    # want to clean up the directory and the row.
-    log_tail = ""
-    try:
-        _, log_tail = await _compose_down(server, stack)
-    except Exception as exc:
-        # If SSH itself fails (auth error, host unreachable) we can't
-        # safely remove the dir or the row — log + re-raise so the admin
-        # can retry once the server is reachable. Status stays
-        # ``deprovisioning`` so the UI can show "in progress" until then.
-        await _write_audit(
-            db,
-            actor_id=actor_id,
-            action="stack.error",
-            target_id=stack.id,
-            before=before,
-            after=_public_snapshot(stack),
-        )
-        await db.commit()
-        logger.exception(
-            "compose down failed for stack %s: %s", stack.id, exc
-        )
-        raise
+            # Step 3: compose down. Capture ok + log so we can surface a
+            # real failure to the admin rather than silently deleting the
+            # row out from under a container that's still running.
+            log_tail = ""
+            try:
+                compose_ok, log_tail = await _compose_down(server, stack)
+            except Exception as exc:
+                # If SSH itself fails (auth error, host unreachable) we
+                # can't safely remove the dir or the row — log + re-raise
+                # so the admin can retry once the server is reachable.
+                # Status stays ``deprovisioning`` so the UI can show "in
+                # progress" until then.
+                await _write_audit(
+                    db,
+                    actor_id=actor_id,
+                    action="stack.error",
+                    target_id=stack.id,
+                    before=before,
+                    after=_public_snapshot(stack),
+                )
+                await db.commit()
+                logger.exception(
+                    "compose down failed for stack %s: %s", stack.id, exc
+                )
+                raise
 
-    # Step 4: rm -rf, gated by two safety checks.
-    base = (server.base_dir or "").rstrip("/")
-    expected_prefix = f"{base}/{stack.agent_id}"
-    if not base or base == "/":
-        raise PathOutOfScopeError(
-            f"refusing to rm-rf: server.base_dir is unsafe ({base!r})"
-        )
-    if not stack.stack_dir.startswith(expected_prefix):
-        raise PathOutOfScopeError(
-            f"refusing to rm-rf: stack_dir {stack.stack_dir!r} does not "
-            f"start with expected prefix {expected_prefix!r}"
-        )
+            # If compose-down reported a non-zero exit, do NOT proceed to
+            # rm/delete — we'd be leaving a still-running container with no
+            # DB record of it, which is much harder to recover from than a
+            # stuck "deprovisioning" row. Return ok=False and let the admin
+            # decide.
+            if not compose_ok:
+                return StackActionResult(
+                    ok=False,
+                    stack_id=stack_id,
+                    status="deprovisioning",
+                    message=(
+                        "docker compose down failed; row not removed "
+                        "(retry deprovision or investigate manually)"
+                    ),
+                    log_tail=log_tail,
+                )
 
-    run_command = _import_ssh_commands()
-    rm_cmd = f"rm -rf {_shell_quote(stack.stack_dir)}"
-    # check=False so we capture stderr but don't raise — we want to delete
-    # the DB row even if the directory was already gone (idempotent
-    # teardown). The log_tail surfaces any unexpected errors.
-    rm_result = await run_command(server, rm_cmd, timeout=60.0, check=False)
-    rm_log = _tail_log(rm_result.stdout, rm_result.stderr)
-    if rm_log:
-        log_tail = (log_tail + "\n--- rm ---\n" + rm_log) if log_tail else rm_log
+            # Step 4: rm -rf, gated by the per-stack scope check. The
+            # actual rule lives in ``_assert_rm_target_in_scope`` so that
+            # the (security-critical) sibling-prefix logic is unit-testable
+            # without standing up a full deprovision flow.
+            _assert_rm_target_in_scope(
+                stack.stack_dir, server.base_dir or "", stack.agent_id
+            )
 
-    # Step 5 + 6: delete the row and audit. Audit BEFORE delete so the
-    # target_id reference still makes sense to a future reader.
-    await _write_audit(
-        db,
-        actor_id=actor_id,
-        action="stack.deprovision",
-        target_id=stack.id,
-        before=before,
-        after=None,
-    )
-    await db.delete(stack)
-    await db.commit()
+            run_command = _import_ssh_commands()
+            rm_cmd = f"rm -rf {_shell_quote(stack.stack_dir)}"
+            # check=False so we capture stderr but don't raise — but we DO
+            # consult result.ok below to decide whether the deprovision
+            # actually succeeded (vs. the previous behaviour, which
+            # silently swallowed failures and deleted the row anyway).
+            rm_result = await run_command(
+                server, rm_cmd, timeout=60.0, check=False
+            )
+            rm_log = _tail_log(rm_result.stdout, rm_result.stderr)
+            if rm_log:
+                log_tail = (
+                    log_tail + "\n--- rm ---\n" + rm_log
+                    if log_tail
+                    else rm_log
+                )
 
-    return StackActionResult(
-        ok=True,
-        stack_id=stack_id,
-        status="deprovisioned",
-        message="stack torn down",
-        log_tail=log_tail,
-    )
+            if not rm_result.ok:
+                # Compose came down cleanly but the directory cleanup
+                # failed (e.g. permissions, disk error). Leave the row in
+                # place so the admin can retry — deleting now would lose
+                # the record of where the leftover files live.
+                return StackActionResult(
+                    ok=False,
+                    stack_id=stack_id,
+                    status="deprovisioning",
+                    message=(
+                        "rm -rf of stack_dir failed; row not removed "
+                        "(retry deprovision or remove the directory "
+                        "manually)"
+                    ),
+                    log_tail=log_tail,
+                )
+
+            # Step 6: both teardown steps succeeded — safe to delete the
+            # row. Audit BEFORE delete so the target_id reference still
+            # makes sense to a future reader.
+            await _write_audit(
+                db,
+                actor_id=actor_id,
+                action="stack.deprovision",
+                target_id=stack.id,
+                before=before,
+                after=None,
+            )
+            await db.delete(stack)
+            await db.commit()
+
+            return StackActionResult(
+                ok=True,
+                stack_id=stack_id,
+                status="deprovisioned",
+                message="stack torn down",
+                log_tail=log_tail,
+            )
+        finally:
+            try:
+                await release_session_lock(lock_session, lock_key)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                logger.exception(
+                    "failed to release advisory lock key=%s", lock_key
+                )
 
 
 # ---------------------------------------------------------------------------
