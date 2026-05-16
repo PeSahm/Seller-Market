@@ -6,6 +6,22 @@ manages multiple trading servers over SSH + `docker compose`. The UI exposes two
 their assigned bots only). Built with **FastAPI + PostgreSQL + HTMX/Jinja**, deployed
 as Docker.
 
+## ⚠️ Deployment constraint — internal network only (until Phase 10)
+
+This service must be reachable **only from a trusted internal network or behind a
+VPN/bastion**. Do not expose it to the public internet.
+
+**Reason:** CSRF protection is intentionally deferred to Phase 10 (hardening) — see
+[the architecture plan](../docs/management-ui-plan.md) — so state-mutating endpoints
+(login/logout, future push/run actions, customer edits) currently rely on cookie
+authentication without CSRF tokens. On an internal network this is acceptable; on the
+public internet a malicious cross-origin page could trigger actions on behalf of a
+logged-in admin.
+
+Phase 10 will add `fastapi-csrf-protect` (middleware token issuance, `<meta>` injection,
+HTMX `htmx:configRequest` hook, hidden form field, server-side verification, double-submit
+cookie). Until that lands, lock this down at the network layer.
+
 ## Quickstart (Docker)
 
 1. Copy the env template and fill in secrets:
