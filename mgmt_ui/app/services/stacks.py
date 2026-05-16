@@ -72,11 +72,13 @@ from app.db import (
     try_acquire_session_lock,
 )
 from app.models.audit import AuditLog
+from app.models.customers import Customer
 from app.models.servers import Server
 from app.models.settings import Setting
 from app.models.stacks import AgentStack
 from app.schemas.stack import StackActionResult
 from app.services.rendering import (
+    CustomerRow,
     StackRenderContext,
     render_compose_yaml,
     render_config_ini,
@@ -84,7 +86,7 @@ from app.services.rendering import (
     render_locust_config,
     render_scheduler_config,
 )
-from app.services.ssh.exceptions import PathOutOfScopeError
+from app.services.ssh.exceptions import PathOutOfScopeError, SSHError
 
 logger = logging.getLogger(__name__)
 
@@ -283,16 +285,21 @@ async def _build_render_context(
     db: AsyncSession,
     stack: AgentStack,
 ) -> StackRenderContext:
-    """Assemble the rendering context for a stack from current DB state.
+    """Build the per-stack render context.
 
-    Phase 3 wiring is intentionally narrow:
+    Phase 4: customers are loaded from the DB, broker passwords decrypted via
+    :func:`app.services.customers.decrypt_password` (which emits an audit log
+    entry on each decrypt — the only path that crosses the encrypted
+    boundary). ``scheduler_jobs`` / ``scheduler_enabled`` / ``locust`` remain
+    Phase 5 placeholders.
 
-    * ``customers``, ``scheduler_jobs``, ``scheduler_enabled``, and
-      ``locust`` are left at their dataclass defaults (empty / disabled).
-      Phase 4 (customers) and Phase 5 (scheduler / locust) will wire them.
     * ``agent_image_tag`` and ``ocr_service_url`` are read from the
       ``settings`` table with hard-coded defaults.
     * ``server_base_dir`` comes from the server row that owns the stack.
+    * ``customers`` are loaded by :func:`_load_stack_customers` — enabled
+      rows whose ``stack_id`` points at this stack, with broker passwords
+      decrypted at the source so the rendering layer stays oblivious to
+      Fernet entirely.
 
     Raises:
         LookupError: if the stack's server row has gone missing — should be
@@ -312,17 +319,70 @@ async def _build_render_context(
         db, "ocr_service_url", _DEFAULT_OCR_SERVICE_URL
     )
 
+    customers = await _load_stack_customers(db, stack.id)
+
     return StackRenderContext(
         agent_id=stack.agent_id,
         server_base_dir=server.base_dir,
         agent_image_tag=image_tag,
         ocr_service_url=ocr_url,
-        # Phase 4 / 5 will populate these — empty defaults render cleanly.
-        customers=(),
+        customers=customers,
+        # Scheduler / locust still placeholders until Phase 5.
         scheduler_jobs=(),
         scheduler_enabled=False,
         locust=None,
     )
+
+
+async def _load_stack_customers(
+    db: AsyncSession, stack_id: UUID
+) -> tuple[CustomerRow, ...]:
+    """Load enabled customers assigned to ``stack_id`` and project them into
+    render rows.
+
+    The customer-service ``list_customers`` helper in this revision of the
+    codebase doesn't expose a ``stack_id=`` filter (its kwargs are
+    ``agent_id`` / ``status`` / ``server_id`` / ``broker`` /
+    ``include_disabled``), so we fall back to a direct ``select(Customer)``
+    scoped on ``stack_id`` and ``enabled``. We still route password decrypt
+    through :func:`app.services.customers.decrypt_password` so the
+    ``secret_decrypt`` audit log entry is emitted for every plaintext we
+    materialise. The import is lazy because the customer service may grow
+    a dependency on the distribution service that closes a cycle back into
+    this module.
+    """
+    # Lazy import — keeps module-load free of any indirect cycle through the
+    # distribution service (Phase 4 owners noted customers may import stacks
+    # transitively).
+    from app.services import customers as services_customers  # noqa: WPS433
+
+    stmt = select(Customer).where(
+        Customer.stack_id == stack_id,
+        Customer.enabled.is_(True),
+    )
+    result = await db.execute(stmt)
+    customer_rows = list(result.scalars().all())
+
+    rendered: list[CustomerRow] = []
+    for c in customer_rows:
+        # Defence in depth: even though the SELECT already filtered on
+        # enabled=True, an evolving customer service might one day surface
+        # rows through a different path. Skip anything that claims to be
+        # disabled.
+        if not c.enabled:
+            continue
+        password_plain = await services_customers.decrypt_password(c)
+        rendered.append(
+            CustomerRow(
+                section_name=c.section_name,
+                username=c.username,
+                password_plain=password_plain,
+                broker=c.broker,
+                isin=c.isin,
+                side=c.side,
+            )
+        )
+    return tuple(rendered)
 
 
 def _redact_secrets(filename: str, content: str) -> str:
@@ -1035,12 +1095,135 @@ async def stack_files_preview(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Phase 4: customer-driven config.ini push / preview
+# ---------------------------------------------------------------------------
+
+
+async def push_config_ini_for_stack(
+    db: AsyncSession,
+    stack_id: UUID,
+    actor_id: Optional[UUID],
+) -> StackActionResult:
+    """Render ``config.ini`` from the stack's current customers and SFTP-push it.
+
+    Runs under the per-server compose advisory lock so it can't race the
+    provision/redeploy/deprovision actions. This is the function that
+    customer-mutation endpoints call after persisting a change, so the change
+    is immediately reflected in the trading bot's config.
+
+    On non-provisioned stacks (status='down' or never deployed), we still
+    render + push the file; the bot will pick it up on the next start. We
+    deliberately do NOT restart the container — the bot's ``scheduler.py``
+    re-reads ``scheduler_config.json`` every second and ``locustfile_new.py``
+    reads ``config.ini`` only at run start, so the new sections will be
+    picked up by the next scheduled run automatically.
+
+    Raises:
+        LookupError: stack or server row missing.
+        RuntimeError: another compose op is in flight for this server.
+        SSHError: an SFTP failure bubbles up so the caller can show it.
+        PathOutOfScopeError: the rendered remote path falls outside
+            ``stack.stack_dir`` (defence in depth — should never happen
+            because we construct the path from ``stack.stack_dir`` itself).
+    """
+    stack = await get_stack(db, stack_id)
+    if stack is None:
+        raise LookupError(f"stack not found: {stack_id}")
+    server = await db.get(Server, stack.server_id)
+    if server is None:
+        raise LookupError(f"server not found: {stack.server_id}")
+
+    lock_key = _compose_lock_key(server.id)
+    async with AsyncSessionLocal() as lock_session:
+        if not await try_acquire_session_lock(lock_session, lock_key):
+            raise RuntimeError(
+                "another compose op is in flight for this server"
+            )
+        try:
+            ctx = await _build_render_context(db, stack)
+            new_content = render_config_ini(ctx)
+            remote_path = f"{stack.stack_dir}/config.ini"
+            # Belt-and-braces stack-scope guard (the SFTP helper also has a
+            # per-server guard, but the per-stack one closes the misaligned
+            # stack_dir hole — see _assert_stack_path_in_scope).
+            _assert_stack_path_in_scope(stack, remote_path)
+            sftp_atomic_write, _ = _import_sftp()
+            await sftp_atomic_write(server, remote_path, new_content)
+            await _write_audit(
+                db,
+                actor_id=actor_id,
+                action="stack.push_config_ini",
+                target_id=stack.id,
+                before=None,
+                after={"path": remote_path, "len": len(new_content)},
+            )
+            await db.commit()
+            return StackActionResult(
+                ok=True,
+                stack_id=stack.id,
+                status=stack.status,
+                message="config.ini pushed",
+            )
+        finally:
+            try:
+                await release_session_lock(lock_session, lock_key)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                logger.exception(
+                    "failed to release compose lock key=%s", lock_key
+                )
+
+
+async def render_config_ini_for_stack_preview(
+    db: AsyncSession,
+    stack_id: UUID,
+) -> tuple[str, str]:
+    """Return ``(current_remote_content, new_rendered_content)``.
+
+    Used by the admin's assign/move flows for the diff-preview UI. On SFTP
+    read failure (file missing, server unreachable, stack not yet
+    provisioned), the current half is the empty string. The new half is
+    always derived from the current DB state.
+
+    No advisory lock is taken — this is a read-only preview and the caller
+    is happy with a "best-effort" snapshot. If a write is in flight on the
+    same server, the current half may reflect either the pre- or post-write
+    state, which is acceptable for a UI preview.
+    """
+    stack = await get_stack(db, stack_id)
+    if stack is None:
+        raise LookupError(f"stack not found: {stack_id}")
+    server = await db.get(Server, stack.server_id)
+    if server is None:
+        raise LookupError(f"server not found: {stack.server_id}")
+
+    ctx = await _build_render_context(db, stack)
+    new_content = render_config_ini(ctx)
+
+    _, sftp_read_text = _import_sftp()
+    current = ""
+    try:
+        current = await sftp_read_text(
+            server, f"{stack.stack_dir}/config.ini"
+        )
+    except SSHError as exc:
+        # Stack may simply not be provisioned yet, or the file may have been
+        # removed by hand. Surface an empty "current" half so the diff UI
+        # can show "this is a fresh push".
+        logger.info(
+            "preview: sftp_read_text failed stack=%s: %s", stack_id, exc
+        )
+    return (current, new_content)
+
+
 __all__ = [
     "deprovision_stack",
     "find_or_create_stack",
     "get_stack",
     "list_stacks",
     "provision_stack",
+    "push_config_ini_for_stack",
     "redeploy_stack",
+    "render_config_ini_for_stack_preview",
     "stack_files_preview",
 ]
