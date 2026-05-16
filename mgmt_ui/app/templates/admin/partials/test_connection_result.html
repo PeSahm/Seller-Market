@@ -1,0 +1,48 @@
+{% if result.ok %}
+<div class="flash flash--success">
+  <strong>✓ Connection OK</strong>
+  {% if result.new_pin %}<span class="text-small">— host key pinned ({{ result.fingerprint[:24] }}…)</span>{% endif %}
+</div>
+<dl class="kv kv--inline">
+  <dt>Fingerprint</dt>
+  <dd><code class="text-small" title="{{ result.fingerprint }}">{{ result.fingerprint[:24] }}…</code></dd>
+  <dt>Clock skew</dt>
+  <dd>
+    {% set abs_d = (result.clock_skew_seconds if result.clock_skew_seconds and result.clock_skew_seconds >= 0 else (-result.clock_skew_seconds if result.clock_skew_seconds else 0)) %}
+    {% if result.clock_skew_seconds is none %}
+      <span class="text-muted">—</span>
+    {% elif abs_d <= 5 %}
+      <span class="badge badge--up">{{ result.clock_skew_seconds }}s</span>
+    {% elif abs_d <= 60 %}
+      <span class="badge badge--pending">{{ result.clock_skew_seconds }}s</span>
+    {% else %}
+      <span class="badge badge--down">{{ result.clock_skew_seconds }}s ⚠</span>
+    {% endif %}
+  </dd>
+  <dt>/root/seller-market/</dt>
+  <dd>
+    {% if result.seller_market_present %}
+      <span class="badge badge--up">present</span>
+    {% else %}
+      <span class="badge badge--pending">missing — existing trading bot not detected</span>
+    {% endif %}
+  </dd>
+  <dt>Docker</dt>
+  <dd>{% if result.docker_version %}<code class="text-small">{{ result.docker_version }}</code>
+       {% else %}<span class="badge badge--down">not installed</span>{% endif %}</dd>
+</dl>
+{% elif result.host_key_mismatch %}
+<div class="flash flash--error">
+  <strong>⚠ Host key mismatch</strong>
+  <p class="text-small">
+    The remote host presented a different SSH host key than the pinned value.
+    This could be a legitimate key rotation or a MITM attack — the pin was
+    <strong>not</strong> updated. {{ result.message }}
+  </p>
+</div>
+{% else %}
+<div class="flash flash--error">
+  <strong>✗ Connection failed</strong>
+  <p class="text-small">{{ result.message }}</p>
+</div>
+{% endif %}

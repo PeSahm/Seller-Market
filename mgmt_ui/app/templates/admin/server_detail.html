@@ -1,0 +1,79 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}{{ server.name }}{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1" dir="auto">{{ server.name }}</h1>
+    <p class="text-muted text-small"><code>{{ server.ssh_user }}@{{ server.host }}:{{ server.ssh_port }}</code></p>
+  </div>
+  <div class="header-actions">
+    <button class="btn btn--primary btn--sm"
+            hx-post="/admin/servers/{{ server.id }}/test-connection"
+            hx-target="#test-result"
+            hx-swap="innerHTML"
+            hx-indicator="#test-spinner">
+      Test connection
+    </button>
+    <form method="post" action="/admin/servers/{{ server.id }}/delete"
+          onsubmit="return confirm('Permanently delete this server? Its SSH key file will be removed.');">
+      <button class="btn btn--danger btn--sm" type="submit">Delete</button>
+    </form>
+  </div>
+</div>
+
+<div id="test-result" class="test-result-slot"></div>
+<div id="test-spinner" class="htmx-indicator text-small text-muted">Testing…</div>
+
+<div class="card-grid">
+  <section class="card">
+    <h2 class="h2">Identity</h2>
+    <dl class="kv">
+      <dt>Status</dt>
+      <dd>
+        {% if server.status == 'online' %}<span class="badge badge--up">online</span>
+        {% elif server.status == 'offline' %}<span class="badge badge--down">offline</span>
+        {% else %}<span class="badge badge--pending">unknown</span>{% endif %}
+      </dd>
+      <dt>Last seen</dt>
+      <dd>{% if server.last_seen_at %}{{ server.last_seen_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}{% else %}—{% endif %}</dd>
+      <dt>Auth</dt>
+      <dd><span class="badge badge--{{ 'pending' if server.ssh_auth == 'password' else 'up' }}">{{ server.ssh_auth }}</span></dd>
+      <dt>Base dir</dt>
+      <dd><code>{{ server.base_dir }}</code></dd>
+      <dt>Host key pin</dt>
+      <dd>
+        {% if server.host_key_pin %}
+          <code class="text-small" title="{{ server.host_key_pin }}">{{ server.host_key_pin[:24] }}…</code>
+        {% else %}
+          <span class="text-muted">not yet pinned</span>
+        {% endif %}
+      </dd>
+    </dl>
+  </section>
+
+  <section class="card">
+    <h2 class="h2">Clock skew (last 10)</h2>
+    {% if not clock_skew_samples %}
+      <p class="text-muted">No samples yet. Click <strong>Test connection</strong>.</p>
+    {% else %}
+    <table class="table">
+      <thead><tr><th>When</th><th>Delta (s)</th></tr></thead>
+      <tbody>
+      {% for s in clock_skew_samples %}
+        <tr>
+          <td class="text-small">{{ s.sampled_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+          <td>
+            {% set abs_d = (s.delta_seconds if s.delta_seconds >= 0 else -s.delta_seconds) %}
+            {% if abs_d <= 5 %}<span class="badge badge--up">{{ s.delta_seconds }}</span>
+            {% elif abs_d <= 60 %}<span class="badge badge--pending">{{ s.delta_seconds }}</span>
+            {% else %}<span class="badge badge--down">{{ s.delta_seconds }}</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}
