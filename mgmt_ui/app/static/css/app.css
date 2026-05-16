@@ -24,9 +24,17 @@ button { font: inherit; }
   --border-strong: #c9ced5;
   --accent: #2f6f9f;
   --accent-soft: #e8f0f6;
+  --accent-hover: #265c84;
   --danger: #b3261e;
+  --danger-bg-hover: #fdecea;
   --warning: #a86700;
   --success: #2f7a4d;
+  --badge-pending-border: #e7c98e;
+  --badge-pending-bg: #fdf5e6;
+  --badge-up-border: #b7d9c4;
+  --badge-up-bg: #ebf6ef;
+  --badge-down-border: #e6b8b5;
+  --badge-down-bg: #fdecea;
   --radius: 4px;
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
 }
@@ -40,9 +48,17 @@ button { font: inherit; }
   --border-strong: #3a4049;
   --accent: #4f9fd0;
   --accent-soft: #1d2a35;
+  --accent-hover: #6bb3e0;
   --danger: #e06a63;
+  --danger-bg-hover: #3a2422;
   --warning: #d29b46;
   --success: #5cb07f;
+  --badge-pending-border: #4a3a1a;
+  --badge-pending-bg: #2a2419;
+  --badge-up-border: #2a4a35;
+  --badge-up-bg: #1a2a22;
+  --badge-down-border: #4a2a28;
+  --badge-down-bg: #2a1a19;
 }
 
 /* Layout */
@@ -141,11 +157,11 @@ button { font: inherit; }
 .btn--primary {
   background: var(--accent); color: #fff; border-color: var(--accent);
 }
-.btn--primary:hover { background: #265c84; border-color: #265c84; }
+.btn--primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn--ghost { border-color: transparent; background: transparent; color: var(--fg-muted); }
 .btn--ghost:hover { background: var(--bg-alt); color: var(--fg); }
 .btn--danger { color: var(--danger); border-color: var(--border-strong); }
-.btn--danger:hover { background: #fdecea; }
+.btn--danger:hover { background: var(--danger-bg-hover); }
 .btn--sm { padding: 2px var(--s2); font-size: 0.92em; }
 .btn--block { width: 100%; }
 
@@ -191,9 +207,9 @@ button { font: inherit; }
   border-radius: 999px; font-size: 0.85em;
   border: 1px solid var(--border-strong); color: var(--fg-muted); background: var(--bg-alt);
 }
-.badge--pending { color: var(--warning); border-color: #e7c98e; background: #fdf5e6; }
-.badge--up { color: var(--success); border-color: #b7d9c4; background: #ebf6ef; }
-.badge--down { color: var(--danger); border-color: #e6b8b5; background: #fdecea; }
+.badge--pending { color: var(--warning); border-color: var(--badge-pending-border); background: var(--badge-pending-bg); }
+.badge--up { color: var(--success); border-color: var(--badge-up-border); background: var(--badge-up-bg); }
+.badge--down { color: var(--danger); border-color: var(--badge-down-border); background: var(--badge-down-bg); }
 
 /* Flash */
 .flash-region { padding: 0 var(--s5); }
