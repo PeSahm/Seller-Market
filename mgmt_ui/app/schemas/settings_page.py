@@ -23,6 +23,13 @@ class SettingsUpdate(BaseModel):
 
     ocr_service_url: str = Field(min_length=1, max_length=512)
     agent_image_tag: str = Field(min_length=1, max_length=255)
+    # Per-stack ``processes`` ceiling for locust load runs (Phase 5). The
+    # static ``le=32`` here mirrors the hard ceiling on
+    # :class:`app.schemas.locust.LocustUpsert.processes` — a value larger
+    # than the typical host core count is never sensible. The *operational*
+    # cap (default 4) is whatever the admin sets; the service layer
+    # rejects per-stack values exceeding it.
+    agent_locust_processes_cap: int = Field(default=4, ge=1, le=32)
 
     @field_validator("ocr_service_url")
     @classmethod
