@@ -6,9 +6,11 @@ Paramiko is a synchronous library. To keep the FastAPI event loop responsive,
 every blocking call (``connect``, ``exec_command``, SFTP I/O) is dispatched
 through :func:`asyncio.to_thread`. Around that, we layer:
 
-* **One transport per ``(host, port, user)``** — keyed by ``server.id`` and
-  cached in a dict guarded by ``asyncio.Lock`` so concurrent requests for the
-  same server serialize through a single TCP connection.
+* **One transport per ``(host, port, user)``** — the transport cache is keyed
+  by the connection-identity tuple so two ``Server`` rows pointing at the same
+  physical endpoint share a single TCP connection, and a credential rotation
+  on a server record forces a reconnect. A separate per-connection-identity
+  ``asyncio.Lock`` serialises concurrent acquires.
 * **Trust-on-first-use (TOFU) host-key pinning** — a custom
   :class:`paramiko.MissingHostKeyPolicy` accepts the first key when
   ``server.host_key_pin`` is ``None`` and records the observed SHA256 so the
@@ -97,28 +99,63 @@ class _PinnedHostKeyPolicy(paramiko.MissingHostKeyPolicy):
 # ---------------------------------------------------------------------------
 
 
+def _conn_key(server: Server) -> str:
+    """Return the connection-identity key for ``server``.
+
+    Two ``Server`` rows with the same ``(ssh_user, host, ssh_port)`` share a
+    transport. Changing any of these fields on a row produces a new key, so
+    the next :meth:`SSHPool.acquire` will open a fresh connection rather than
+    reuse a stale one against the old endpoint.
+    """
+    return f"{server.ssh_user}@{server.host}:{server.ssh_port}"
+
+
+def _secret_fingerprint(server: Server) -> str:
+    """Return a stable short digest of the auth-relevant fields.
+
+    Used to detect a "same conn_key, but credentials rotated" case: an admin
+    updates ``ssh_secret_ref`` (e.g. a password rotation) or pins a new
+    ``host_key_pin`` without changing host/port/user. The digest is short and
+    hashed so the raw secret reference never appears in any cache key or log.
+    """
+    h = hashlib.sha256()
+    h.update((server.ssh_auth or "").encode("utf-8"))
+    h.update(b"\0")
+    h.update((server.ssh_secret_ref or "").encode("utf-8"))
+    h.update(b"\0")
+    h.update((server.host_key_pin or "").encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
 @dataclass
 class _PooledClient:
     client: paramiko.SSHClient
-    server_id: str
+    conn_key: str
+    secret_fingerprint: str
     observed_pin: Optional[str] = None
 
 
 class SSHPool:
-    """Per-process pool of paramiko ``SSHClient`` objects keyed by server id."""
+    """Per-process pool of paramiko ``SSHClient`` objects.
+
+    Keyed by :func:`_conn_key` (``user@host:port``) rather than ``server.id`` so
+    that changing a server row's host/port/user — or its stored secret —
+    correctly triggers a reconnect on the next acquire instead of returning a
+    stale authenticated transport.
+    """
 
     def __init__(self) -> None:
         self._clients: dict[str, _PooledClient] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
-        # Guards the _locks dict itself (creating per-server locks).
+        self._conn_locks: dict[str, asyncio.Lock] = {}
+        # Guards the _conn_locks dict itself (creating per-conn locks).
         self._dict_lock = asyncio.Lock()
 
-    async def _lock_for(self, server_id: str) -> asyncio.Lock:
+    async def _lock_for_conn(self, conn_key: str) -> asyncio.Lock:
         async with self._dict_lock:
-            lock = self._locks.get(server_id)
+            lock = self._conn_locks.get(conn_key)
             if lock is None:
                 lock = asyncio.Lock()
-                self._locks[server_id] = lock
+                self._conn_locks[conn_key] = lock
             return lock
 
     # -- connect (sync, runs in a worker thread) ----------------------------
@@ -192,33 +229,50 @@ class SSHPool:
     # -- public API ----------------------------------------------------------
 
     async def acquire(self, server: Server) -> paramiko.SSHClient:
-        """Acquire (and hold the per-server lock for) an ``SSHClient``.
+        """Acquire (and hold the per-connection lock for) an ``SSHClient``.
 
         The caller MUST eventually call :meth:`release` (or use
         :meth:`session`, which does it automatically). Concurrent acquires
-        for the same server id serialize on the per-server lock so they share
-        the underlying transport.
+        for the same ``(user, host, port)`` serialize on the per-connection
+        lock so they share the underlying transport.
+
+        If the cached transport's stored ``secret_fingerprint`` no longer
+        matches the current ``server`` row (i.e. an admin rotated the
+        password or pinned a new host key without changing host/port/user),
+        the cached client is closed and a fresh connection is established.
         """
-        sid = str(server.id)
-        lock = await self._lock_for(sid)
+        conn_key = _conn_key(server)
+        lock = await self._lock_for_conn(conn_key)
         await lock.acquire()
         try:
-            existing = self._clients.get(sid)
+            current_fp = _secret_fingerprint(server)
+            existing = self._clients.get(conn_key)
             if existing is not None:
                 transport = existing.client.get_transport()
-                if transport is not None and transport.is_active():
+                alive = transport is not None and transport.is_active()
+                if alive and existing.secret_fingerprint == current_fp:
                     return existing.client
-                # Stale — close and fall through to reconnect.
-                logger.debug("stale transport for server %s; reconnecting", sid)
+                if not alive:
+                    logger.debug(
+                        "stale transport for %s; reconnecting", conn_key
+                    )
+                else:
+                    # Credentials/host pin rotated for this same conn_key.
+                    logger.debug(
+                        "credentials drifted for %s; reconnecting", conn_key
+                    )
                 try:
                     existing.client.close()
                 except Exception:  # noqa: BLE001
                     pass
-                self._clients.pop(sid, None)
+                self._clients.pop(conn_key, None)
 
             client, observed = await asyncio.to_thread(self._connect_sync, server)
-            self._clients[sid] = _PooledClient(
-                client=client, server_id=sid, observed_pin=observed
+            self._clients[conn_key] = _PooledClient(
+                client=client,
+                conn_key=conn_key,
+                secret_fingerprint=current_fp,
+                observed_pin=observed,
             )
             return client
         except BaseException:
@@ -228,8 +282,8 @@ class SSHPool:
             raise
 
     async def release(self, server: Server) -> None:
-        """Release the per-server lock held by :meth:`acquire`."""
-        lock = self._locks.get(str(server.id))
+        """Release the per-connection lock held by :meth:`acquire`."""
+        lock = self._conn_locks.get(_conn_key(server))
         if lock is not None and lock.locked():
             lock.release()
 
@@ -250,20 +304,22 @@ class SSHPool:
         Useful for the "add server" flow: connect with ``host_key_pin=None``,
         then read this back and persist it.
         """
-        entry = self._clients.get(str(server.id))
+        entry = self._clients.get(_conn_key(server))
         return entry.observed_pin if entry is not None else None
 
     async def close(self, server: Server) -> None:
-        """Close and forget the transport for a single server."""
-        sid = str(server.id)
-        lock = await self._lock_for(sid)
+        """Force-close and forget the transport for this connection identity."""
+        conn_key = _conn_key(server)
+        lock = await self._lock_for_conn(conn_key)
         async with lock:
-            entry = self._clients.pop(sid, None)
+            entry = self._clients.pop(conn_key, None)
             if entry is not None:
                 try:
                     entry.client.close()
                 except Exception:  # noqa: BLE001
-                    logger.debug("error closing client for %s", sid, exc_info=True)
+                    logger.debug(
+                        "error closing client for %s", conn_key, exc_info=True
+                    )
 
     async def close_all(self) -> None:
         """Close every pooled transport. Call from app shutdown."""
@@ -275,7 +331,7 @@ class SSHPool:
                 entry.client.close()
             except Exception:  # noqa: BLE001
                 logger.debug(
-                    "error closing client for %s", entry.server_id, exc_info=True
+                    "error closing client for %s", entry.conn_key, exc_info=True
                 )
 
 

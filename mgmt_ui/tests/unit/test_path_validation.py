@@ -22,7 +22,24 @@ def test_allows_path_under_base_dir() -> None:
 
 
 def test_allows_base_dir_itself() -> None:
-    _assert_path_in_scope(_FakeServer(), "/root/seller-market/agents")
+    """Writing *to* base_dir as a file is refused.
+
+    ``sftp_atomic_write`` stages ``<path>.tmp`` before renaming, so a write
+    targeting ``base_dir`` itself would stage outside the scoped subtree
+    (``<base_dir>.tmp`` is a sibling, not a child).
+    """
+    with pytest.raises(PathOutOfScopeError):
+        _assert_path_in_scope(_FakeServer(), "/root/seller-market/agents")
+
+
+def test_rejects_root_base_dir() -> None:
+    """A server misconfigured with base_dir='/' must be refused outright."""
+
+    class _RootServer:
+        base_dir = "/"
+
+    with pytest.raises(PathOutOfScopeError):
+        _assert_path_in_scope(_RootServer(), "/etc/passwd")
 
 
 def test_rejects_root_level_config() -> None:

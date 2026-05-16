@@ -20,12 +20,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import posixpath
+import socket
 from typing import Union
 
 import paramiko
 
 from app.models.servers import Server
-from app.services.ssh.exceptions import PathOutOfScopeError, SSHError
+from app.services.ssh.exceptions import (
+    AuthenticationError,
+    PathOutOfScopeError,
+    SSHConnectionError,
+    SSHError,
+)
 from app.services.ssh.pool import ssh_pool
 
 logger = logging.getLogger(__name__)
@@ -39,22 +45,33 @@ _BytesOrStr = Union[bytes, str]
 
 
 def _assert_path_in_scope(server: Server, remote_path: str) -> None:
-    """Refuse any write whose path doesn't start with the server's allowed prefix.
+    """Refuse any write whose path isn't strictly under the server's allowed prefix.
 
-    ``base_dir`` is normalised via :func:`posixpath.normpath` (remote is Linux)
-    and trailing slashes are stripped. ``remote_path`` is likewise normalised,
-    then required to either equal ``base_dir`` or begin with ``base_dir + "/"``.
-    A path of exactly ``base_dir`` is allowed because callers may legitimately
-    write a marker file into the directory itself.
+    ``base_dir`` is normalised via :func:`posixpath.normpath` (remote is Linux).
+    Two extra safeguards over a naive prefix check:
+
+    * **Root ``base_dir`` is rejected outright.** ``normpath("/").rstrip("/")``
+      collapses to ``""``, and ``"" + "/"`` is a prefix of every absolute path
+      — meaning a misconfigured ``base_dir="/"`` would silently allow writes
+      anywhere on the box. We refuse to operate against such a server.
+    * **``remote_path == base_dir`` is rejected.** The atomic-write helper
+      stages content at ``<remote_path>.tmp`` before renaming; if
+      ``remote_path`` *were* ``base_dir``, the staged tmp would live at
+      ``<base_dir>.tmp`` — a sibling of, not under, the scope. Callers must
+      write actual files under ``base_dir``, never to ``base_dir`` itself.
     """
-    base = posixpath.normpath(server.base_dir).rstrip("/")
+    base = posixpath.normpath(server.base_dir)
+    if base in ("/", "", "."):
+        raise PathOutOfScopeError(
+            f"server.base_dir must be a non-root absolute path; got "
+            f"{server.base_dir!r}"
+        )
     norm = posixpath.normpath(remote_path)
-    if norm == base or norm.startswith(base + "/"):
-        return
-    raise PathOutOfScopeError(
-        f"refusing to write outside server scope: {remote_path!r} "
-        f"(base_dir={base!r})"
-    )
+    if not norm.startswith(base + "/"):
+        raise PathOutOfScopeError(
+            f"refusing to write outside server scope: {remote_path!r} "
+            f"(base_dir={base!r})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -112,41 +129,55 @@ async def sftp_atomic_write(
     async with ssh_pool.session(server) as client:
 
         def _write() -> None:
-            sftp: paramiko.SFTPClient = client.open_sftp()
             try:
-                with sftp.file(tmp_path, "wb") as fh:
-                    # Force a flush+fsync at SFTP layer too — paramiko's
-                    # SFTPFile honours .set_pipelined() for speed but here we
-                    # want correctness over throughput.
-                    fh.set_pipelined(False)
-                    fh.write(payload)
-                sftp.chmod(tmp_path, mode)
-            finally:
+                sftp: paramiko.SFTPClient = client.open_sftp()
                 try:
-                    sftp.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                    with sftp.file(tmp_path, "wb") as fh:
+                        # Force a flush+fsync at SFTP layer too — paramiko's
+                        # SFTPFile honours .set_pipelined() for speed but
+                        # here we want correctness over throughput.
+                        fh.set_pipelined(False)
+                        fh.write(payload)
+                    sftp.chmod(tmp_path, mode)
+                finally:
+                    try:
+                        sftp.close()
+                    except Exception:  # noqa: BLE001
+                        pass
 
-            # Atomic same-FS rename + durability flush.
-            cmd = (
-                f"mv -f {_shell_quote(tmp_path)} {_shell_quote(remote_path)} "
-                f"&& sync"
-            )
-            stdin, stdout, stderr = client.exec_command(cmd, timeout=30)
-            try:
-                exit_code = stdout.channel.recv_exit_status()
-                if exit_code != 0:
-                    err = stderr.read().decode("utf-8", errors="replace")
-                    # Best-effort cleanup of the orphan tmp file.
-                    _best_effort_unlink(client, tmp_path)
-                    raise SSHError(
-                        f"atomic rename failed (exit {exit_code}): {err.strip()}"
-                    )
-            finally:
+                # Atomic same-FS rename + durability flush.
+                cmd = (
+                    f"mv -f {_shell_quote(tmp_path)} "
+                    f"{_shell_quote(remote_path)} && sync"
+                )
+                stdin, stdout, stderr = client.exec_command(cmd, timeout=30)
                 try:
-                    stdin.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                    exit_code = stdout.channel.recv_exit_status()
+                    if exit_code != 0:
+                        err = stderr.read().decode("utf-8", errors="replace")
+                        # Best-effort cleanup of the orphan tmp file.
+                        _best_effort_unlink(client, tmp_path)
+                        raise SSHError(
+                            f"atomic rename failed (exit {exit_code}): "
+                            f"{err.strip()}"
+                        )
+                finally:
+                    try:
+                        stdin.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+            except SSHError:
+                # Already a typed SSH-layer error (e.g. the non-zero rename
+                # path above) — propagate without re-wrapping.
+                raise
+            except paramiko.AuthenticationException as exc:
+                raise AuthenticationError(str(exc)) from exc
+            except paramiko.SSHException as exc:
+                raise SSHConnectionError(str(exc)) from exc
+            except (socket.timeout, TimeoutError) as exc:
+                raise SSHConnectionError("sftp timed out") from exc
+            except (socket.error, OSError, IOError) as exc:
+                raise SSHError(f"sftp i/o failed: {exc}") from exc
 
         await asyncio.to_thread(_write)
 
@@ -177,15 +208,24 @@ async def sftp_read_text(server: Server, remote_path: str) -> str:
     async with ssh_pool.session(server) as client:
 
         def _read() -> str:
-            sftp: paramiko.SFTPClient = client.open_sftp()
             try:
-                with sftp.file(remote_path, "rb") as fh:
-                    data = fh.read()
-            finally:
+                sftp: paramiko.SFTPClient = client.open_sftp()
                 try:
-                    sftp.close()
-                except Exception:  # noqa: BLE001
-                    pass
-            return data.decode("utf-8")
+                    with sftp.file(remote_path, "rb") as fh:
+                        data = fh.read()
+                finally:
+                    try:
+                        sftp.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                return data.decode("utf-8")
+            except paramiko.AuthenticationException as exc:
+                raise AuthenticationError(str(exc)) from exc
+            except paramiko.SSHException as exc:
+                raise SSHConnectionError(str(exc)) from exc
+            except (socket.timeout, TimeoutError) as exc:
+                raise SSHConnectionError("sftp timed out") from exc
+            except (socket.error, OSError, IOError) as exc:
+                raise SSHError(f"sftp i/o failed: {exc}") from exc
 
         return await asyncio.to_thread(_read)
