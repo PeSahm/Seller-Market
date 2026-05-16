@@ -11,8 +11,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.models.users import User
+from app.routers import admin as admin_router
+from app.routers import agent as agent_router
 from app.routers import auth as auth_router
-from app.routers import dashboard as dashboard_router
 from app.routers import health as health_router
 from app.security.deps import get_current_user
 from app.settings import get_settings
@@ -46,7 +47,8 @@ def create_app() -> FastAPI:
     # Routers
     app.include_router(health_router.router)
     app.include_router(auth_router.router)
-    app.include_router(dashboard_router.router)
+    app.include_router(admin_router.router)
+    app.include_router(agent_router.router)
 
     # Root: route to admin or agent dashboard based on role.
     @app.get("/", include_in_schema=False)

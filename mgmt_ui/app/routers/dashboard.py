@@ -2,42 +2,31 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.templating import Jinja2Templates
+from fastapi import Request
 
 from app.models.users import User
-from app.security.deps import get_current_user, require_admin
+from fastapi.templating import Jinja2Templates
 
-router = APIRouter()
+# Shared Jinja loader + context helper used by admin.py and agent.py.
+# Kept in this module so per-role routers can import it without each one
+# instantiating its own templates engine.
 
 templates = Jinja2Templates(
     directory=str(Path(__file__).resolve().parent.parent / "templates")
 )
 
 
-def _ctx(request: Request, user: User) -> dict:
+def _ctx(request: Request, user: User, *, current_tab: str = "") -> dict:
+    """Build the standard template context.
+
+    `current_tab` is the URL of the active tab so the shared `page_shell.html`
+    partial can highlight the matching sidebar/tab link.
+    """
     return {
         "request": request,
         "current_user": user,
         "app_name": "Seller-Market Management",
         "app_version": "0.1.0",
         "flashes": [],
+        "current_tab": current_tab,
     }
-
-
-@router.get("/admin/dashboard", include_in_schema=False)
-async def admin_dashboard(
-    request: Request,
-    user: User = Depends(require_admin),
-):
-    return templates.TemplateResponse("admin/dashboard.html", _ctx(request, user))
-
-
-@router.get("/agent/dashboard", include_in_schema=False)
-async def agent_dashboard(
-    request: Request,
-    user: User = Depends(get_current_user),
-):
-    if user.role not in ("agent", "admin"):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
-    return templates.TemplateResponse("agent/dashboard.html", _ctx(request, user))

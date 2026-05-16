@@ -1,58 +1,33 @@
-{% extends "base.html" %}
-{% block title %}Admin &middot; {{ app_name|default("Seller-Market") }}{% endblock %}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Admin overview{% endblock %}
 
-{% block content %}
-<div class="app-shell">
-  <aside class="sidebar">
-    <nav class="sidebar-nav">
-      <a class="sidebar-link sidebar-link--active" href="/">Overview</a>
-      <a class="sidebar-link" href="#">Servers</a>
-      <a class="sidebar-link" href="#">Agents</a>
-      <a class="sidebar-link" href="#">Customers</a>
-      <a class="sidebar-link" href="#">Stacks</a>
-      <a class="sidebar-link" href="#">Settings</a>
-      <a class="sidebar-link" href="#">Audit log</a>
-    </nav>
-  </aside>
+{% block page_body %}
+<h1 class="h1">Admin overview</h1>
 
-  <section class="page">
-    <nav class="tabs" aria-label="Admin sections">
-      <a class="tab tab--active" href="#">Servers</a>
-      <a class="tab" href="#">Agents</a>
-      <a class="tab" href="#">Customers</a>
-      <a class="tab" href="#">Stacks</a>
-      <a class="tab" href="#">Settings</a>
-      <a class="tab" href="#">Audit log</a>
-    </nav>
-
-    <h1 class="h1">Admin overview</h1>
-
-    <div class="card-grid">
-      <article class="card">
-        <h2 class="h3">Servers</h2>
-        <p class="text-muted text-small">(coming soon)</p>
-      </article>
-      <article class="card">
-        <h2 class="h3">Agents</h2>
-        <p class="text-muted text-small">(coming soon)</p>
-      </article>
-      <article class="card">
-        <h2 class="h3">Stacks</h2>
-        <p class="text-muted text-small">(coming soon)</p>
-      </article>
-      <article class="card">
-        <h2 class="h3">Pending customers</h2>
-        <p class="text-muted text-small">(coming soon)</p>
-      </article>
-      <article class="card">
-        <h2 class="h3">Health signals</h2>
-        <p class="text-muted text-small">(coming soon)</p>
-      </article>
-      <article class="card">
-        <h2 class="h3">Recent runs</h2>
-        <p class="text-muted text-small">(coming soon)</p>
-      </article>
-    </div>
-  </section>
+<div class="card-grid">
+  <article class="card">
+    <h2 class="h3">Servers</h2>
+    <p class="text-muted text-small">(coming soon)</p>
+  </article>
+  <article class="card">
+    <h2 class="h3">Agents</h2>
+    <p class="text-muted text-small">(coming soon)</p>
+  </article>
+  <article class="card">
+    <h2 class="h3">Stacks</h2>
+    <p class="text-muted text-small">(coming soon)</p>
+  </article>
+  <article class="card">
+    <h2 class="h3">Pending customers</h2>
+    <p class="text-muted text-small">(coming soon)</p>
+  </article>
+  <article class="card">
+    <h2 class="h3">Health signals</h2>
+    <p class="text-muted text-small">(coming soon)</p>
+  </article>
+  <article class="card">
+    <h2 class="h3">Recent runs</h2>
+    <p class="text-muted text-small">(coming soon)</p>
+  </article>
 </div>
 {% endblock %}
