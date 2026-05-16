@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,14 +25,20 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 
 
-def _is_htmx_or_form(request: Request) -> bool:
-    """Detect HTMX requests or form-encoded posts (vs JSON API clients)."""
-    if request.headers.get("HX-Request", "").lower() == "true":
-        return True
+def _is_htmx(request: Request) -> bool:
+    return request.headers.get("HX-Request", "").lower() == "true"
+
+
+def _is_form_post(request: Request) -> bool:
     content_type = request.headers.get("content-type", "")
     return content_type.startswith(
         ("application/x-www-form-urlencoded", "multipart/form-data")
     )
+
+
+def _is_htmx_or_form(request: Request) -> bool:
+    """Detect HTMX requests or form-encoded posts (vs JSON API clients)."""
+    return _is_htmx(request) or _is_form_post(request)
 
 
 async def _authenticate(db: AsyncSession, username: str, password: str) -> Optional[User]:
@@ -138,9 +144,15 @@ async def login(
 
     logger.info("login_success user_id=%s role=%s", user.id, user.role)
 
-    if htmx_or_form:
+    if _is_htmx(request):
         response = Response(status_code=status.HTTP_204_NO_CONTENT)
         response.headers["HX-Redirect"] = "/"
+        _set_cookie(response, token, max_age)
+        return response
+
+    if _is_form_post(request):
+        # Plain browser form submit (no HTMX) — use 303 to switch to GET on /
+        response = RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
         _set_cookie(response, token, max_age)
         return response
 
