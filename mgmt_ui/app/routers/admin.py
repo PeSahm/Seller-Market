@@ -41,8 +41,20 @@ def _render(request: Request, user: User, template_name: str, current_tab: str):
 async def admin_dashboard(
     request: Request,
     user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    return _render(request, user, "admin/dashboard.html", "/admin/dashboard")
+    """Admin overview. Cards backed by live data when their phase has shipped."""
+    server_rows = await services_servers.list_servers(db)
+    server_summary = {
+        "total": len(server_rows),
+        "online": sum(1 for s in server_rows if s.status == "online"),
+        "offline": sum(1 for s in server_rows if s.status == "offline"),
+        "unknown": sum(1 for s in server_rows if s.status == "unknown"),
+        "unpinned": sum(1 for s in server_rows if not s.host_key_pin),
+    }
+    ctx = _ctx(request, user, current_tab="/admin/dashboard")
+    ctx["server_summary"] = server_summary
+    return templates.TemplateResponse("admin/dashboard.html", ctx)
 
 
 # ---------------------------------------------------------------------------
