@@ -849,8 +849,31 @@ async def admin_customer_delete(
     return _flash_redirect(request, "/admin/customers")
 
 
+def _redact_config_secrets(text: str) -> str:
+    """Replace ``password = ...`` values with ``***REDACTED***``.
+
+    The rendered ``config.ini`` includes plaintext broker passwords; we
+    must never round-trip those through HTML (the Phase 4 secret-hygiene
+    rule). Strip them before passing the text to the diff renderer.
+    Case-insensitive on the key; preserves whitespace around ``=`` so the
+    line still reads naturally in the diff column.
+    """
+    redacted_keys = {"password"}
+    out_lines: list[str] = []
+    for line in text.splitlines():
+        key, sep, _value = line.partition("=")
+        if sep and key.strip().lower() in redacted_keys:
+            out_lines.append(f"{key}={' ' if _value.startswith(' ') else ''}***REDACTED***")
+        else:
+            out_lines.append(line)
+    return "\n".join(out_lines)
+
+
 def _compute_config_diff(before_text: str, after_text: str) -> list[str]:
     """Compute a unified diff between two ``config.ini`` snapshots.
+
+    Inputs should already be passed through :func:`_redact_config_secrets`
+    so no broker passwords reach the template.
 
     We render the diff server-side so the template stays free of Python
     logic. The unified-diff format prefixes each line with ``+``, ``-``,
@@ -931,11 +954,15 @@ async def admin_customer_assign_form(
         stack = result.scalar_one_or_none()
         if stack is not None:
             try:
-                before_text, after_text = (
+                before_raw, after_raw = (
                     await services_stacks.render_config_ini_for_stack_preview(
                         db, stack.id
                     )
                 )
+                # Strip broker passwords before either side reaches the
+                # template — the diff is purely a visual aid.
+                before_text = _redact_config_secrets(before_raw)
+                after_text = _redact_config_secrets(after_raw)
                 diff_lines = _compute_config_diff(before_text, after_text)
             except SSHError as exc:
                 # Server unreachable / SFTP refused / file missing — the
