@@ -1,0 +1,28 @@
+<nav class="nav">
+  <div class="nav-left">
+    <a class="nav-brand" href="/">{{ app_name|default("Seller-Market") }}</a>
+  </div>
+  <div class="nav-right">
+    {% if current_user.role == "admin" %}
+      <span class="nav-user text-small">
+        Admin: <strong dir="auto">{{ current_user.username }}</strong>
+      </span>
+      <a class="nav-link" href="#" title="Switch to an agent context">
+        Acting as agent&hellip;
+      </a>
+    {% else %}
+      <span class="nav-user text-small">
+        Agent: <strong dir="auto">{{ current_user.username }}</strong>
+      </span>
+    {% endif %}
+    <button
+      type="button"
+      class="btn btn--ghost btn--sm"
+      hx-post="/auth/logout"
+      hx-target="body"
+      hx-swap="outerHTML"
+    >
+      Sign out
+    </button>
+  </div>
+</nav>

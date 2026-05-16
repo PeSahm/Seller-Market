@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token|default('') }}">
+  <title>{% block title %}{{ app_name|default("Seller-Market") }}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="/static/js/htmx.min.js" defer></script>
+  <script src="/static/js/app.js" defer></script>
+  <meta
+    name="htmx-config"
+    content='{"defaultSwapStyle":"innerHTML","includeIndicatorStyles":false}'>
+</head>
+<body
+  hx-headers='{"X-Requested-With": "HTMX"}'
+  hx-ext=""
+>
+  {% if current_user %}
+    <header class="app-header">
+      {% include "partials/nav.html" %}
+    </header>
+  {% endif %}
+
+  <div class="flash-region" id="flash-region">
+    {% include "partials/flash.html" ignore missing %}
+  </div>
+
+  <main class="app-main">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="app-footer">
+    <span class="text-small text-muted">
+      {{ app_name|default("Seller-Market") }} &middot; v{{ app_version|default("dev") }}
+    </span>
+  </footer>
+</body>
+</html>

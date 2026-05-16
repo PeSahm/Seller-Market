@@ -1,0 +1,60 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    # ports:
+    #   - "5432:5432"  # Uncomment only for local debugging (DO NOT expose in prod)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      MGMT_SECRET_KEY: ${MGMT_SECRET_KEY}
+      MGMT_FERNET_KEY_PART1: ${MGMT_FERNET_KEY_PART1}
+      DEFAULT_OCR_SERVICE_URL: ${DEFAULT_OCR_SERVICE_URL:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ~/.ssh:/home/app/.ssh:ro
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      MGMT_SECRET_KEY: ${MGMT_SECRET_KEY}
+      MGMT_FERNET_KEY_PART1: ${MGMT_FERNET_KEY_PART1}
+      DEFAULT_OCR_SERVICE_URL: ${DEFAULT_OCR_SERVICE_URL:-}
+    command: ["python", "-m", "mgmt_ui.workers.ingest_runner"]
+    volumes:
+      - ~/.ssh:/home/app/.ssh:ro
+
+volumes:
+  pg_data:
+
+networks:
+  default:
+    name: mgmt_ui_net
