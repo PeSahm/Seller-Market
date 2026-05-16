@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # Cookies
     cookie_secure: bool = False  # set True in production
 
+    # Background workers
+    enable_health_worker: bool = Field(default=True, alias="ENABLE_HEALTH_WORKER")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -1,0 +1,105 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Add server{% endblock %}
+
+{% block page_body %}
+<h1 class="h1">Add server</h1>
+<p class="text-muted text-small">
+  Declare a new trading server. The credentials you provide will be used for SSH
+  + SFTP only. Private keys are stored on the mgmt VPS filesystem (chmod 600);
+  passwords are Fernet-encrypted at rest.
+</p>
+
+{% if form_error %}
+<div class="flash flash--error">
+  <strong>✗ Invalid input</strong>
+  <p class="text-small">{{ form_error }}</p>
+</div>
+{% endif %}
+
+{% set fv = form_values|default({}) %}
+
+<form class="server-form" method="post" action="/admin/servers">
+  <div class="field">
+    <label class="label" for="name">Friendly name</label>
+    <input class="input" id="name" name="name" required dir="auto"
+           value="{{ fv.name|default('') }}"
+           placeholder="e.g. tehran-vps-2" maxlength="120">
+  </div>
+
+  <div class="field-row">
+    <div class="field field--grow">
+      <label class="label" for="host">Host / IP</label>
+      <input class="input" id="host" name="host" required
+             value="{{ fv.host|default('') }}"
+             placeholder="1.2.3.4 or vps.example.com" maxlength="255">
+    </div>
+    <div class="field field--narrow">
+      <label class="label" for="ssh_port">Port</label>
+      <input class="input" id="ssh_port" name="ssh_port" type="number"
+             value="{{ fv.ssh_port|default(22) }}" min="1" max="65535">
+    </div>
+  </div>
+
+  <div class="field-row">
+    <div class="field field--grow">
+      <label class="label" for="ssh_user">SSH user</label>
+      <input class="input" id="ssh_user" name="ssh_user" required
+             value="{{ fv.ssh_user|default('') }}"
+             placeholder="root or a non-root user with sudo" maxlength="64">
+    </div>
+    <div class="field field--grow">
+      <label class="label" for="base_dir">Base directory</label>
+      <input class="input" id="base_dir" name="base_dir"
+             value="{{ fv.base_dir|default('/root/seller-market/agents') }}" maxlength="512">
+      <p class="text-small text-muted">
+        Mgmt UI will only create files under this path. The existing
+        <code>/root/seller-market/</code> is left untouched.
+      </p>
+    </div>
+  </div>
+
+  <fieldset class="field">
+    <legend class="label">Authentication</legend>
+
+    {% set auth_mode = fv.ssh_auth|default('pubkey') %}
+    <label class="radio-row">
+      <input type="radio" name="ssh_auth" value="pubkey"
+             {{ 'checked' if auth_mode == 'pubkey' else '' }}
+             onclick="document.getElementById('pubkey-field').hidden = false;
+                      document.getElementById('password-field').hidden = true;">
+      Private key (recommended)
+    </label>
+    <label class="radio-row">
+      <input type="radio" name="ssh_auth" value="password"
+             {{ 'checked' if auth_mode == 'password' else '' }}
+             onclick="document.getElementById('pubkey-field').hidden = true;
+                      document.getElementById('password-field').hidden = false;">
+      Password
+    </label>
+
+    <div id="pubkey-field" class="field" {{ 'hidden' if auth_mode != 'pubkey' else '' }}>
+      <label class="label" for="private_key">Private key (PEM / OpenSSH)</label>
+      <textarea class="input" id="private_key" name="private_key" rows="8"
+                placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+      <p class="text-small text-muted">Stored at <code>./.ssh_mgmt_ui/sm_&lt;server_id&gt;</code> chmod 600.</p>
+    </div>
+
+    <div id="password-field" class="field" {{ 'hidden' if auth_mode != 'password' else '' }}>
+      <label class="label" for="password">Password</label>
+      <input class="input" id="password" name="password" type="password" autocomplete="off">
+      <p class="text-small text-muted">Encrypted at rest with split-key Fernet.</p>
+    </div>
+  </fieldset>
+
+  <p class="text-muted text-small">
+    The first time you click "Test connection" on this server, its host-key SHA256
+    will be pinned automatically. Subsequent connects that present a different
+    key will be refused (MITM protection).
+  </p>
+
+  <div class="form-actions">
+    <a class="btn btn--ghost" href="/admin/servers">Cancel</a>
+    <button class="btn btn--primary" type="submit">Add server</button>
+  </div>
+</form>
+{% endblock %}

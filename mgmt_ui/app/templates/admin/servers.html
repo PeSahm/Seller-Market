@@ -2,6 +2,62 @@
 {% block page_title %}Servers{% endblock %}
 
 {% block page_body %}
-<h1 class="h1">Servers</h1>
-<p class="text-muted text-small">Coming in Phase 2 &mdash; see plan.</p>
+<div class="page-header">
+  <h1 class="h1">Servers</h1>
+  <a class="btn btn--primary" href="/admin/servers/new">+ Add server</a>
+</div>
+
+<p class="text-muted text-small">
+  Trading servers managed by this UI. Each server hosts one or more per-agent Docker stacks
+  under <code>{{ '{{base_dir}}' }}</code>; the existing root-level <code>/root/seller-market/</code> deployment
+  is left untouched.
+</p>
+
+{% if not servers %}
+<div class="card">
+  <p class="text-muted">No servers yet.</p>
+  <p class="text-small text-muted">Click <strong>+ Add server</strong> to declare your first trading server.</p>
+</div>
+{% else %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Host</th>
+      <th>SSH user</th>
+      <th>Auth</th>
+      <th>Status</th>
+      <th>Last seen</th>
+      <th>Pinned</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in servers %}
+    <tr>
+      <td><a href="/admin/servers/{{ s.id }}" dir="auto">{{ s.name }}</a></td>
+      <td><code class="text-small">{{ s.host }}:{{ s.ssh_port }}</code></td>
+      <td>{{ s.ssh_user }}</td>
+      <td><span class="badge badge--{{ 'pending' if s.ssh_auth == 'password' else 'up' }}">{{ s.ssh_auth }}</span></td>
+      <td>
+        {% if s.status == 'online' %}<span class="badge badge--up">online</span>
+        {% elif s.status == 'offline' %}<span class="badge badge--down">offline</span>
+        {% else %}<span class="badge badge--pending">unknown</span>
+        {% endif %}
+      </td>
+      <td class="text-small text-muted">
+        {% if s.last_seen_at %}{{ s.last_seen_at.strftime('%Y-%m-%d %H:%M UTC') }}{% else %}—{% endif %}
+      </td>
+      <td>
+        {% if s.host_key_pin %}<span class="badge badge--up" title="{{ s.host_key_pin }}">✓ pinned</span>
+        {% else %}<span class="badge badge--pending">no pin</span>{% endif %}
+      </td>
+      <td>
+        <a class="btn btn--ghost btn--sm" href="/admin/servers/{{ s.id }}">view →</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 {% endblock %}

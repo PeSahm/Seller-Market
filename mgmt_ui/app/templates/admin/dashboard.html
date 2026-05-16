@@ -5,29 +5,89 @@
 <h1 class="h1">Admin overview</h1>
 
 <div class="card-grid">
+  {# Servers — live data from Phase 2 #}
   <article class="card">
-    <h2 class="h3">Servers</h2>
-    <p class="text-muted text-small">(coming soon)</p>
+    <div class="card-header">
+      <h2 class="h3">Servers</h2>
+      <a class="btn btn--ghost btn--sm" href="/admin/servers">view all →</a>
+    </div>
+    {% if server_summary.total == 0 %}
+      <p class="text-muted text-small">No servers yet.</p>
+      <p class="text-small"><a href="/admin/servers/new">+ Add your first server</a></p>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-value">{{ server_summary.total }}</div>
+          <div class="metric-label text-muted text-small">total</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--up">{{ server_summary.online }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">online</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--down">{{ server_summary.offline }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">offline</div>
+        </div>
+        {% if server_summary.unknown %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--pending">{{ server_summary.unknown }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">unchecked</div>
+        </div>
+        {% endif %}
+      </div>
+      {% if server_summary.unpinned %}
+      <p class="text-small text-muted">
+        ⚠ {{ server_summary.unpinned }} server{% if server_summary.unpinned != 1 %}s{% endif %}
+        without a pinned host key — run "Test connection" to TOFU-pin.
+      </p>
+      {% endif %}
+    {% endif %}
   </article>
+
+  {# Agents — Phase 4 #}
   <article class="card">
-    <h2 class="h3">Agents</h2>
-    <p class="text-muted text-small">(coming soon)</p>
+    <div class="card-header">
+      <h2 class="h3">Agents</h2>
+    </div>
+    <p class="text-muted text-small">Coming in Phase 4 — agent accounts, customer assignment, distribution policies.</p>
   </article>
+
+  {# Stacks — Phase 3 #}
   <article class="card">
-    <h2 class="h3">Stacks</h2>
-    <p class="text-muted text-small">(coming soon)</p>
+    <div class="card-header">
+      <h2 class="h3">Stacks</h2>
+    </div>
+    <p class="text-muted text-small">Coming in Phase 3 — per-agent Docker stacks deployed to each server.</p>
   </article>
+
+  {# Pending customers — Phase 4 #}
   <article class="card">
-    <h2 class="h3">Pending customers</h2>
-    <p class="text-muted text-small">(coming soon)</p>
+    <div class="card-header">
+      <h2 class="h3">Pending customers</h2>
+    </div>
+    <p class="text-muted text-small">Coming in Phase 4 — admin inbox for agents' newly-declared customers awaiting server assignment.</p>
   </article>
+
+  {# Health signals — Phase 8 #}
   <article class="card">
-    <h2 class="h3">Health signals</h2>
-    <p class="text-muted text-small">(coming soon)</p>
+    <div class="card-header">
+      <h2 class="h3">Health signals</h2>
+    </div>
+    <p class="text-muted text-small">Coming in Phase 8 — broker 429s, captcha failures, clock-skew warnings.</p>
   </article>
+
+  {# Recent runs — Phase 6 #}
   <article class="card">
-    <h2 class="h3">Recent runs</h2>
-    <p class="text-muted text-small">(coming soon)</p>
+    <div class="card-header">
+      <h2 class="h3">Recent runs</h2>
+    </div>
+    <p class="text-muted text-small">Coming in Phase 6 — cache_warmup / run_trading executions, scheduled + manual.</p>
   </article>
 </div>
 {% endblock %}

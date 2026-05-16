@@ -244,3 +244,36 @@ button { font: inherit; }
 .login-header .h2 { margin-bottom: var(--s1); }
 .login-form .error:empty { display: none; }
 .login-form .error { margin: var(--s2) 0; }
+
+/* === Phase 2 server pages === */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.header-actions { display: flex; gap: 8px; align-items: center; }
+.field-row { display: flex; gap: 16px; }
+.field--grow { flex: 1; }
+.field--narrow { flex: 0 0 120px; }
+.radio-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+.server-form { max-width: 720px; }
+.form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.server-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+@media (max-width: 800px) { .server-detail-grid { grid-template-columns: 1fr; } }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 8px 16px; margin: 8px 0; }
+.kv dt { color: var(--fg-muted); font-size: 0.9em; }
+.kv dd { margin: 0; }
+.kv--inline { grid-template-columns: max-content 1fr; }
+.test-result-slot:empty { display: none; }
+.test-result-slot { margin: 16px 0; }
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator { display: inline; }
+
+/* === Dashboard summary cards === */
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.metric-row { display: flex; gap: 24px; margin: 8px 0 12px; flex-wrap: wrap; }
+.metric { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.metric-value { font-size: 1.5em; font-weight: 600; line-height: 1; }
+.metric-label { text-transform: uppercase; letter-spacing: 0.04em; }
