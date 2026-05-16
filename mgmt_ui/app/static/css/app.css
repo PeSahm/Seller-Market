@@ -260,8 +260,8 @@ button { font: inherit; }
 .radio-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
 .server-form { max-width: 720px; }
 .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
-.card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
-@media (max-width: 800px) { .card-grid { grid-template-columns: 1fr; } }
+.server-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+@media (max-width: 800px) { .server-detail-grid { grid-template-columns: 1fr; } }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 8px 16px; margin: 8px 0; }
 .kv dt { color: var(--fg-muted); font-size: 0.9em; }
 .kv dd { margin: 0; }

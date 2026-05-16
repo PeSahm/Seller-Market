@@ -61,27 +61,30 @@
   <fieldset class="field">
     <legend class="label">Authentication</legend>
 
+    {% set auth_mode = fv.ssh_auth|default('pubkey') %}
     <label class="radio-row">
-      <input type="radio" name="ssh_auth" value="pubkey" checked
+      <input type="radio" name="ssh_auth" value="pubkey"
+             {{ 'checked' if auth_mode == 'pubkey' else '' }}
              onclick="document.getElementById('pubkey-field').hidden = false;
                       document.getElementById('password-field').hidden = true;">
       Private key (recommended)
     </label>
     <label class="radio-row">
       <input type="radio" name="ssh_auth" value="password"
+             {{ 'checked' if auth_mode == 'password' else '' }}
              onclick="document.getElementById('pubkey-field').hidden = true;
                       document.getElementById('password-field').hidden = false;">
       Password
     </label>
 
-    <div id="pubkey-field" class="field">
+    <div id="pubkey-field" class="field" {{ 'hidden' if auth_mode != 'pubkey' else '' }}>
       <label class="label" for="private_key">Private key (PEM / OpenSSH)</label>
       <textarea class="input" id="private_key" name="private_key" rows="8"
                 placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
       <p class="text-small text-muted">Stored at <code>./.ssh_mgmt_ui/sm_&lt;server_id&gt;</code> chmod 600.</p>
     </div>
 
-    <div id="password-field" class="field" hidden>
+    <div id="password-field" class="field" {{ 'hidden' if auth_mode != 'password' else '' }}>
       <label class="label" for="password">Password</label>
       <input class="input" id="password" name="password" type="password" autocomplete="off">
       <p class="text-small text-muted">Encrypted at rest with split-key Fernet.</p>
