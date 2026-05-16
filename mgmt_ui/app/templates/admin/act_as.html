@@ -1,0 +1,43 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Act as agent{% endblock %}
+
+{% block page_body %}
+<h1 class="h1">Act as agent</h1>
+<p class="text-muted text-small">
+  Pick an agent to view the UI from their perspective. Full impersonation
+  (with all admin-as-agent capabilities) lands in Phase 4 &mdash; see plan.
+</p>
+
+{% if agents %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>Username</th>
+      <th>Created</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for agent in agents %}
+    <tr>
+      <td dir="auto">{{ agent.username }}</td>
+      <td class="text-muted text-small">{{ agent.created_at.strftime("%Y-%m-%d") }}</td>
+      <td>
+        <a class="btn btn--ghost btn--sm" href="/agent/dashboard?as={{ agent.id }}">
+          View as &rarr;
+        </a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="card">
+  <p class="text-muted">No agents have been created yet.</p>
+  <p class="text-small text-muted">
+    Agent CRUD will be available in Phase 4. Until then, admins manage every customer
+    directly through the Customers tab.
+  </p>
+</div>
+{% endif %}
+{% endblock %}

@@ -8,7 +8,10 @@ until their phase is implemented (see README/plan).
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db import get_db
 from app.models.users import User
 from app.routers.dashboard import _ctx, templates
 from app.security.deps import require_admin
@@ -76,3 +79,22 @@ async def admin_audit(
     user: User = Depends(require_admin),
 ):
     return _render(request, user, "admin/audit.html", "/admin/audit")
+
+
+@router.get("/act-as")
+async def admin_act_as(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """List agents an admin can view-as. Real impersonation lands in Phase 4."""
+    stmt = (
+        select(User)
+        .where(User.role == "agent", User.deleted_at.is_(None))
+        .order_by(User.username)
+    )
+    result = await db.execute(stmt)
+    agents = result.scalars().all()
+    ctx = _ctx(request, user, current_tab="/admin/act-as")
+    ctx["agents"] = agents
+    return templates.TemplateResponse("admin/act_as.html", ctx)
