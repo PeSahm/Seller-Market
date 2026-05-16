@@ -150,8 +150,10 @@ async def test_render_includes_one_section_per_customer(
 
     assert "[a11111111_c22222222_bbi_IRO3AYHZ0001]" in out
     assert "[a33333333_c44444444_mfd_IRO1FOLD0001]" in out
-    # Exactly two customer sections plus the [DEFAULT] header.
-    assert out.count("\n[") + (1 if out.startswith("[") else 0) == 3
+    # Exactly two customer sections — no [DEFAULT] header anymore (the original
+    # trading bot doesn't expect one).
+    assert out.count("\n[") + (1 if out.startswith("[") else 0) == 2
+    assert "[DEFAULT]" not in out
 
 
 # ---------------------------------------------------------------------------

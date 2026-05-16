@@ -399,12 +399,23 @@ async def admin_agent_detail(
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Render the per-agent detail page."""
+    """Render the per-agent detail page with live customer + stack data."""
     agent = await services_agents.get_agent(db, agent_id)
     if agent is None or agent.role != "agent":
         raise HTTPException(status_code=404, detail="agent not found")
+    agent_customers = await services_customers.list_customers(
+        db, agent_id=agent_id, include_disabled=False,
+    )
+    all_stacks = await services_stacks.list_stacks(db)
+    agent_stacks_list = [s for s in all_stacks if s.agent_id == agent_id]
+    servers_by_id = {
+        s.id: s for s in await services_servers.list_servers(db)
+    }
     ctx = _ctx(request, user, current_tab="/admin/agents")
     ctx["agent"] = agent
+    ctx["agent_customers"] = agent_customers
+    ctx["agent_stacks"] = agent_stacks_list
+    ctx["servers_by_id"] = servers_by_id
     return templates.TemplateResponse("admin/agent_detail.html", ctx)
 
 
@@ -476,7 +487,7 @@ async def admin_customers(
     request: Request,
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    agent_id: Optional[UUID] = None,
+    agent_id: Optional[str] = None,
     status: Optional[str] = None,
     broker: Optional[str] = None,
 ):
@@ -487,10 +498,26 @@ async def admin_customers(
     include soft-deleted agents in the lookup dict because a customer can
     outlive its agent (Phase 9 cleanup); we still want to render *which*
     deleted agent owned them.
+
+    All three filter args accept the empty string (sent by an unselected
+    ``<select><option value="">…</option>`` from the filter bar) and treat
+    it as "no filter". ``agent_id`` is typed as ``str`` rather than ``UUID``
+    here so an empty value doesn't fail pydantic parsing and 422 the page
+    into JSON; we parse it manually below.
     """
+    agent_uuid: Optional[UUID] = None
+    if agent_id:
+        try:
+            agent_uuid = UUID(agent_id)
+        except ValueError:
+            # Bad UUID in the query string — treat as "no filter" rather
+            # than 422 the page.
+            agent_uuid = None
+    status = status or None
+    broker = broker or None
     customers = await services_customers.list_customers(
         db,
-        agent_id=agent_id,
+        agent_id=agent_uuid,
         status=status,
         broker=broker,
         include_disabled=False,
