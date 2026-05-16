@@ -1,0 +1,9 @@
+{% if flashes %}
+  <ul class="flash-list" role="status" aria-live="polite">
+    {% for f in flashes %}
+      <li class="flash flash--{{ f.level|default('info') }}">
+        <span class="flash-message" dir="auto">{{ f.message }}</span>
+      </li>
+    {% endfor %}
+  </ul>
+{% endif %}

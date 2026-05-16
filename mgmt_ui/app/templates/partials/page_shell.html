@@ -1,0 +1,78 @@
+{#
+  Shared page shell: top nav (from base.html) + sidebar with role-aware tabs
+  + an inner page area that hosts the `content` block.
+
+  Inputs from the rendering context:
+    - current_user: the authenticated user (must have a `role` attribute).
+    - current_tab:  the URL of the active tab, e.g. "/admin/servers".
+                    Used to set the `.tab--active` / `.sidebar-link--active`
+                    modifier on the matching link.
+
+  Tabs are picked from the user role:
+    - admin -> admin tab list
+    - anything else (agent) -> agent tab list
+
+  Usage from a page template:
+
+      {% extends "partials/page_shell.html" %}
+      {% block page_title %}Servers{% endblock %}
+      {% block content %}
+        <h1 class="h1">Servers</h1>
+        ...
+      {% endblock %}
+#}
+{% extends "base.html" %}
+
+{% set _current_tab = current_tab|default("") %}
+
+{% if current_user and current_user.role == "admin" %}
+  {% set _tabs = [
+    ("/admin/dashboard", "Dashboard"),
+    ("/admin/servers",   "Servers"),
+    ("/admin/agents",    "Agents"),
+    ("/admin/customers", "Customers"),
+    ("/admin/stacks",    "Stacks"),
+    ("/admin/settings",  "Settings"),
+    ("/admin/audit",     "Audit log"),
+  ] %}
+  {% set _tabs_label = "Admin sections" %}
+{% else %}
+  {% set _tabs = [
+    ("/agent/dashboard", "Dashboard"),
+    ("/agent/customers", "My customers"),
+    ("/agent/stacks",    "My stacks"),
+    ("/agent/history",   "Trade history"),
+    ("/agent/logs",      "Run logs"),
+  ] %}
+  {% set _tabs_label = "Agent sections" %}
+{% endif %}
+
+{% block title %}{% block page_title %}{{ app_name|default("Seller-Market") }}{% endblock %} &middot; {{ app_name|default("Seller-Market") }}{% endblock %}
+
+{% block content %}
+<div class="app-shell">
+  <aside class="sidebar">
+    <nav class="sidebar-nav" aria-label="{{ _tabs_label }} (sidebar)">
+      {% for url, label in _tabs %}
+        <a
+          class="sidebar-link{% if url == _current_tab %} sidebar-link--active{% endif %}"
+          href="{{ url }}"
+        >{{ label }}</a>
+      {% endfor %}
+    </nav>
+  </aside>
+
+  <section class="page">
+    <nav class="tabs" aria-label="{{ _tabs_label }}">
+      {% for url, label in _tabs %}
+        <a
+          class="tab{% if url == _current_tab %} tab--active{% endif %}"
+          href="{{ url }}"
+        >{{ label }}</a>
+      {% endfor %}
+    </nav>
+
+    {% block page_body %}{% endblock %}
+  </section>
+</div>
+{% endblock %}

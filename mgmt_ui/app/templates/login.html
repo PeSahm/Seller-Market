@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Sign in &middot; {{ app_name|default("Seller-Market") }}{% endblock %}
+
+{% block content %}
+<div class="login-shell">
+  <div class="card login-card">
+    <div class="login-header">
+      <h1 class="h2">{{ app_name|default("Seller-Market") }}</h1>
+      <p class="text-muted text-small">Manage your Seller-Market fleet</p>
+    </div>
+
+    <form
+      class="login-form"
+      method="post"
+      action="/auth/login"
+      hx-post="/auth/login"
+      hx-target="#login-error"
+      hx-swap="innerHTML"
+    >
+      <div class="field">
+        <label class="label" for="username">Username</label>
+        <input
+          class="input"
+          type="text"
+          id="username"
+          name="username"
+          autocomplete="username"
+          dir="auto"
+          required
+          autofocus
+        >
+      </div>
+
+      <div class="field">
+        <label class="label" for="password">Password</label>
+        <input
+          class="input"
+          type="password"
+          id="password"
+          name="password"
+          autocomplete="current-password"
+          required
+        >
+      </div>
+
+      <div id="login-error" class="error">
+        {% if error %}<div class="flash flash--error">{{ error }}</div>{% endif %}
+      </div>
+
+      <button type="submit" class="btn btn--primary btn--block">Sign in</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

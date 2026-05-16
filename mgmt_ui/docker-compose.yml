@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "15432:5432"  # Host 15432 to avoid conflicts with local Postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      MGMT_SECRET_KEY: ${MGMT_SECRET_KEY}
+      MGMT_FERNET_KEY_PART1: ${MGMT_FERNET_KEY_PART1}
+      DEFAULT_OCR_SERVICE_URL: ${DEFAULT_OCR_SERVICE_URL:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      # Dedicated SSH key directory — see README. Do NOT mount ~/.ssh:
+      # it would expose all host SSH keys (personal, GitHub deploy keys, etc.)
+      # to the container, violating least privilege.
+      - ./.ssh_mgmt_ui:/home/app/.ssh:ro
+
+  # worker service is enabled in Phase 7 (trade-result ingestor); kept commented
+  # out here so `docker compose up` works during Phase 1 bootstrap.
+  # worker:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   restart: unless-stopped
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   environment:
+  #     DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  #     MGMT_SECRET_KEY: ${MGMT_SECRET_KEY}
+  #     MGMT_FERNET_KEY_PART1: ${MGMT_FERNET_KEY_PART1}
+  #     DEFAULT_OCR_SERVICE_URL: ${DEFAULT_OCR_SERVICE_URL:-}
+  #   command: ["python", "-m", "workers.ingest_runner"]
+  #   volumes:
+  #     - ./.ssh_mgmt_ui:/home/app/.ssh:ro
+
+volumes:
+  pg_data:
+
+networks:
+  default:
+    name: mgmt_ui_net
