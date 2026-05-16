@@ -100,21 +100,44 @@ async def sftp_atomic_write(
     *,
     mode: int = 0o644,
 ) -> None:
-    """Write ``content`` to ``remote_path`` atomically.
+    """Write ``content`` to ``remote_path`` in-place (truncate + rewrite).
+
+    **Why not tmp + rename?** The earlier implementation wrote to
+    ``<remote_path>.tmp`` and then ``mv -f``'d it into place, giving us a
+    crisp atomic-rename guarantee. That guarantee is great for general
+    POSIX usage but is **broken by docker single-file bind mounts**: a
+    rename swaps the destination inode, while the container's bind mount
+    is stapled to the original inode at ``docker run`` time and never
+    re-resolves. Result: the host file updates, but every container
+    forever reads the original frozen content.
+
+    The bot's ``load_config`` already wraps the JSON parse in try/except
+    and falls back to ``{"enabled": false, "jobs": []}`` for one tick on
+    a partial read — so a torn read window of a few hundred microseconds
+    is harmless. The next 1-second poll picks up the complete file.
 
     Strategy:
 
-    1. Upload bytes to ``<remote_path>.tmp`` via SFTP, ``chmod`` to ``mode``.
-    2. ``mv -f <tmp> <final> && sync`` over a single exec channel — a same-FS
-       rename is a single ``renameat2`` syscall, hence atomic on Linux.
-    3. ``sync`` ensures the rename is durable before we return.
+    1. ``sftp.file(remote_path, "wb")`` opens the EXISTING inode with
+       ``O_WRONLY | O_TRUNC | O_CREAT`` — same inode as before, just
+       truncated.
+    2. Write the new payload to that inode.
+    3. ``chmod`` the (re-used) inode.
+    4. SFTP-close, then ``sync`` over a separate exec to flush to disk.
 
-    SFTP also exposes a ``posix_rename`` extension, but invoking ``mv -f``
-    gives us identical semantics plus the ``sync`` at no extra cost.
+    Trade-offs vs. the old tmp+rename:
+
+    * **Visible to docker bind-mounted containers** ✓ (the main reason)
+    * **Atomicity** ✗ — readers can see a partial / empty file during the
+      ~ms write window. Bot tolerates this via try/except + 1-second
+      retry. Don't use this helper for files where partial reads would
+      be catastrophic.
+    * **Crash resilience** ≈ similar — both strategies can lose a write
+      to a power cut; the ``sync`` at the end is the same.
 
     Raises:
         PathOutOfScopeError: if ``remote_path`` is outside ``server.base_dir``.
-        SSHError: if the temp upload or rename fails.
+        SSHError: if the SFTP write or chmod fails.
     """
     _assert_path_in_scope(server, remote_path)
 
@@ -124,51 +147,38 @@ async def sftp_atomic_write(
     else:
         payload = content
 
-    tmp_path = remote_path + ".tmp"
-
     async with ssh_pool.session(server) as client:
 
         def _write() -> None:
             try:
                 sftp: paramiko.SFTPClient = client.open_sftp()
                 try:
-                    with sftp.file(tmp_path, "wb") as fh:
-                        # Force a flush+fsync at SFTP layer too — paramiko's
-                        # SFTPFile honours .set_pipelined() for speed but
-                        # here we want correctness over throughput.
+                    # 'wb' = O_WRONLY|O_CREAT|O_TRUNC — re-uses the
+                    # existing inode if the file is already there, which
+                    # is the whole point of this rewrite. Paramiko's
+                    # set_pipelined(False) trades a tiny bit of throughput
+                    # for a stricter "data hit the wire" guarantee.
+                    with sftp.file(remote_path, "wb") as fh:
                         fh.set_pipelined(False)
                         fh.write(payload)
-                    sftp.chmod(tmp_path, mode)
+                    sftp.chmod(remote_path, mode)
                 finally:
                     try:
                         sftp.close()
                     except Exception:  # noqa: BLE001
                         pass
 
-                # Atomic same-FS rename + durability flush.
-                cmd = (
-                    f"mv -f {_shell_quote(tmp_path)} "
-                    f"{_shell_quote(remote_path)} && sync"
-                )
-                stdin, stdout, stderr = client.exec_command(cmd, timeout=30)
+                # Best-effort durability flush so a power cut right after
+                # the SFTP close doesn't lose the write.
+                stdin, stdout, stderr = client.exec_command("sync", timeout=30)
                 try:
-                    exit_code = stdout.channel.recv_exit_status()
-                    if exit_code != 0:
-                        err = stderr.read().decode("utf-8", errors="replace")
-                        # Best-effort cleanup of the orphan tmp file.
-                        _best_effort_unlink(client, tmp_path)
-                        raise SSHError(
-                            f"atomic rename failed (exit {exit_code}): "
-                            f"{err.strip()}"
-                        )
+                    stdout.channel.recv_exit_status()
                 finally:
                     try:
                         stdin.close()
                     except Exception:  # noqa: BLE001
                         pass
             except SSHError:
-                # Already a typed SSH-layer error (e.g. the non-zero rename
-                # path above) — propagate without re-wrapping.
                 raise
             except paramiko.AuthenticationException as exc:
                 raise AuthenticationError(str(exc)) from exc

@@ -55,13 +55,6 @@ def test_compose_yaml_shape() -> None:
     assert f"image: {AGENT_IMAGE}" in out
     assert f"OCR_SERVICE_URL={OCR_URL}" in out
 
-    expected_cmd = (
-        "python -u -c "
-        '"import logging,sys; logging.basicConfig(level=logging.INFO,stream=sys.stdout); '
-        "from scheduler import JobScheduler; JobScheduler('/app/scheduler_config.json').run()\""
-    )
-    assert expected_cmd in out
-
     # Plan invariants: no host-port mapping, no telegram leakage.
     assert "ports:" not in out
     assert "TELEGRAM_BOT_TOKEN" not in out
@@ -73,6 +66,21 @@ def test_compose_yaml_shape() -> None:
     assert "services" in parsed
     assert "trading-bot" in parsed["services"]
     assert parsed["name"] == f"sm-agent-{FAKE_UUID}"
+
+    # ``command`` must be a YAML list (exec form) so docker compose passes
+    # argv directly to the container without going through ``/bin/sh -c "…"``
+    # — the embedded single + double quotes in the Python bootstrap break
+    # shell parsing when emitted as a plain string.
+    cmd = parsed["services"]["trading-bot"]["command"]
+    assert isinstance(cmd, list), f"command must be a list, got {type(cmd).__name__}"
+    assert cmd[0:3] == ["python", "-u", "-c"]
+    # Last element is the python -c argument: a single string carrying the
+    # scheduler bootstrap. We pin only the substrings that matter so trivial
+    # whitespace tweaks don't break the test.
+    bootstrap = cmd[3]
+    assert "JobScheduler('/app/scheduler_config.json').run()" in bootstrap
+    assert "import logging" in bootstrap
+    assert "basicConfig" in bootstrap
 
 
 def test_compose_yaml_no_telegram_no_ocr_sidecar() -> None:
