@@ -41,7 +41,7 @@
       <th>Broker</th>
       <th>ISIN</th>
       <th>Side</th>
-      <th>Assign to…</th>
+      <th></th>
     </tr>
   </thead>
   <tbody>
@@ -66,19 +66,13 @@
         {% else %}<span class="badge badge--down">Sell</span>{% endif %}
       </td>
       <td>
-        <form method="post" action="/admin/customers/{{ c.id }}/assign"
-              style="display: flex; gap: 8px; align-items: center;">
-          <select class="input" name="server_id" required>
-            <option value="" disabled selected>— server —</option>
-            {% for s in servers %}
-              <option value="{{ s.id }}">
-                {{ s.name }}{% if s.status == 'offline' %} (offline){% endif %}
-              </option>
-            {% endfor %}
-          </select>
-          <button class="btn btn--primary btn--sm" type="submit">Assign</button>
-          <a class="btn btn--ghost btn--sm" href="/admin/customers/{{ c.id }}/assign">Preview…</a>
-        </form>
+        {# Phase 4 requires the diff-preview flow before any push. The
+           inbox routes through /admin/customers/{id}/assign which shows
+           the proposed config.ini change side-by-side with the current
+           remote file, then asks for explicit confirmation. #}
+        <a class="btn btn--primary btn--sm" href="/admin/customers/{{ c.id }}/assign">
+          Preview &amp; assign…
+        </a>
       </td>
     </tr>
     {% endfor %}
