@@ -1,0 +1,79 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Provision stack{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Provision stack</h1>
+    <p class="text-muted text-small">
+      Pick an agent and a trading server. We will create the per-agent directory,
+      render the compose files with the agent's secrets, and bring the stack up.
+    </p>
+  </div>
+  <a class="btn btn--ghost btn--sm" href="/admin/stacks">← back to stacks</a>
+</div>
+
+{% if form_error %}
+<div class="flash flash--error">
+  <strong>✗ {{ form_error }}</strong>
+</div>
+{% endif %}
+
+{% if not agents or not servers %}
+<div class="card">
+  {% if not agents %}
+  <p>
+    <strong>No agents available.</strong>
+    <span class="text-small text-muted">
+      Create an agent first &mdash; <a href="/admin/agents/new">+ Add agent</a>.
+    </span>
+  </p>
+  {% endif %}
+  {% if not servers %}
+  <p>
+    <strong>No servers available.</strong>
+    <span class="text-small text-muted">
+      Add a server first &mdash; <a href="/admin/servers/new">+ Add server</a>.
+    </span>
+  </p>
+  {% endif %}
+</div>
+{% else %}
+<form method="post" action="/admin/stacks" class="form" style="max-width: 560px;">
+  <div class="form-row">
+    <label for="agent_id">Agent</label>
+    <select id="agent_id" name="agent_id" required>
+      <option value="" disabled selected>— pick an agent —</option>
+      {% for a in agents %}
+        <option value="{{ a.id }}" dir="auto">{{ a.username }}</option>
+      {% endfor %}
+    </select>
+    <p class="text-small text-muted">
+      The stack will be isolated under <code>&lt;base_dir&gt;/&lt;agent_id&gt;/</code>
+      on the chosen server.
+    </p>
+  </div>
+
+  <div class="form-row">
+    <label for="server_id">Server</label>
+    <select id="server_id" name="server_id" required>
+      <option value="" disabled selected>— pick a server —</option>
+      {% for s in servers %}
+        <option value="{{ s.id }}">
+          {{ s.name }} ({{ s.host }}:{{ s.ssh_port }})
+        </option>
+      {% endfor %}
+    </select>
+    <p class="text-small text-muted">
+      If a stack for this (agent, server) pair already exists it will be
+      re-provisioned in place rather than duplicated.
+    </p>
+  </div>
+
+  <div class="form-actions">
+    <button class="btn btn--primary" type="submit">Provision stack</button>
+    <a class="btn btn--ghost" href="/admin/stacks">Cancel</a>
+  </div>
+</form>
+{% endif %}
+{% endblock %}

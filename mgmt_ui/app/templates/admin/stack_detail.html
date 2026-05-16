@@ -1,0 +1,118 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Stack &mdash; {{ agent.username if agent else stack.id }}{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">
+      <span dir="auto">{{ agent.username if agent else "(unknown agent)" }}</span>
+      <span class="text-muted">·</span>
+      <span dir="auto">{{ server.name if server else "(unknown server)" }}</span>
+    </h1>
+    <p class="text-muted text-small">
+      <code>{{ stack.compose_project }}</code>
+    </p>
+  </div>
+  <div class="header-actions">
+    <button class="btn btn--primary btn--sm"
+            hx-post="/admin/stacks/{{ stack.id }}/redeploy"
+            hx-target="#stack-action-result"
+            hx-swap="innerHTML"
+            hx-indicator="#stack-action-spinner">
+      Redeploy
+    </button>
+    <form method="post" action="/admin/stacks/{{ stack.id }}/deprovision"
+          onsubmit="return confirm('Tear down this stack? Container will stop, files removed.');">
+      <button class="btn btn--danger btn--sm" type="submit">Deprovision</button>
+    </form>
+  </div>
+</div>
+
+<div id="stack-action-result" class="test-result-slot"></div>
+<div id="stack-action-spinner" class="htmx-indicator text-small text-muted">Working…</div>
+
+<div class="server-detail-grid">
+  <section class="card">
+    <h2 class="h2">Identity</h2>
+    <dl class="kv">
+      <dt>Status</dt>
+      <dd>
+        {% if stack.status == 'up' %}<span class="badge badge--up">up</span>
+        {% elif stack.status == 'down' %}<span class="badge badge--down">down</span>
+        {% elif stack.status == 'provisioning' %}<span class="badge badge--pending">provisioning</span>
+        {% elif stack.status == 'deprovisioning' %}<span class="badge badge--pending">deprovisioning</span>
+        {% else %}<span class="badge badge--pending">{{ stack.status }}</span>{% endif %}
+      </dd>
+      <dt>Server</dt>
+      <dd>
+        {% if server %}
+          <a href="/admin/servers/{{ server.id }}" dir="auto">{{ server.name }}</a>
+          <span class="text-small text-muted">
+            <code>{{ server.ssh_user }}@{{ server.host }}:{{ server.ssh_port }}</code>
+          </span>
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </dd>
+      <dt>Agent</dt>
+      <dd>
+        {% if agent %}
+          <a href="/admin/agents/{{ agent.id }}" dir="auto">{{ agent.username }}</a>
+          {% if agent.deleted_at %}<span class="badge badge--down" title="agent soft-deleted">deleted</span>{% endif %}
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </dd>
+      <dt>Compose project</dt>
+      <dd><code class="text-small">{{ stack.compose_project }}</code></dd>
+      <dt>Stack dir</dt>
+      <dd><code class="text-small" dir="ltr">{{ stack.stack_dir }}</code></dd>
+      <dt>Deployed</dt>
+      <dd class="text-small">
+        {% if stack.deployed_at %}{{ stack.deployed_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+        {% else %}<span class="text-muted">never</span>{% endif %}
+      </dd>
+    </dl>
+  </section>
+
+  <section class="card">
+    <h2 class="h2">Rendered files</h2>
+    {% if not files %}
+      <p class="text-muted">No file preview available.</p>
+      <p class="text-small text-muted">
+        This usually means the stack hasn't been provisioned yet or the
+        server is unreachable. Try <strong>Redeploy</strong> above.
+      </p>
+    {% else %}
+      {% set sensitive_keys = ['.env', 'config.ini'] %}
+      {# Sensitive files (.env / config.ini) may still contain secret-looking
+         strings even after the rendering service's redaction pass. We keep
+         them inside <details> so they don't show by default. #}
+      {% for fname, content in files.items() %}
+        {% if fname in sensitive_keys %}
+        <details class="file-preview" style="margin-bottom: 12px;">
+          <summary>
+            <code>{{ fname }}</code>
+            <span class="badge badge--pending text-small">sensitive — click to reveal</span>
+          </summary>
+          {% if content %}
+          <pre class="text-small"><code>{{ content }}</code></pre>
+          {% else %}
+          <p class="text-small text-muted">Not yet rendered.</p>
+          {% endif %}
+        </details>
+        {% else %}
+        <div class="file-preview" style="margin-bottom: 12px;">
+          <p style="margin: 4px 0;"><code>{{ fname }}</code></p>
+          {% if content %}
+          <pre class="text-small"><code>{{ content }}</code></pre>
+          {% else %}
+          <p class="text-small text-muted">Not yet rendered.</p>
+          {% endif %}
+        </div>
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

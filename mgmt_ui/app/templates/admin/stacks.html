@@ -2,6 +2,71 @@
 {% block page_title %}Stacks{% endblock %}
 
 {% block page_body %}
-<h1 class="h1">Stacks</h1>
-<p class="text-muted text-small">Coming in Phase 3 &mdash; see plan.</p>
+<div class="page-header">
+  <h1 class="h1">Stacks</h1>
+  <a class="btn btn--primary" href="/admin/stacks/new">+ Provision stack</a>
+</div>
+
+<p class="text-muted text-small">
+  A stack is one agent's Docker deployment on one trading server, isolated under
+  <code>&lt;server.base_dir&gt;/&lt;agent_id&gt;/</code>. The existing root-level
+  <code>/root/seller-market/</code> is left untouched.
+</p>
+
+{% if not stacks %}
+<div class="card">
+  <p class="text-muted">No stacks yet.</p>
+  <p class="text-small text-muted">
+    Create an agent and a server first, then click <strong>+ Provision stack</strong>.
+  </p>
+</div>
+{% else %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>Server</th>
+      <th>Agent</th>
+      <th>Project</th>
+      <th>Status</th>
+      <th>Deployed</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in stacks %}
+    {% set srv = servers_by_id.get(s.server_id) %}
+    {% set agt = agents_by_id.get(s.agent_id) %}
+    <tr>
+      <td>
+        {% if srv %}
+          <a href="/admin/servers/{{ srv.id }}" dir="auto">{{ srv.name }}</a>
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if agt %}
+          <span dir="auto">{{ agt.username }}</span>
+          {% if agt.deleted_at %}<span class="badge badge--down" title="agent soft-deleted">deleted</span>{% endif %}
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </td>
+      <td><code class="text-small">{{ s.compose_project }}</code></td>
+      <td>
+        {% if s.status == 'up' %}<span class="badge badge--up">up</span>
+        {% elif s.status == 'down' %}<span class="badge badge--down">down</span>
+        {% elif s.status == 'provisioning' %}<span class="badge badge--pending">provisioning</span>
+        {% elif s.status == 'deprovisioning' %}<span class="badge badge--pending">deprovisioning</span>
+        {% else %}<span class="badge badge--pending">{{ s.status }}</span>{% endif %}
+      </td>
+      <td class="text-small text-muted">
+        {% if s.deployed_at %}{{ s.deployed_at.strftime('%Y-%m-%d %H:%M UTC') }}{% else %}—{% endif %}
+      </td>
+      <td><a class="btn btn--ghost btn--sm" href="/admin/stacks/{{ s.id }}">view →</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 {% endblock %}
