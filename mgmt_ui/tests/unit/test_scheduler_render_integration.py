@@ -184,7 +184,8 @@ async def test_scheduler_render_emits_real_jobs(
     Pins:
 
     * Both job names + times + commands round-trip through the renderer.
-    * Top-level ``"enabled"`` is ``True`` because at least one job is on.
+    * Top-level ``"enabled"`` is ``True`` (always — it controls the bot's
+      poll cadence, not which jobs run).
     * Each job's ``"enabled"`` flag is preserved per-row (mixed True/False
       stays mixed in the output).
     """
@@ -212,7 +213,7 @@ async def test_scheduler_render_emits_real_jobs(
     out = render_scheduler_config(ctx)
     payload = json.loads(out)
 
-    # Top-level kill-switch is True because cache_warmup is enabled.
+    # Top-level is always True (poll-cadence control, not a kill-switch).
     assert payload["enabled"] is True
     # Both jobs present in DB order.
     assert len(payload["jobs"]) == 2
@@ -235,15 +236,17 @@ async def test_scheduler_render_emits_real_jobs(
 # ---------------------------------------------------------------------------
 
 
-async def test_scheduler_render_all_disabled_yields_top_level_disabled(
+async def test_scheduler_render_keeps_top_level_enabled_even_when_all_jobs_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every job disabled → top-level ``"enabled"`` is False.
+    """Every job disabled → top-level ``"enabled"`` is STILL True.
 
-    The kill-switch in ``scheduler_config.json`` is computed in
-    :func:`_build_render_context` as ``any(j.enabled for j in jobs)``. With
-    all jobs paused, the bot's scheduler must see ``enabled=False`` so the
-    whole stack is effectively idle.
+    The top-level flag controls the bot's poll cadence (1s vs 60s — see
+    ``SellerMarket/scheduler.py:252``), not whether any job fires. The
+    per-job ``enabled`` is the real on/off toggle. We keep the top-level
+    True so a user re-enabling a job sees it fire within ~1s instead of
+    waiting up to 60s for the slow loop to wake up — matching the
+    convention in the original ``SellerMarket/scheduler_config.json``.
     """
     stack = _fake_stack()
     db = _make_db()
@@ -269,9 +272,10 @@ async def test_scheduler_render_all_disabled_yields_top_level_disabled(
     out = render_scheduler_config(ctx)
     payload = json.loads(out)
 
-    assert payload["enabled"] is False
-    # Jobs still present — the row data isn't dropped, only the top-level
-    # kill-switch goes False.
+    assert payload["enabled"] is True
+    # Per-job enabled is what's actually False; bot's should_run_job will
+    # skip these but the top-level fast-poll keeps re-checking the file
+    # so a re-enable is picked up within 1s.
     assert len(payload["jobs"]) == 2
     assert all(job["enabled"] is False for job in payload["jobs"])
 

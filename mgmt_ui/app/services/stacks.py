@@ -303,11 +303,16 @@ async def _build_render_context(
       projected into :class:`SchedulerJobRow`. The DB stores ``time`` as
       ``sa.Time``; the renderer wants the ``"HH:MM:SS"`` string form, so we
       coerce here at the seam.
-    * ``scheduler_enabled`` is derived: the rendered
-      ``scheduler_config.json`` carries a top-level ``"enabled"`` flag that
-      the bot's scheduler treats as a global kill-switch. We set it truthy
-      iff at least one job row is enabled — a stack with every job paused
-      is effectively a paused stack.
+    * ``scheduler_enabled`` is **always True**. The top-level ``"enabled"``
+      flag in the bot's scheduler is NOT a kill-switch: it controls the
+      poll cadence — ``True`` polls every 1 second, ``False`` sleeps 60
+      seconds between checks
+      ([SellerMarket/scheduler.py:252](SellerMarket/scheduler.py#L252)).
+      The real on/off toggle is each job's own ``enabled`` field. We keep
+      the top-level at ``True`` so a user enabling a previously-disabled
+      job sees it fire within ~1 second instead of waiting up to 60 s for
+      the slow loop to wake up — matches the convention of the original
+      ``SellerMarket/scheduler_config.json``.
     * ``locust`` is the per-agent override row (or None to fall back to
       fleet defaults inside the renderer).
 
@@ -358,11 +363,13 @@ async def _build_render_context(
         )
         for j in scheduler_db_rows
     )
-    # The stack is "scheduler-enabled" iff at least one job is enabled. This
-    # is an admin-level toggle that lives on the rendered
-    # scheduler_config.json's top-level "enabled" key; falsey here means the
-    # whole scheduler is paused regardless of individual job rows.
-    scheduler_enabled = any(j.enabled for j in scheduler_db_rows)
+    # Top-level "enabled" is ALWAYS True. It controls the bot's poll cadence
+    # (1s when True, 60s when False — see SellerMarket/scheduler.py:252),
+    # not whether any job runs. The real on/off toggle is each job's own
+    # `enabled` field, which `should_run_job` checks separately. Keeping the
+    # top-level True means a user enabling a job sees it fire within 1s
+    # instead of waiting up to 60s for the slow loop to notice.
+    scheduler_enabled = True
 
     locust_db = await services_locust.get_locust_config(db, stack.id)
     locust_row: LocustConfigRow | None = None
