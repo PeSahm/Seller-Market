@@ -100,5 +100,44 @@
       </div>
     {% endif %}
   </article>
+
+  {# Phase 7: Trade history — live counts replacing the old "coming soon"
+     placeholder. Admins acting as agent see the whole fleet's trades; agents
+     see only their own. Counts are computed over the most-recent 100 trades
+     (the server-side cap on agent_dashboard) so this card stays cheap. #}
+  <article class="card">
+    <div class="card-header">
+      <h2 class="h3">Trade history</h2>
+      <a class="btn btn--ghost btn--sm" href="/agent/trades">view all →</a>
+    </div>
+    {% if trades_summary.total == 0 %}
+      <p class="text-muted text-small">No trades recorded yet.</p>
+      <p class="text-small text-muted">
+        Successful <code>run_trading</code> runs surface their broker order
+        results here once the ingestor has picked them up.
+      </p>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-value">{{ trades_summary.total }}</div>
+          <div class="metric-label text-muted text-small">total (last 100)</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--up">{{ trades_summary.done }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">done</div>
+        </div>
+        {% if trades_summary.pending %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--pending">{{ trades_summary.pending }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">pending</div>
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
+  </article>
 </div>
 {% endblock %}

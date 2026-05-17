@@ -1,0 +1,154 @@
+{#
+  Phase 7 — agent trade list.
+
+  Mirror of the admin trade list, but with NO agent picker — the agent is
+  implicitly scoped to themselves at the router level. Empty filter values
+  are treated as "no filter" server-side so submitting with everything
+  blank shows all trades; bad values (non-iso date, non-int state) also
+  fall through to "no filter" rather than 422.
+
+  We deliberately do NOT show the agent's UUID anywhere on this page —
+  only the customer's display_name (linked back to /agent/customers/<id>).
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Trades{% endblock %}
+
+{% block page_body %}
+<h1 class="h1">Trades</h1>
+<p class="text-muted text-small">
+  Every broker order returned by a successful <code>run_trading</code> run
+  on one of your stacks shows up here once the ingestor has picked it up.
+  Click any row to inspect the raw broker payload.
+</p>
+
+<form method="get" action="/agent/trades" class="filter-bar"
+      style="display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 12px 0;">
+  <label class="field">
+    <span class="field-label text-small text-muted">Since</span>
+    <input type="datetime-local" name="since" value="{{ filter_since }}">
+  </label>
+  <label class="field">
+    <span class="field-label text-small text-muted">Until</span>
+    <input type="datetime-local" name="until" value="{{ filter_until }}">
+  </label>
+  <label class="field">
+    <span class="field-label text-small text-muted">Customer</span>
+    <select name="customer_id">
+      <option value="">— any —</option>
+      {% for c in picker_customers %}
+      <option value="{{ c.id }}"{% if filter_customer_id == c.id|string %} selected{% endif %}>
+        {{ c.display_name }}
+      </option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span class="field-label text-small text-muted">Broker</span>
+    <input type="text" name="broker" value="{{ filter_broker }}" placeholder="any" size="10">
+  </label>
+  <label class="field">
+    <span class="field-label text-small text-muted">Symbol / ISIN</span>
+    <input type="text" name="symbol_or_isin" value="{{ filter_symbol_or_isin }}" placeholder="any" size="14">
+  </label>
+  <label class="field">
+    <span class="field-label text-small text-muted">State</span>
+    <input type="text" name="state" value="{{ filter_state }}" placeholder="any" size="4" inputmode="numeric">
+  </label>
+  <label class="field">
+    <span class="field-label text-small text-muted">Side</span>
+    <select name="side">
+      <option value=""{% if filter_side == '' %} selected{% endif %}>— any —</option>
+      <option value="1"{% if filter_side == '1' %} selected{% endif %}>Buy (1)</option>
+      <option value="2"{% if filter_side == '2' %} selected{% endif %}>Sell (2)</option>
+    </select>
+  </label>
+  <button type="submit" class="btn btn--ghost btn--sm">Apply</button>
+  <a href="/agent/trades" class="btn btn--ghost btn--sm">Reset</a>
+</form>
+
+{% if not trades %}
+<div class="card">
+  <p class="text-muted">No trades match the current filters.</p>
+  {% if filter_customer_id or filter_broker or filter_symbol_or_isin or filter_state or filter_side or filter_since or filter_until %}
+  <p class="text-small">
+    <a href="/agent/trades">Clear filters</a> to see all trades.
+  </p>
+  {% else %}
+  <p class="text-small text-muted">
+    Trades will appear here once the ingestor has picked up a successful
+    <code>run_trading</code> run on one of your stacks.
+  </p>
+  {% endif %}
+</div>
+{% else %}
+<table class="table">
+  <thead><tr>
+    <th>When</th>
+    <th>Customer</th>
+    <th>Symbol / ISIN</th>
+    <th>Side</th>
+    <th>Price</th>
+    <th>Volume</th>
+    <th>Executed</th>
+    <th>State</th>
+    <th>Net amount</th>
+    <th></th>
+  </tr></thead>
+  <tbody>
+    {% for t in trades %}
+    {% set cust = customers_by_id.get(t.customer_id) %}
+    <tr>
+      <td class="text-small">
+        <a href="/agent/trades/{{ t.id }}">
+          {% if t.created_at_broker %}
+            {{ t.created_at_broker.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+          {% else %}
+            {{ t.ingested_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+          {% endif %}
+        </a>
+      </td>
+      <td class="text-small">
+        {% if cust %}
+          <a href="/agent/customers/{{ cust.id }}" dir="auto">{{ cust.display_name }}</a>
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </td>
+      <td class="text-small">
+        {% if t.symbol %}<code dir="auto">{{ t.symbol }}</code>{% else %}<code>{{ t.isin }}</code>{% endif %}
+      </td>
+      <td>
+        {% if t.side == 1 %}
+          <span class="badge badge--up">Buy</span>
+        {% elif t.side == 2 %}
+          <span class="badge badge--down">Sell</span>
+        {% else %}
+          <span class="badge">{{ t.side }}</span>
+        {% endif %}
+      </td>
+      <td class="text-small">{{ t.price }}</td>
+      <td class="text-small text-muted">{{ t.volume }}</td>
+      <td class="text-small">{{ t.executed_volume }}</td>
+      <td>
+        {% if t.is_done %}
+          <span class="badge badge--up" title="{{ t.state_desc }}">{{ t.state_desc }}</span>
+        {% else %}
+          <span class="badge badge--pending" title="{{ t.state_desc }}">{{ t.state_desc }}</span>
+        {% endif %}
+      </td>
+      <td class="text-small">
+        {% if t.net_amount is not none %}{{ t.net_amount }}{% else %}<span class="text-muted">—</span>{% endif %}
+      </td>
+      <td>
+        <a class="btn btn--ghost btn--sm" href="/agent/trades/{{ t.id }}">view →</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="text-muted text-small">
+  Showing the most recent {{ trades|length }} trade{% if trades|length != 1 %}s{% endif %}
+  (capped at 500).
+</p>
+{% endif %}
+{% endblock %}
