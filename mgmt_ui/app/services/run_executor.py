@@ -45,12 +45,20 @@ def _holder_for(actor_id: Optional[UUID]) -> str:
 
 
 def _build_command(job_name: str, stack, locust_cfg) -> str:
-    """The actual ``docker exec`` payload for cache_warmup / run_trading."""
+    """The actual ``docker exec`` payload for cache_warmup / run_trading.
+
+    Every argument that comes from a DB row (``host`` and ``run_time`` are
+    the obvious risks — they're user-set in the locust editor) is passed
+    through ``shlex.quote`` before joining. A malicious value like
+    ``"http://x ; rm -rf /"`` would otherwise break argument boundaries
+    and run a shell command of the attacker's choosing — see the Phase 6
+    PR review (#1).
+    """
     container = f"{stack.compose_project}-bot"
     if job_name == "cache_warmup":
-        return (
-            f"docker exec {shlex.quote(container)} "
-            f"python cache_warmup.py"
+        return " ".join(
+            shlex.quote(p)
+            for p in ["docker", "exec", container, "python", "cache_warmup.py"]
         )
     if job_name == "run_trading":
         if locust_cfg is None:
@@ -63,7 +71,7 @@ def _build_command(job_name: str, stack, locust_cfg) -> str:
             host = locust_cfg.host
             processes = locust_cfg.processes
         parts = [
-            "docker", "exec", shlex.quote(container),
+            "docker", "exec", container,
             "locust", "-f", "locustfile_new.py", "--headless",
             "--users", str(users),
             "--spawn-rate", str(spawn_rate),
@@ -72,7 +80,7 @@ def _build_command(job_name: str, stack, locust_cfg) -> str:
         ]
         if processes and processes != 1:
             parts.extend(["--processes", str(processes)])
-        return " ".join(parts)
+        return " ".join(shlex.quote(str(p)) for p in parts)
     raise ValueError(f"unknown job_name: {job_name!r}")
 
 
@@ -215,6 +223,56 @@ async def start_manual_run(
     return run
 
 
+# How often the run-time heartbeat extends the stack lock's lease, in
+# seconds. Default lease is 600s (10 min); we renew every 180s (3 min)
+# so a single missed beat (timeout, transient DB error) still leaves
+# ~4 minutes of cushion before the lease expires.
+_LEASE_RENEW_INTERVAL_SECONDS = 180
+_LEASE_RENEW_SECONDS = 600
+
+
+async def _renew_lease_until_stopped(
+    stack_id: UUID,
+    run_id: UUID,
+    stop_event: asyncio.Event,
+) -> None:
+    """Periodically extend the stack lock's lease until ``stop_event`` is set.
+
+    Started as a side asyncio task by :func:`_run_executor_loop`. The
+    streamer's hard ceiling is 30 minutes; without this heartbeat a run
+    longer than the 10-minute default lease could see its lock reclaimed
+    by stale-lock cleanup, allowing a concurrent click to slip through.
+
+    Each extend opens its own short-lived session so a long-held one
+    can't block other DB work. The extend is keyed on
+    ``(stack_id, run_id)`` — if the lock has already been released or
+    reclaimed (run_id mismatch), the UPDATE is a silent no-op rather
+    than a cross-tenant lease bump.
+    """
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(), timeout=_LEASE_RENEW_INTERVAL_SECONDS
+            )
+            return  # stop_event fired during the wait
+        except asyncio.TimeoutError:
+            pass
+        try:
+            async with AsyncSessionLocal() as db:
+                await run_locks.extend_lease(
+                    db,
+                    stack_id=stack_id,
+                    run_id=run_id,
+                    seconds=_LEASE_RENEW_SECONDS,
+                )
+                await db.commit()
+        except Exception:  # noqa: BLE001 — never let a beat-miss kill the run
+            logger.exception(
+                "lease renewal failed for stack=%s run=%s — will retry",
+                stack_id, run_id,
+            )
+
+
 async def _run_executor_loop(
     run_id: UUID,
     stack_id: UUID,
@@ -224,10 +282,25 @@ async def _run_executor_loop(
 ) -> None:
     """The big workhorse — runs inside an asyncio task; failures are swallowed
     after being recorded into the Run row and the audit log.
+
+    Spawns a side heartbeat task that periodically renews the stack lock's
+    lease via ``run_locks.extend_lease``. The default lease is 10 minutes
+    (see ``run_locks.DEFAULT_LEASE_SECONDS``) but the streamer's hard
+    ceiling is 30 minutes — without renewal, a long locust run could see
+    its own lock reclaimed by a stale-lock cleanup and a concurrent click
+    would slip through. We extend every 3 minutes (1/3 of lease) so a
+    single missed beat still keeps the lease alive.
     """
     captured = bytearray()
     final_status = "failed"
     final_exit_code: Optional[int] = None
+
+    # Heartbeat task to renew the lease throughout the run. See PR #49 review #2.
+    heartbeat_stop = asyncio.Event()
+    heartbeat_task = asyncio.create_task(
+        _renew_lease_until_stopped(stack_id, run_id, heartbeat_stop),
+        name=f"run-heartbeat-{run_id}",
+    )
 
     try:
         async with AsyncSessionLocal() as db:
@@ -286,21 +359,40 @@ async def _run_executor_loop(
         captured.extend(f"<run-executor> unexpected: {exc}\n".encode())
         final_status = "failed"
     finally:
-        # Finalize + release lock no matter what.
+        # Stop the heartbeat first so a final extend_lease doesn't race
+        # with release_lock below.
+        heartbeat_stop.set()
+        try:
+            await asyncio.wait_for(heartbeat_task, timeout=3.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            heartbeat_task.cancel()
+        except Exception:  # noqa: BLE001
+            logger.exception("heartbeat task ended with error run=%s", run_id)
+        # Finalize + release lock no matter what. CRITICALLY: release the
+        # lock even when finalize_run raises (e.g. log-archive I/O error
+        # on a full disk) — otherwise the stack stays blocked until the
+        # lease TTL expires (10 minutes by default). See PR #49 review #3.
         try:
             async with AsyncSessionLocal() as db:
-                await services_runs.finalize_run(
-                    db,
-                    run_id=run_id,
-                    status=final_status,
-                    exit_code=final_exit_code,
-                    captured_log=bytes(captured),
-                    actor_id=actor_id,
-                )
+                try:
+                    await services_runs.finalize_run(
+                        db,
+                        run_id=run_id,
+                        status=final_status,
+                        exit_code=final_exit_code,
+                        captured_log=bytes(captured),
+                        actor_id=actor_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("finalize_run failed for run=%s", run_id)
+                # Always attempt to release the lock and commit — even if
+                # finalize_run blew up. The Run row may stay in
+                # status='running' until manual cleanup, but at least the
+                # stack isn't stuck.
                 await run_locks.release_lock(db, stack_id=stack_id, run_id=run_id)
                 await db.commit()
-        except Exception:  # noqa: BLE001
-            logger.exception("run finalize failed for run=%s", run_id)
+        except Exception:  # noqa: BLE001 — never let the cleanup raise
+            logger.exception("release_lock failed for run=%s", run_id)
         # Sentinel publish so WS clients close cleanly.
         _publish(
             run_id, StreamingResult(exit_code=final_exit_code, captured=bytes(captured))

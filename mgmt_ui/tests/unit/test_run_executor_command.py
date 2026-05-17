@@ -195,7 +195,40 @@ def test_run_trading_command_processes_one_is_omitted() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. test_unknown_job_name_raises_value_error
+# 5. test_run_trading_command_shell_quotes_malicious_host
+# ---------------------------------------------------------------------------
+
+
+def test_run_trading_command_shell_quotes_malicious_host() -> None:
+    """A crafted ``host`` value cannot break out of its argument.
+
+    Regression for PR #49 review #1 (Critical): pre-fix, the host was
+    interpolated into the command string without ``shlex.quote``, so a
+    DB row like ``host = "http://x; rm -rf /"`` would have the ``rm``
+    fragment executed as a separate shell statement after the locust
+    invocation. The fix shell-quotes every part of the command before
+    joining; we assert the dangerous tokens are enclosed in quotes
+    here (i.e. seen as one argument to locust, not interpreted by sh).
+    """
+    stack = _fake_stack(compose_project="sm-agent-abc")
+    locust = _fake_locust_cfg(
+        users=10, spawn_rate=10, run_time="60s",
+        host="http://x; rm -rf /",  # ← injection attempt
+        processes=1,
+    )
+
+    cmd = _build_command("run_trading", stack, locust)
+
+    # The malicious host MUST appear as a single shell-quoted token,
+    # NOT as bare text with the `;` left unescaped.
+    assert "'http://x; rm -rf /'" in cmd
+    # And it must NOT appear bare (i.e. the `;` left as a real shell
+    # statement separator).
+    assert "; rm -rf /" not in cmd.replace("'http://x; rm -rf /'", "")
+
+
+# ---------------------------------------------------------------------------
+# 6. test_unknown_job_name_raises_value_error
 # ---------------------------------------------------------------------------
 
 
