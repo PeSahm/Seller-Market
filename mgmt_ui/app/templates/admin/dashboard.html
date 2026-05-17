@@ -306,5 +306,36 @@
       </div>
     {% endif %}
   </article>
+
+  {# Recent admin actions — live data from Phase 9 #}
+  <article class="card">
+    <div class="card-header">
+      <h2 class="h3">Recent admin actions</h2>
+      <a class="btn btn--ghost btn--sm" href="/admin/audit">view all &rarr;</a>
+    </div>
+    {% if not recent_audit %}
+      <p class="text-muted text-small">No audit entries yet.</p>
+    {% else %}
+      <table class="table">
+        <tbody>
+          {% for r in recent_audit %}
+          {% set actor = audit_users_by_id.get(r.actor_user_id) %}
+          <tr>
+            <td class="text-small text-muted">{{ r.ts.strftime('%H:%M') }}</td>
+            <td class="text-small">
+              {% if actor %}
+                <span dir="auto">{{ actor.username }}</span>
+              {% else %}
+                <span class="text-muted">system</span>
+              {% endif %}
+            </td>
+            <td><code class="text-small">{{ r.action }}</code></td>
+            <td><a class="btn btn--ghost btn--sm" href="/admin/audit/{{ r.id }}">&rarr;</a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </article>
 </div>
 {% endblock %}

@@ -1,0 +1,112 @@
+{#
+  Per-row audit detail (Phase 9).
+
+  Three stacked sections:
+
+    1. Identity card — actor / action / target_type / target_id / ts.
+       The action is also the h1 so the browser tab title surfaces it.
+    2. Changes table — one row per changed leaf path from
+       ``app.services.audit.diff_json``. ``change`` is one of
+       ``added`` / ``removed`` / ``changed``; the missing side renders
+       as a muted "&mdash; added &mdash;" / "&mdash; removed &mdash;"
+       sentinel so the operator sees the shape change explicitly
+       rather than as an empty cell.
+    3. Before / After JSON panels — both go through
+       :func:`app.services.audit.redact_payload` upstream so they
+       NEVER carry a raw secret. ``before_json_text`` and
+       ``after_json_text`` are already ``json.dumps``-ed with indent=2.
+
+  The diff and the JSON panels are independent views of the same row.
+  In particular, a row where the only change is a redacted field
+  (e.g. a password rotation) renders with an empty Changes section
+  (both sides are ``"***"`` so :func:`diff_json` returns nothing) and
+  two side-by-side JSON panels showing the redacted shape.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Audit entry{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1"><code>{{ row.action }}</code></h1>
+    <p class="text-muted text-small">{{ row.ts.strftime('%Y-%m-%d %H:%M:%S UTC') }}</p>
+  </div>
+  <a class="btn btn--ghost btn--sm" href="/admin/audit">&larr; back</a>
+</div>
+
+<section class="card">
+  <h2 class="h2">Identity</h2>
+  <dl class="kv">
+    <dt>Actor</dt>
+    <dd>
+      {% if actor %}
+        <span dir="auto">{{ actor.username }}</span>
+      {% else %}
+        <span class="text-muted">system</span>
+      {% endif %}
+    </dd>
+    <dt>Action</dt>
+    <dd><code class="text-small">{{ row.action }}</code></dd>
+    <dt>Target type</dt>
+    <dd><span class="badge">{{ row.target_type }}</span></dd>
+    <dt>Target id</dt>
+    <dd><code class="text-small" dir="ltr">{{ row.target_id }}</code></dd>
+    <dt>When</dt>
+    <dd class="text-small">{{ row.ts.strftime('%Y-%m-%d %H:%M:%S UTC') }}</dd>
+  </dl>
+</section>
+
+{% if diff %}
+<section class="card" style="margin-top: 16px;">
+  <h2 class="h2">Changes</h2>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Path</th>
+        <th>Before</th>
+        <th>After</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for d in diff %}
+      <tr>
+        <td><code class="text-small">{{ d.path }}</code></td>
+        <td class="text-small">
+          {% if d.change == 'added' %}
+            <span class="text-muted">&mdash; added &mdash;</span>
+          {% else %}
+            <code>{{ d.before|tojson }}</code>
+          {% endif %}
+        </td>
+        <td class="text-small">
+          {% if d.change == 'removed' %}
+            <span class="text-muted">&mdash; removed &mdash;</span>
+          {% else %}
+            <code>{{ d.after|tojson }}</code>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<section class="card" style="margin-top: 16px;">
+  <h2 class="h2">Before</h2>
+  {% if before_json_text %}
+    <pre class="log-viewer"><code>{{ before_json_text }}</code></pre>
+  {% else %}
+    <p class="text-muted text-small">(none)</p>
+  {% endif %}
+</section>
+
+<section class="card" style="margin-top: 16px;">
+  <h2 class="h2">After</h2>
+  {% if after_json_text %}
+    <pre class="log-viewer"><code>{{ after_json_text }}</code></pre>
+  {% else %}
+    <p class="text-muted text-small">(none)</p>
+  {% endif %}
+</section>
+{% endblock %}

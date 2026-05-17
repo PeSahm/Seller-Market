@@ -35,6 +35,7 @@ from app.schemas.server import ServerCreatePassword, ServerCreatePubkey
 from app.schemas.settings_page import SettingsUpdate
 from app.security.deps import require_admin
 from app.services import agents as services_agents
+from app.services import audit as services_audit
 from app.services import customers as services_customers
 from app.services import distribution as services_distribution
 from app.services import health_signals as services_health
@@ -152,6 +153,17 @@ async def admin_dashboard(
         "info": sum(1 for s in unacked if s.severity == "info"),
     }
 
+    # Phase 9: recent audit-log roll-up. Top 10 rows newest-first power the
+    # "Recent admin actions" dashboard card. We pre-resolve actor users in
+    # one extra query so the template can show usernames without N+1.
+    recent_audit = await services_audit.list_audit(db, limit=10)
+    audit_users_by_id: dict = {}
+    if recent_audit:
+        actor_ids = {r.actor_user_id for r in recent_audit if r.actor_user_id}
+        if actor_ids:
+            result = await db.execute(select(User).where(User.id.in_(actor_ids)))
+            audit_users_by_id = {u.id: u for u in result.scalars().all()}
+
     ctx = _ctx(request, user, current_tab="/admin/dashboard")
     ctx["server_summary"] = server_summary
     ctx["stack_summary"] = stack_summary
@@ -160,6 +172,8 @@ async def admin_dashboard(
     ctx["recent_runs_summary"] = recent_runs_summary
     ctx["recent_trades_summary"] = recent_trades_summary
     ctx["health_summary"] = health_summary
+    ctx["recent_audit"] = recent_audit
+    ctx["audit_users_by_id"] = audit_users_by_id
     return templates.TemplateResponse("admin/dashboard.html", ctx)
 
 
@@ -1878,12 +1892,148 @@ async def admin_settings_save(
     )
 
 
+# ---------------------------------------------------------------------------
+# Audit log (Phase 9)
+# ---------------------------------------------------------------------------
+#
+# Read-only feed of the ``audit_log`` table — every mutating service in the
+# codebase writes a row here (server CRUD, customer assign, run start/finish,
+# health-signal ack, settings save, ...). The list view supports filtering
+# by actor, action substring, target type, and a date range; the detail view
+# shows a side-by-side redacted JSON diff of the row's ``before_json`` /
+# ``after_json`` payloads.
+#
+# Same "empty-string -> None, garbage -> None" parsing policy as
+# /admin/trades and /admin/health so a hand-edited URL stays graceful.
+
+
 @router.get("/audit")
 async def admin_audit(
     request: Request,
     user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    actor_id: Optional[str] = None,
+    action: Optional[str] = None,
+    target_type: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
 ):
-    return _render(request, user, "admin/audit.html", "/admin/audit")
+    """Filterable global audit log, newest-first.
+
+    Parses query-string filters defensively: empty strings and unparseable
+    UUIDs / ISO dates degrade to "no filter" rather than 422-ing the page.
+    The ``action`` filter is a case-insensitive substring match applied in
+    Python after the DB read — the action vocabulary is small (~27 values)
+    and a LIKE pattern doesn't move the needle on perf. Rows are capped at
+    300 so the page renders fast; the service layer caps independently too.
+    """
+    from datetime import datetime
+
+    def _parse_uuid_or_none(s: Optional[str]) -> Optional[UUID]:
+        if not s:
+            return None
+        try:
+            return UUID(s)
+        except (ValueError, TypeError):
+            return None
+
+    def _parse_date_or_none(s: Optional[str]) -> Optional["datetime"]:
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s)
+        except (ValueError, TypeError):
+            return None
+
+    rows = await services_audit.list_audit(
+        db,
+        actor_id=_parse_uuid_or_none(actor_id),
+        target_type=target_type or None,
+        since=_parse_date_or_none(since),
+        until=_parse_date_or_none(until),
+        limit=300,
+    )
+    # Substring filter on ``action`` runs in Python — see docstring.
+    if action:
+        needle = action.lower()
+        rows = [r for r in rows if needle in r.action.lower()]
+
+    # Preload actor users so each row can render a username without N+1.
+    actor_ids = {r.actor_user_id for r in rows if r.actor_user_id}
+    users_by_id: dict = {}
+    if actor_ids:
+        actor_result = await db.execute(select(User).where(User.id.in_(actor_ids)))
+        users_by_id = {u.id: u for u in actor_result.scalars().all()}
+
+    # Distinct actor list for the filter picker — drawn from the same
+    # batch of rows the page is rendering so the dropdown only shows
+    # actors that actually have entries in the current window.
+    distinct_actors = sorted(
+        ((u.id, u.username) for u in users_by_id.values()),
+        key=lambda x: x[1],
+    )
+
+    ctx = _ctx(request, user, current_tab="/admin/audit")
+    ctx["rows"] = rows
+    ctx["users_by_id"] = users_by_id
+    ctx["distinct_actors"] = distinct_actors
+    ctx["filter_actor_id"] = actor_id or ""
+    ctx["filter_action"] = action or ""
+    ctx["filter_target_type"] = target_type or ""
+    ctx["filter_since"] = since or ""
+    ctx["filter_until"] = until or ""
+    return templates.TemplateResponse("admin/audit.html", ctx)
+
+
+@router.get("/audit/{audit_id}")
+async def admin_audit_detail(
+    audit_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-row audit detail: identity card + diff table + redacted JSON panels.
+
+    Both ``before_json`` and ``after_json`` are run through
+    :func:`app.services.audit.redact_payload` before being pretty-printed
+    into the side-by-side panels — the UI never displays a raw secret
+    even if a producing service accidentally left one in the payload.
+    The diff is computed against the same redacted shape (via
+    :func:`app.services.audit.diff_json`, which redacts internally) so
+    cleartext old/new secrets never appear in the changes table either.
+    """
+    import json
+
+    row = await services_audit.get_audit(db, audit_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="audit row not found")
+
+    actor = await db.get(User, row.actor_user_id) if row.actor_user_id else None
+    before_redacted = services_audit.redact_payload(row.before_json)
+    after_redacted = services_audit.redact_payload(row.after_json)
+    diff = services_audit.diff_json(row.before_json, row.after_json)
+
+    # ``default=str`` keeps datetimes / UUIDs / decimals stringifiable
+    # without crashing the dumper on payloads that smuggled a non-JSON
+    # type through JSONB serialisation.
+    before_json_text = (
+        json.dumps(before_redacted, indent=2, ensure_ascii=False, default=str)
+        if before_redacted is not None
+        else ""
+    )
+    after_json_text = (
+        json.dumps(after_redacted, indent=2, ensure_ascii=False, default=str)
+        if after_redacted is not None
+        else ""
+    )
+
+    ctx = _ctx(request, user, current_tab="/admin/audit")
+    ctx["row"] = row
+    ctx["actor"] = actor
+    ctx["before_json_text"] = before_json_text
+    ctx["after_json_text"] = after_json_text
+    ctx["diff"] = diff
+    return templates.TemplateResponse("admin/audit_detail.html", ctx)
 
 
 @router.get("/act-as")
