@@ -84,14 +84,22 @@ def _build_command(job_name: str, stack, locust_cfg) -> str:
     raise ValueError(f"unknown job_name: {job_name!r}")
 
 
+# Bound the per-subscriber queue so a stuck WebSocket (browser tab throttled,
+# slow consumer, half-dead TCP) can't pin unbounded memory. Locust can emit
+# thousands of lines in a few seconds; 5000 line buffer gives plenty of slack.
+# When full, we DROP THE OLDEST so the client sees the most recent output —
+# the full archive is still written to disk on finalize_run.
+_QUEUE_MAXSIZE = 5000
+
+
 def subscribe(run_id: UUID) -> asyncio.Queue:
-    """Register a new WS listener; returns its queue.
+    """Register a new WS listener; returns its bounded queue.
 
     Unsubscribe is automatic via :class:`weakref.WeakSet` — once the WS
     handler's local reference to the returned queue is dropped, it is
     GC'd and removed from the set.
     """
-    q: asyncio.Queue = asyncio.Queue()
+    q: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
     if run_id not in _subscribers:
         _subscribers[run_id] = WeakSet()
     _subscribers[run_id].add(q)
@@ -105,6 +113,16 @@ def _publish(run_id: UUID, item) -> None:
     for q in list(subs):
         try:
             q.put_nowait(item)
+        except asyncio.QueueFull:
+            # Slow consumer — drop oldest and retry once. This trades a
+            # tiny bit of history for liveness; the full archive is still
+            # captured by the executor's _captured_buffer and written to
+            # disk on finalize_run.
+            try:
+                q.get_nowait()  # discard oldest
+                q.put_nowait(item)
+            except Exception:  # noqa: BLE001
+                pass
         except Exception:  # noqa: BLE001
             pass
 

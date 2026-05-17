@@ -104,27 +104,45 @@ async def run_stream(
             await websocket.close(code=1000)
             return
 
+    # Wrap every send in a short timeout so a wedged WebSocket (browser tab
+    # throttled, half-dead TCP, slow proxy) doesn't pin the handler forever
+    # while the executor keeps publishing into a queue nobody is draining.
+    # 10 s per send is generous for a single line over a healthy LAN; failure
+    # to send means the client is gone and we should bail.
+    _SEND_TIMEOUT = 10.0
+
+    async def _send(text: str) -> bool:
+        """Send with timeout; return False on failure or wedged peer."""
+        if websocket.client_state != WebSocketState.CONNECTED:
+            return False
+        try:
+            await asyncio.wait_for(websocket.send_text(text), timeout=_SEND_TIMEOUT)
+            return True
+        except (asyncio.TimeoutError, WebSocketDisconnect, RuntimeError):
+            return False
+
     try:
         while True:
             try:
-                item = await asyncio.wait_for(queue.get(), timeout=60.0)
+                # Shorter heartbeat than before (was 60 s) so a paused browser
+                # tab is detected within ~5 s and the handler can bail
+                # instead of holding the queue + publishing pipeline open.
+                item = await asyncio.wait_for(queue.get(), timeout=5.0)
             except asyncio.TimeoutError:
-                # Heartbeat — keeps idle proxies from cutting the connection.
                 if websocket.client_state != WebSocketState.CONNECTED:
                     return
-                await websocket.send_text("<run-stream> ping")
+                if not await _send("<run-stream> ping"):
+                    return
                 continue
 
             if isinstance(item, LineEvent):
                 prefix = "" if item.stream == "stdout" else "!! "
-                await websocket.send_text(
-                    prefix + item.data.decode("utf-8", errors="replace")
-                )
+                if not await _send(prefix + item.data.decode("utf-8", errors="replace")):
+                    return
             elif isinstance(item, StreamingResult):
-                await websocket.send_text(
-                    f"<run-stream> done (exit_code={item.exit_code})"
-                )
-                await websocket.close(code=1000)
+                await _send(f"<run-stream> done (exit_code={item.exit_code})")
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.close(code=1000)
                 return
     except WebSocketDisconnect:
         return
