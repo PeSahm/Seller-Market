@@ -946,18 +946,22 @@ async def redeploy_stack(
       landed, or for files edited via tools that atomic-rename on save.)
     * Wants a "reset this stack" knob to recover from a weird container
       state.
+    * Has previously deprovisioned this stack and now wants to bring it
+      back up — deprovision removes the stack directory, so we must
+      ``mkdir -p`` it again before the SFTP push, otherwise the writes
+      fail with ENOENT.
 
-    The mkdir/touch step is skipped because the directory tree is already
-    in place from the first provision. ``--force-recreate`` + ``--pull
-    always`` (see :func:`_compose_up`) means redeploy is a few seconds
-    slower than provision, but reliably picks up every kind of change.
+    ``mkdir -p`` and ``touch`` are idempotent (no-op when the targets
+    already exist), so we always run them. The cost is two extra SSH
+    round-trips per redeploy — negligible compared to ``--force-recreate
+    --pull always`` (see :func:`_compose_up`).
     """
     return await _do_compose_action(
         db,
         stack_id,
         actor_id,
         audit_action="stack.redeploy",
-        prepare_dirs=False,
+        prepare_dirs=True,
         force_recreate=True,
     )
 

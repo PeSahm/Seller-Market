@@ -21,8 +21,18 @@
   <div class="header-actions">
     <a class="btn btn--ghost btn--sm" href="/agent/stacks/{{ stack.id }}/scheduler">Scheduler&hellip;</a>
     <a class="btn btn--ghost btn--sm" href="/agent/stacks/{{ stack.id }}/locust">Locust&hellip;</a>
+    <form method="post" action="/agent/stacks/{{ stack.id }}/redeploy"
+          hx-post="/agent/stacks/{{ stack.id }}/redeploy"
+          hx-target="#stack-action-result"
+          hx-swap="innerHTML"
+          onsubmit="return confirm('Redeploy this stack? Container will be force-recreated to pick up config changes. ~5s downtime.');"
+          style="display: inline;">
+      <button type="submit" class="btn btn--primary btn--sm">Redeploy</button>
+    </form>
   </div>
 </div>
+
+<div id="stack-action-result"></div>
 
 {# Phase 6: run-now strip lives right under the header so the agent doesn't
    have to scroll. Tenant scoping is enforced server-side in the POST handler. #}

@@ -46,9 +46,47 @@
     {% endif %}
   </article>
 
+  {# My stacks — live data #}
   <article class="card">
-    <h2 class="h3">My stacks</h2>
-    <p class="text-muted text-small">(coming soon)</p>
+    <div class="card-header">
+      <h2 class="h3">My stacks</h2>
+      <a class="btn btn--ghost btn--sm" href="/agent/stacks">view all →</a>
+    </div>
+    {% if stacks_summary.total == 0 %}
+      <p class="text-muted text-small">No stacks yet.</p>
+      <p class="text-small text-muted">
+        Stacks are provisioned by your admin when you assign your first customer to a server.
+      </p>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-value">{{ stacks_summary.total }}</div>
+          <div class="metric-label text-muted text-small">total</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--up">{{ stacks_summary.up }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">up</div>
+        </div>
+        {% if stacks_summary.down %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--down">{{ stacks_summary.down }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">down</div>
+        </div>
+        {% endif %}
+        {% if stacks_summary.provisioning %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--pending">{{ stacks_summary.provisioning }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">provisioning</div>
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
   </article>
 
   {# Phase 6: live run counts. Admins acting as agent see the whole fleet
@@ -95,6 +133,45 @@
             </a>
           </div>
           <div class="metric-label text-muted text-small">failed</div>
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
+  </article>
+
+  {# Phase 7: Trade history — live counts replacing the old "coming soon"
+     placeholder. Admins acting as agent see the whole fleet's trades; agents
+     see only their own. Counts are computed over the most-recent 100 trades
+     (the server-side cap on agent_dashboard) so this card stays cheap. #}
+  <article class="card">
+    <div class="card-header">
+      <h2 class="h3">Trade history</h2>
+      <a class="btn btn--ghost btn--sm" href="/agent/trades">view all →</a>
+    </div>
+    {% if trades_summary.total == 0 %}
+      <p class="text-muted text-small">No trades recorded yet.</p>
+      <p class="text-small text-muted">
+        Successful <code>run_trading</code> runs surface their broker order
+        results here once the ingestor has picked them up.
+      </p>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-value">{{ trades_summary.total }}</div>
+          <div class="metric-label text-muted text-small">total (last 100)</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--up">{{ trades_summary.done }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">done</div>
+        </div>
+        {% if trades_summary.pending %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--pending">{{ trades_summary.pending }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">pending</div>
         </div>
         {% endif %}
       </div>

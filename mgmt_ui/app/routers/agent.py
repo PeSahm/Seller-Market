@@ -53,6 +53,7 @@ from app.services import scheduler_jobs as services_scheduler
 from app.services import servers as services_servers
 from app.services import settings_store
 from app.services import stacks as services_stacks
+from app.services import trades as services_trades
 from app.services.customers import OptimisticLockError
 from app.services.locust_configs import OptimisticLockError as LocustLockError
 from app.services.run_locks import StackRunLockBusyError
@@ -138,9 +139,41 @@ async def agent_dashboard(
             1 for r in own_runs if r.status in ("failed", "killed")
         ),
     }
+    # Phase 7: Trade history card on the dashboard. Same convention as runs
+    # above — admins acting as agent see the whole fleet, agents see only
+    # their own trades. We cap the read at 100 because we only need counts.
+    own_trades = await services_trades.list_trades(
+        db,
+        agent_id=user.id if user.role != "admin" else None,
+        limit=100,
+    )
+    trades_summary = {
+        "total": len(own_trades),
+        "done": sum(1 for t in own_trades if t.is_done),
+        "pending": sum(1 for t in own_trades if not t.is_done),
+    }
+    # Phase 7 follow-up: "My stacks" card. Agents see only their own
+    # stacks; admins acting as agent see the whole fleet. Same convention
+    # as runs and trades above.
+    all_stacks = await services_stacks.list_stacks(db)
+    my_stacks = (
+        all_stacks
+        if user.role == "admin"
+        else [s for s in all_stacks if s.agent_id == user.id]
+    )
+    stacks_summary = {
+        "total": len(my_stacks),
+        "up": sum(1 for s in my_stacks if s.status == "up"),
+        "down": sum(1 for s in my_stacks if s.status == "down"),
+        "provisioning": sum(
+            1 for s in my_stacks if s.status == "provisioning"
+        ),
+    }
     ctx = _ctx(request, user, current_tab="/agent/dashboard")
     ctx["customer_summary"] = customer_summary
     ctx["runs_summary"] = runs_summary
+    ctx["trades_summary"] = trades_summary
+    ctx["stacks_summary"] = stacks_summary
     return templates.TemplateResponse("agent/dashboard.html", ctx)
 
 
@@ -174,11 +207,20 @@ async def agent_stacks(
 
 @router.get("/history")
 async def agent_history(
-    request: Request,
     user: User = Depends(get_current_user),
 ):
+    """Permanent redirect: Phase-7 ``/agent/trades`` replaces the old placeholder.
+
+    Kept so any bookmarks or in-flight links to ``/agent/history`` still land
+    on the live trades page instead of 404'ing. We still gate on role first —
+    a redirect that fires before auth would let an unauthenticated user infer
+    the URL exists.
+    """
     _require_agent_or_admin(user)
-    return _render(request, user, "agent/history.html", "/agent/history")
+    return Response(
+        status_code=status.HTTP_308_PERMANENT_REDIRECT,
+        headers={"Location": "/agent/trades"},
+    )
 
 
 @router.get("/logs")
@@ -1172,6 +1214,63 @@ async def agent_stack_run_now(
     )
 
 
+@router.post("/stacks/{stack_id}/redeploy")
+async def agent_stack_redeploy(
+    stack_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-render config + ``docker compose up -d --force-recreate`` on the
+    agent's own stack.
+
+    Useful when the agent has just saved a new scheduler time or locust
+    config and wants the in-container scheduler to pick it up
+    immediately instead of waiting for the next 1-second poll (the bot
+    DOES poll the bind-mounted file every second, but the container
+    has to be re-created if any volume mount's inode changed — which
+    is rare for the in-place write we do, but harmless to force).
+
+    Tenant scoping: 404 (not 403) if this isn't the agent's own stack.
+    Deprovision is intentionally *not* exposed to agents — that
+    destructive action stays admin-only.
+    """
+    _require_agent_or_admin(user)
+    stack = await _load_stack_for_agent(db, user, stack_id)
+    try:
+        result = await services_stacks.redeploy_stack(
+            db, stack.id, actor_id=user.id
+        )
+    except RuntimeError as exc:
+        # Compose lock busy — surface as a 400 with the partial.
+        from app.schemas.stack import StackActionResult
+        result = StackActionResult(
+            ok=False,
+            stack_id=stack.id,
+            status=stack.status,
+            message=str(exc),
+            log_tail="",
+        )
+    except SSHError as exc:
+        # Same graceful-degrade as admin: render the action partial with
+        # the error instead of bubbling a 500.
+        from app.schemas.stack import StackActionResult
+        result = StackActionResult(
+            ok=False,
+            stack_id=stack.id,
+            status="down",
+            message=f"redeploy failed: {exc}",
+            log_tail=str(exc),
+        )
+    ctx = _ctx(request, user, current_tab="/agent/stacks")
+    ctx["result"] = result
+    # Re-use the admin partial — it's identical markup, no admin-only
+    # bits leaked into it.
+    return templates.TemplateResponse(
+        "admin/partials/stack_action_result.html", ctx
+    )
+
+
 @router.get("/runs")
 async def agent_runs(
     request: Request,
@@ -1229,9 +1328,24 @@ async def agent_runs(
         if user.role == "admin" or s.agent_id == user.id
     }
 
+    # Bulk-count trades per run so a "failed" run that actually placed
+    # orders is rendered as "partial" rather than misleading red.
+    from sqlalchemy import func as _sa_func
+    from app.models.trades import TradeResult
+    trade_counts_by_run: dict[UUID, int] = {}
+    if runs:
+        run_ids = [r.id for r in runs]
+        rows = await db.execute(
+            select(TradeResult.run_id, _sa_func.count(TradeResult.id))
+            .where(TradeResult.run_id.in_(run_ids))
+            .group_by(TradeResult.run_id)
+        )
+        trade_counts_by_run = {rid: cnt for rid, cnt in rows.all()}
+
     ctx = _ctx(request, user, current_tab="/agent/runs")
     ctx["runs"] = runs
     ctx["stacks_by_id"] = stacks_by_id
+    ctx["trade_counts_by_run"] = trade_counts_by_run
     ctx["filter_stack_id"] = stack_id or ""
     ctx["filter_job"] = job_name or ""
     ctx["filter_status"] = status or ""
@@ -1279,6 +1393,185 @@ async def agent_run_detail(
     ctx["agent"] = agent_user
     ctx["archived_log"] = archived_log
     return templates.TemplateResponse("agent/run_detail.html", ctx)
+
+
+# ---------------------------------------------------------------------------
+# Trades (Phase 7)
+# ---------------------------------------------------------------------------
+#
+# Read-only views over the ``trade_results`` table that the trade ingestor
+# (parallel agent — NOT this router) writes to as it pulls JSON dumps off the
+# trading bots. The list page mirrors the admin equivalent but drops the
+# agent picker: an agent always sees ONLY their own customers' trades.
+#
+# Tenant scoping is enforced in two places:
+#
+# 1. List view (:func:`agent_trades`) passes ``agent_id=user.id`` into the
+#    service layer when the caller is not an admin, so we never load other
+#    tenants' rows into Python memory at all.
+# 2. Detail view (:func:`agent_trade_detail`) re-looks up the customer for
+#    the trade and gates on ``services_trades.can_user_see_trade`` — that
+#    pure function returns False whenever ``customer.agent_id != user.id``
+#    for non-admins. On False we surface a 404 (NOT 403) so an agent
+#    guessing UUIDs cannot enumerate other tenants' trades.
+
+
+@router.get("/trades")
+async def agent_trades(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    customer_id: Optional[str] = None,
+    broker: Optional[str] = None,
+    symbol_or_isin: Optional[str] = None,
+    state: Optional[str] = None,
+    side: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+):
+    """List the current agent's own trades (admin sees all).
+
+    All filter query params are empty-string tolerant: blank or unparseable
+    values are coerced to ``None`` (= "no filter") rather than 422-ing, so
+    the filter form can submit an empty ``?state=`` for "any state". The
+    UUID + datetime + int parsers below match the pattern used by the
+    agent_runs route.
+    """
+    _require_agent_or_admin(user)
+    from datetime import datetime
+
+    def _parse_date_or_none(s: Optional[str]):
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s)
+        except (ValueError, TypeError):
+            return None
+
+    def _parse_int_or_none(s: Optional[str]):
+        if not s:
+            return None
+        try:
+            return int(s)
+        except (ValueError, TypeError):
+            return None
+
+    def _parse_uuid_or_none(s: Optional[str]):
+        if not s:
+            return None
+        try:
+            return UUID(s)
+        except (ValueError, TypeError):
+            return None
+
+    # Critical tenant scope: agents pass their own user id; admin passes
+    # None so the service-layer query doesn't filter by agent at all. This
+    # is the SAME shape as agent_runs and the customers list — keep it.
+    own_agent_id = None if user.role == "admin" else user.id
+
+    trades = await services_trades.list_trades(
+        db,
+        agent_id=own_agent_id,
+        customer_id=_parse_uuid_or_none(customer_id),
+        broker=broker or None,
+        symbol_or_isin=symbol_or_isin or None,
+        state=_parse_int_or_none(state),
+        side=_parse_int_or_none(side),
+        since=_parse_date_or_none(since),
+        until=_parse_date_or_none(until),
+        limit=500,
+    )
+
+    # Lookup dict for the customer column. We load JUST the customers that
+    # appear in the result set (vs. every customer the agent owns) — this
+    # keeps the dict small when the trades list is narrow. Tenant-safety:
+    # the trades list is already agent-scoped, so the customer_ids we look
+    # up here are guaranteed to belong to ``user`` (or all, for admin).
+    customers_by_id: dict[UUID, Customer] = {}
+    if trades:
+        cust_ids = list({t.customer_id for t in trades})
+        result = await db.execute(
+            select(Customer).where(Customer.id.in_(cust_ids))
+        )
+        for c in result.scalars().all():
+            customers_by_id[c.id] = c
+
+    # Customer picker source: only this agent's customers (admins see all).
+    # We deliberately use a separate query rather than reusing the dict
+    # above, because the dict only contains customers that already have a
+    # trade — the picker should also list customers with zero trades yet.
+    picker_customers = await services_customers.list_customers(
+        db,
+        agent_id=user.id if user.role != "admin" else None,
+        include_disabled=True,
+    )
+
+    ctx = _ctx(request, user, current_tab="/agent/trades")
+    ctx["trades"] = trades
+    ctx["customers_by_id"] = customers_by_id
+    ctx["picker_customers"] = sorted(
+        picker_customers, key=lambda c: (c.display_name or "").lower()
+    )
+    ctx["filter_customer_id"] = customer_id or ""
+    ctx["filter_broker"] = broker or ""
+    ctx["filter_symbol_or_isin"] = symbol_or_isin or ""
+    ctx["filter_state"] = state or ""
+    ctx["filter_side"] = side or ""
+    ctx["filter_since"] = since or ""
+    ctx["filter_until"] = until or ""
+    return templates.TemplateResponse("agent/trades.html", ctx)
+
+
+@router.get("/trades/{trade_id}")
+async def agent_trade_detail(
+    trade_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-trade detail page.
+
+    Tenant-guarded: we look up the customer for the trade and gate on
+    :func:`services_trades.can_user_see_trade`. On miss / cross-tenant we
+    surface 404 (NOT 403) so an agent who guesses another tenant's trade
+    UUID cannot tell whether it exists.
+    """
+    _require_agent_or_admin(user)
+    trade = await services_trades.get_trade(db, trade_id)
+    if trade is None:
+        raise HTTPException(status_code=404, detail="trade not found")
+    customer = await services_customers.get_customer(db, trade.customer_id)
+    # Tenant check:
+    # - Admins can always view, even if the customer row has been deleted
+    #   or the trade was ingested with a NULL/unmatched customer_id (which
+    #   the list view surfaces — denying detail access would break the
+    #   admin's only way to triage those rows).
+    # - Agents must own the customer; ``can_user_see_trade`` returns False
+    #   when the customer's agent_id != user.id, OR when customer is None
+    #   (an agent can never see an unmatched trade).
+    # - 404 not 403 on miss so an agent enumerating UUIDs can't tell
+    #   whether the trade exists.
+    if customer is None:
+        if user.role != "admin":
+            raise HTTPException(status_code=404, detail="trade not found")
+    elif not services_trades.can_user_see_trade(user, trade, customer):
+        raise HTTPException(status_code=404, detail="trade not found")
+
+    run = None
+    if trade.run_id:
+        run = await services_runs.get_run(db, trade.run_id)
+
+    import json as _json
+    raw_pretty = _json.dumps(
+        trade.raw_json or {}, indent=2, ensure_ascii=False
+    )
+
+    ctx = _ctx(request, user, current_tab="/agent/trades")
+    ctx["trade"] = trade
+    ctx["customer"] = customer
+    ctx["run"] = run
+    ctx["raw_pretty"] = raw_pretty
+    return templates.TemplateResponse("agent/trade_detail.html", ctx)
 
 
 # Silence unused-import lint for AgentStack + select — referenced indirectly

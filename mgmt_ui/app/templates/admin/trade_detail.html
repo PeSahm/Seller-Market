@@ -1,0 +1,158 @@
+{#
+  Trade detail page (Phase 7).
+
+  Three cards: Identity (tracking_number, customer, agent, run, timestamps),
+  Order (broker fields incl. remaining volume = volume - executed_volume),
+  and Raw JSON (pretty-printed, rendered inside a ``.log-viewer`` <pre> so
+  it reuses the same monospace + scroll styling as the run-log viewer).
+
+  The run link is conditional — older trades may have no ``run_id`` (e.g.
+  out-of-band ingests during a backfill) and ``customer`` / ``agent`` are
+  similarly nullable if the rows have since been hard-deleted, which the
+  schema forbids today but the template doesn't assume.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Trade {{ trade.tracking_number }}{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Trade #{{ trade.tracking_number }}</h1>
+    <p class="text-muted text-small">
+      {% if trade.side == 1 %}<span class="badge badge--up">Buy</span>
+      {% elif trade.side == 2 %}<span class="badge badge--down">Sell</span>
+      {% else %}<span class="badge">side={{ trade.side }}</span>{% endif %}
+      &middot;
+      {% if trade.is_done %}<span class="badge badge--up">done</span>
+      {% else %}<span class="badge badge--pending">pending</span>{% endif %}
+      &middot;
+      <code class="text-small" dir="auto">{{ trade.symbol or trade.isin }}</code>
+    </p>
+  </div>
+  <div class="header-actions">
+    <a class="btn btn--ghost btn--sm" href="/admin/trades">&larr; all trades</a>
+    {% if customer %}
+      <a class="btn btn--ghost btn--sm" href="/admin/customers/{{ customer.id }}">customer &rarr;</a>
+    {% endif %}
+  </div>
+</div>
+
+<section class="card">
+  <h2 class="h2">Identity</h2>
+  <dl class="kv">
+    <dt>Trade ID</dt><dd><code class="text-small">{{ trade.id }}</code></dd>
+    <dt>Tracking #</dt><dd><code>{{ trade.tracking_number }}</code></dd>
+    <dt>Customer</dt>
+    <dd>
+      {% if customer %}
+        <a href="/admin/customers/{{ customer.id }}" dir="auto">{{ customer.display_name }}</a>
+        <span class="text-small text-muted">&middot;</span>
+        <span class="badge">{{ customer.broker }}</span>
+      {% else %}
+        <span class="text-muted">&mdash;</span>
+      {% endif %}
+    </dd>
+    <dt>Agent</dt>
+    <dd>
+      {% if agent %}
+        <a href="/admin/agents/{{ agent.id }}" dir="auto">{{ agent.username }}</a>
+        {% if agent.deleted_at %}<span class="badge badge--down" title="agent soft-deleted">deleted</span>{% endif %}
+      {% else %}
+        <span class="text-muted">&mdash;</span>
+      {% endif %}
+    </dd>
+    <dt>Run</dt>
+    <dd>
+      {% if run %}
+        <a href="/admin/runs/{{ run.id }}"><code class="text-small">{{ run.job_name }}</code></a>
+        <span class="text-small text-muted">&middot; {{ run.status }}</span>
+      {% else %}
+        <span class="text-muted">&mdash;</span>
+      {% endif %}
+    </dd>
+    <dt>Ingested</dt>
+    <dd>{{ trade.ingested_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</dd>
+    <dt>Created (broker)</dt>
+    <dd>
+      {% if trade.created_at_broker %}
+        {{ trade.created_at_broker.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+      {% else %}
+        <span class="text-muted">&mdash;</span>
+      {% endif %}
+    </dd>
+    <dt>Created (Shamsi)</dt>
+    <dd>
+      {% if trade.created_shamsi %}
+        <code class="text-small" dir="auto">{{ trade.created_shamsi }}</code>
+      {% else %}
+        <span class="text-muted">&mdash;</span>
+      {% endif %}
+    </dd>
+  </dl>
+</section>
+
+<section class="card" style="margin-top: 16px;">
+  <h2 class="h2">Order</h2>
+  <dl class="kv">
+    <dt>Symbol</dt>
+    <dd>
+      {% if trade.symbol %}
+        <code dir="auto">{{ trade.symbol }}</code>
+      {% else %}
+        <span class="text-muted">&mdash;</span>
+      {% endif %}
+    </dd>
+    <dt>ISIN</dt><dd><code>{{ trade.isin }}</code></dd>
+    <dt>Side</dt>
+    <dd>
+      {% if trade.side == 1 %}<span class="badge badge--up">Buy</span>
+      {% elif trade.side == 2 %}<span class="badge badge--down">Sell</span>
+      {% else %}<span class="badge">side={{ trade.side }}</span>{% endif %}
+    </dd>
+    <dt>Price</dt><dd><code>{{ trade.price }}</code></dd>
+    <dt>Volume</dt><dd><code>{{ trade.volume }}</code></dd>
+    <dt>Executed volume</dt><dd><code>{{ trade.executed_volume }}</code></dd>
+    <dt>Remaining</dt>
+    <dd>
+      {% set remaining = trade.volume - trade.executed_volume %}
+      <code>{{ remaining }}</code>
+      {% if remaining == 0 %}
+        <span class="badge badge--up">fully executed</span>
+      {% elif trade.executed_volume == 0 %}
+        <span class="badge badge--pending">untouched</span>
+      {% else %}
+        <span class="badge badge--pending">partial</span>
+      {% endif %}
+    </dd>
+    <dt>State</dt>
+    <dd>
+      <code>{{ trade.state }}</code>
+      <span class="text-small text-muted">&middot; {{ trade.state_desc }}</span>
+    </dd>
+    <dt>is_done</dt>
+    <dd>
+      {% if trade.is_done %}
+        <span class="badge badge--up">yes</span>
+      {% else %}
+        <span class="badge badge--pending">no</span>
+      {% endif %}
+    </dd>
+    <dt>Net amount</dt>
+    <dd>
+      {% if trade.net_amount is not none %}
+        <code>{{ trade.net_amount }}</code>
+      {% else %}
+        <span class="text-muted">&mdash;</span>
+      {% endif %}
+    </dd>
+  </dl>
+</section>
+
+<section class="card" style="margin-top: 16px;">
+  <div class="card-header">
+    <h2 class="h2">Raw JSON</h2>
+    <span class="text-small text-muted">payload as ingested from the bot's <code>order_results</code> file</span>
+  </div>
+  <pre class="log-viewer">{{ raw_pretty }}</pre>
+</section>
+{% endblock %}

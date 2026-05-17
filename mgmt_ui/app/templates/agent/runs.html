@@ -91,9 +91,25 @@
       <td><code class="text-small">{{ r.job_name }}</code></td>
       <td class="text-small text-muted">{{ r.trigger }}</td>
       <td>
+        {% set _trades = trade_counts_by_run.get(r.id, 0) %}
+        {# Same "partial" semantics as admin/runs.html: exit_code != 0
+           but trades placed means the bot's post-trade summary crashed
+           after at least one successful order. Not a clean failure. #}
         {% if r.status == 'running' %}<span class="badge badge--pending">running</span>
-        {% elif r.status == 'success' %}<span class="badge badge--up">success</span>
+        {% elif r.status == 'success' %}
+          <span class="badge badge--up">success</span>
+          {% if _trades %}<span class="badge badge--up" title="trades placed">{{ _trades }} trade{% if _trades != 1 %}s{% endif %}</span>{% endif %}
+        {% elif r.status == 'failed' and _trades %}
+          <span class="badge badge--pending"
+                title="exit_code != 0 but {{ _trades }} trade{% if _trades != 1 %}s{% endif %} placed at the broker">
+            partial &middot; {{ _trades }} trade{% if _trades != 1 %}s{% endif %}
+          </span>
         {% elif r.status == 'failed' %}<span class="badge badge--down">failed</span>
+        {% elif r.status == 'killed' and _trades %}
+          <span class="badge badge--pending"
+                title="killed but {{ _trades }} trade{% if _trades != 1 %}s{% endif %} placed at the broker">
+            partial &middot; {{ _trades }} trade{% if _trades != 1 %}s{% endif %}
+          </span>
         {% elif r.status == 'killed' %}<span class="badge badge--down">killed</span>
         {% else %}<span class="badge badge--pending">{{ r.status }}</span>{% endif %}
       </td>

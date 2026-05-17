@@ -78,9 +78,16 @@
 <section class="card" style="margin-top: 16px;">
   <div class="card-header">
     <h2 class="h2">Log</h2>
-    {% if run.status == 'running' %}<span class="badge badge--pending">live</span>{% endif %}
+    {% if run.status == 'running' %}
+      <span id="ws-status" class="badge badge--pending text-small">connecting&hellip;</span>
+    {% endif %}
   </div>
   <pre id="run-log" class="log-viewer">{{ archived_log }}</pre>
+  {% if run.status == 'running' %}
+  <p id="run-done-banner" class="text-small text-muted" style="display: none; margin-top: 8px;">
+    Run finished. <a href="">Reload</a> to see final status, exit code, and the archived log.
+  </p>
+  {% endif %}
 </section>
 
 {% if run.status == 'running' %}
@@ -89,15 +96,49 @@
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     var url = proto + '//' + location.host + '/ws/runs/{{ run.id }}';
     var log = document.getElementById('run-log');
+    var statusEl = document.getElementById('ws-status');
+    var banner = document.getElementById('run-done-banner');
     var ws = new WebSocket(url);
+
+    function markFinished(label) {
+      if (statusEl) {
+        statusEl.textContent = label;
+        statusEl.className = 'badge badge--up text-small';
+      }
+      if (banner) { banner.style.display = 'block'; }
+    }
+
+    ws.onopen = function() {
+      if (statusEl) {
+        statusEl.textContent = 'live';
+        statusEl.className = 'badge badge--up text-small';
+      }
+    };
     ws.onmessage = function(e) {
+      // The server emits "<run-stream> done (exit_code=N)" as the very
+      // last message when the executor finishes. Recognise it and flip
+      // the UI immediately so the user doesn't think the stream is
+      // still in flight.
+      if (e.data && e.data.indexOf('<run-stream> done') === 0) {
+        markFinished('finished');
+      }
       log.textContent += e.data + '\n';
       log.scrollTop = log.scrollHeight;
     };
     ws.onclose = function() {
+      // If we didn't already see the explicit "done" sentinel, this
+      // close is either a normal end-of-run or a transport drop. Either
+      // way the user should reload to see the canonical final state.
+      if (banner && banner.style.display === 'none') {
+        markFinished('closed — reload for final');
+      }
       log.textContent += '\n[stream closed]\n';
     };
     ws.onerror = function() {
+      if (statusEl) {
+        statusEl.textContent = 'error';
+        statusEl.className = 'badge badge--down text-small';
+      }
       log.textContent += '\n[stream error]\n';
     };
   })();

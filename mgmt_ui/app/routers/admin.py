@@ -44,6 +44,7 @@ from app.services import scheduler_jobs as services_scheduler
 from app.services import servers as services_servers
 from app.services import settings_store
 from app.services import stacks as services_stacks
+from app.services import trades as services_trades
 from app.services.customers import OptimisticLockError
 from app.services.locust_configs import OptimisticLockError as LocustLockError
 from app.services.run_locks import StackRunLockBusyError
@@ -122,12 +123,26 @@ async def admin_dashboard(
         "killed": sum(1 for r in recent_runs if r.status == "killed"),
     }
 
+    # Phase 7: recent-trades roll-up. Most-recent 50 ingested orders bucketed
+    # by ``is_done`` so the dashboard card can render a quick "done / pending"
+    # split alongside a link to the full trade-history page. We deliberately
+    # cap at 50 (smaller than runs) — the trades page itself paginates and
+    # most operators care about "is anything still pending" rather than a
+    # rolling count of total executions.
+    recent_trades = await services_trades.list_trades(db, limit=50)
+    recent_trades_summary = {
+        "total": len(recent_trades),
+        "done": sum(1 for t in recent_trades if t.is_done),
+        "pending": sum(1 for t in recent_trades if not t.is_done),
+    }
+
     ctx = _ctx(request, user, current_tab="/admin/dashboard")
     ctx["server_summary"] = server_summary
     ctx["stack_summary"] = stack_summary
     ctx["pending_summary"] = pending_summary
     ctx["customer_summary"] = customer_summary
     ctx["recent_runs_summary"] = recent_runs_summary
+    ctx["recent_trades_summary"] = recent_trades_summary
     return templates.TemplateResponse("admin/dashboard.html", ctx)
 
 
@@ -1267,6 +1282,19 @@ async def admin_stack_redeploy(
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SSHError as exc:
+        # SSH/SFTP failure (host unreachable, key rejected, stack dir
+        # missing after a deprovision, etc.). The service already
+        # persisted status='down'; surface the error in the partial so
+        # the admin can see *why* it failed.
+        from app.schemas.stack import StackActionResult
+        result = StackActionResult(
+            ok=False,
+            stack_id=stack_id,
+            status="down",
+            message=f"redeploy failed: {exc}",
+            log_tail=str(exc),
+        )
     ctx = _ctx(request, user, current_tab="/admin/stacks")
     ctx["result"] = result
     return templates.TemplateResponse(
@@ -1997,10 +2025,27 @@ async def admin_runs(
     }
     stacks_by_id = {s.id: s for s in await services_stacks.list_stacks(db)}
 
+    # Bulk-count trades per run so the table can show "failed but placed N
+    # trades" — when a bot exits non-zero AFTER having placed orders we
+    # don't want to mark the row as a plain failure, that's misleading.
+    # One query for the whole page.
+    from sqlalchemy import func as _sa_func
+    from app.models.trades import TradeResult
+    trade_counts_by_run: dict[UUID, int] = {}
+    if runs:
+        run_ids = [r.id for r in runs]
+        rows = await db.execute(
+            select(TradeResult.run_id, _sa_func.count(TradeResult.id))
+            .where(TradeResult.run_id.in_(run_ids))
+            .group_by(TradeResult.run_id)
+        )
+        trade_counts_by_run = {rid: cnt for rid, cnt in rows.all()}
+
     ctx = _ctx(request, user, current_tab="/admin/runs")
     ctx["runs"] = runs
     ctx["agents_by_id"] = agents
     ctx["stacks_by_id"] = stacks_by_id
+    ctx["trade_counts_by_run"] = trade_counts_by_run
     ctx["filter_stack_id"] = stack_id
     ctx["filter_agent_id"] = agent_id
     ctx["filter_job"] = job_name
@@ -2042,3 +2087,150 @@ async def admin_run_detail(
     ctx["agent"] = agent
     ctx["archived_log"] = archived_log
     return templates.TemplateResponse("admin/run_detail.html", ctx)
+
+
+# ---------------------------------------------------------------------------
+# Trades (Phase 7)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/trades")
+async def admin_trades(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    agent_id: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    broker: Optional[str] = None,
+    symbol_or_isin: Optional[str] = None,
+    state: Optional[str] = None,
+    side: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+):
+    """Global trade history with filter chips.
+
+    Empty-string query args are treated as "no filter" so the form's
+    unselected ``<option value="">`` round-trips cleanly. ``since`` and
+    ``until`` are ISO date strings from ``<input type="date">`` (e.g.
+    ``2025-04-01``); anything :func:`datetime.fromisoformat` can't parse
+    silently degrades to "no filter" rather than 422-ing the page, since a
+    hand-edited URL shouldn't blow up the operator's bookmarked view.
+
+    ``state`` and ``side`` come in as numeric strings (broker enum values).
+    Same defensive parse — non-numeric input is dropped rather than
+    surfaced as a 422.
+    """
+    from datetime import datetime
+
+    def _parse_date_or_none(s):
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s)
+        except (ValueError, TypeError):
+            return None
+
+    def _parse_int_or_none(s):
+        if not s:
+            return None
+        try:
+            return int(s)
+        except (ValueError, TypeError):
+            return None
+
+    def _parse_uuid_or_none(s):
+        """Same "degrade to no-filter on garbage" policy as the date / int
+        parsers above — a hand-edited URL with a malformed UUID
+        previously raised ValueError and 500'd the page."""
+        if not s:
+            return None
+        try:
+            return UUID(s)
+        except (ValueError, TypeError):
+            return None
+
+    trades = await services_trades.list_trades(
+        db,
+        agent_id=_parse_uuid_or_none(agent_id),
+        customer_id=_parse_uuid_or_none(customer_id),
+        broker=broker or None,
+        symbol_or_isin=symbol_or_isin or None,
+        state=_parse_int_or_none(state),
+        side=_parse_int_or_none(side),
+        since=_parse_date_or_none(since),
+        until=_parse_date_or_none(until),
+        limit=500,
+    )
+
+    # Lookup dicts for column display. ``include_deleted=True`` so a trade
+    # whose customer's agent has since been soft-deleted still resolves to
+    # a username instead of "—" in the table.
+    agents = {
+        a.id: a
+        for a in await services_agents.list_agents(db, include_deleted=True)
+    }
+    customers_by_id: dict[UUID, "Customer"] = {}
+    if trades:
+        from app.models.customers import Customer
+
+        cust_ids = list({t.customer_id for t in trades})
+        result = await db.execute(
+            select(Customer).where(Customer.id.in_(cust_ids))
+        )
+        for c in result.scalars().all():
+            customers_by_id[c.id] = c
+
+    ctx = _ctx(request, user, current_tab="/admin/trades")
+    ctx["trades"] = trades
+    ctx["agents_by_id"] = agents
+    ctx["customers_by_id"] = customers_by_id
+    ctx["filter_agent_id"] = agent_id
+    ctx["filter_customer_id"] = customer_id
+    ctx["filter_broker"] = broker
+    ctx["filter_symbol_or_isin"] = symbol_or_isin
+    ctx["filter_state"] = state
+    ctx["filter_side"] = side
+    ctx["filter_since"] = since
+    ctx["filter_until"] = until
+    ctx["all_agents"] = sorted(agents.values(), key=lambda a: a.username)
+    return templates.TemplateResponse("admin/trades.html", ctx)
+
+
+@router.get("/trades/{trade_id}")
+async def admin_trade_detail(
+    trade_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Detail page: identity, broker fields, raw JSON pretty-printed.
+
+    The ``raw_json`` payload is whatever the bot's order_results file
+    contained at ingest time — we don't try to coerce or schema-validate it
+    here, just dump it through ``json.dumps`` with stable indent so the
+    template can render it in a ``<pre class="log-viewer">``. ``run_id``
+    can be null (legacy / out-of-band trades) so the run lookup is gated.
+    """
+    trade = await services_trades.get_trade(db, trade_id)
+    if trade is None:
+        raise HTTPException(status_code=404, detail="trade not found")
+    customer = await services_customers.get_customer(db, trade.customer_id)
+    agent = (
+        await services_agents.get_agent(db, customer.agent_id)
+        if customer
+        else None
+    )
+    run = None
+    if trade.run_id:
+        run = await services_runs.get_run(db, trade.run_id)
+    import json
+
+    raw_pretty = json.dumps(trade.raw_json or {}, indent=2, ensure_ascii=False)
+    ctx = _ctx(request, user, current_tab="/admin/trades")
+    ctx["trade"] = trade
+    ctx["customer"] = customer
+    ctx["agent"] = agent
+    ctx["run"] = run
+    ctx["raw_pretty"] = raw_pretty
+    return templates.TemplateResponse("admin/trade_detail.html", ctx)

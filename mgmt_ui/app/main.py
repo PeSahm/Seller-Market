@@ -22,6 +22,7 @@ from app.security.deps import get_current_user
 from app.settings import get_settings
 from app.workers.health import run_health_worker
 from app.workers.stack_health import run_stack_health_worker
+from app.workers.trade_ingestor import run_trade_ingest_worker
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,11 @@ def create_app() -> FastAPI:
     # status enum to update.
     app.state.stack_health_stop = asyncio.Event()
     app.state.stack_health_task = None  # type: Optional[asyncio.Task[None]]
+    # Phase 7: background trade-result ingestor. Walks every stack every
+    # ``trade_ingest_interval_seconds`` and pulls down any new order_result
+    # files via the parallel ``services.trade_ingestor.ingest_stack_once``.
+    app.state.trade_ingest_stop = asyncio.Event()
+    app.state.trade_ingest_task = None  # type: Optional[asyncio.Task[None]]
 
     @app.on_event("startup")
     async def _start_health_worker() -> None:
@@ -159,6 +165,35 @@ def create_app() -> FastAPI:
             await asyncio.wait_for(task, timeout=5.0)
         except asyncio.TimeoutError:
             logger.warning("stack health worker did not stop in 5s; cancelling")
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    @app.on_event("startup")
+    async def _start_trade_ingestor() -> None:
+        if not settings.enable_trade_ingestor:
+            logger.info("trade ingestor worker disabled via settings")
+            return
+        app.state.trade_ingest_task = asyncio.create_task(
+            run_trade_ingest_worker(
+                app.state.trade_ingest_stop,
+                interval_seconds=settings.trade_ingest_interval_seconds,
+            ),
+            name="trade-ingest-worker",
+        )
+
+    @app.on_event("shutdown")
+    async def _stop_trade_ingestor() -> None:
+        task: Optional[asyncio.Task[None]] = app.state.trade_ingest_task
+        if task is None:
+            return
+        app.state.trade_ingest_stop.set()
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("trade ingestor worker did not stop in 5s; cancelling")
             task.cancel()
             try:
                 await task
