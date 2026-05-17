@@ -25,6 +25,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.audit import AuditLog
 from app.models.settings import Setting
 
 # Documented defaults. Any new key must be added here AND to the admin form
@@ -71,15 +72,48 @@ async def set_setting(
     *,
     updated_by: Optional[UUID] = None,
 ) -> Setting:
-    """Upsert a setting row. The caller is responsible for ``db.commit()``.
+    """Upsert a setting row and emit a matching audit-log entry.
+
+    The caller is responsible for ``db.commit()``.
 
     On insert we set ``updated_at`` explicitly even though the column has a
     ``server_default`` — that way the value is correct when the test harness
     runs against SQLite (which doesn't honour the PG ``now()`` default).
+
+    Phase 9: every call also writes an ``audit_log`` row with
+    ``action="setting.update"``, ``target_type="setting"``, and
+    ``target_id=<key>``. The ``before_json`` / ``after_json`` payloads
+    carry ``{"value": <prev>}`` / ``{"value": <new>}`` so the admin
+    audit detail page can diff them. We emit the audit row even when
+    the new value matches the previous one — the existing pattern is
+    "admins can always see that this update happened" (the diff just
+    surfaces as empty in that case). For a brand-new key the
+    ``before_json`` value is ``None``, which renders in the diff as
+    an "added" entry.
+
+    The audit row is ``db.add``-ed before the upsert is staged; the
+    caller's later ``db.commit()`` flushes both atomically.
     """
     result = await db.execute(select(Setting).where(Setting.key == key))
     row = result.scalar_one_or_none()
+    prev_value: Optional[str] = row.value if row is not None else None
     now = datetime.now(timezone.utc)
+
+    # Stage the audit row first. It references the key only by string —
+    # ``target_id`` is ``Text`` in the schema, not a UUID — so the
+    # ordering vs the upsert doesn't matter for FK correctness.
+    db.add(
+        AuditLog(
+            actor_user_id=updated_by,
+            action="setting.update",
+            target_type="setting",
+            target_id=str(key),
+            before_json={"value": prev_value},
+            after_json={"value": value},
+            ts=now,
+        )
+    )
+
     if row is None:
         row = Setting(
             key=key,
