@@ -3,5 +3,52 @@
 
 {% block page_body %}
 <h1 class="h1">My stacks</h1>
-<p class="text-muted text-small">Coming in Phase 5 &mdash; see plan.</p>
+<p class="text-muted text-small">
+  A stack is your bot's on-server deployment for a particular trading
+  server. You can tune the schedule and load-test parameters here; server
+  assignment itself is decided by your admin.
+</p>
+
+{% if not stacks %}
+<div class="card">
+  <p class="text-muted">No stacks yet.</p>
+  <p class="text-small text-muted">
+    A stack is created automatically the first time an admin assigns one
+    of your customers to a server.
+  </p>
+</div>
+{% else %}
+<table class="table">
+  <thead><tr>
+    <th>Server</th>
+    <th>Status</th>
+    <th>Deployed</th>
+    <th>Edit</th>
+  </tr></thead>
+  <tbody>
+    {% for s in stacks %}
+    {% set srv = servers_by_id.get(s.server_id) %}
+    <tr>
+      <td>
+        {% if srv %}<span dir="auto">{{ srv.name }}</span>
+        {% else %}<span class="text-muted">&mdash;</span>{% endif %}
+      </td>
+      <td>
+        {% if s.status == 'up' %}<span class="badge badge--up">up</span>
+        {% elif s.status == 'down' %}<span class="badge badge--down">down</span>
+        {% elif s.status == 'provisioning' %}<span class="badge badge--pending">provisioning</span>
+        {% else %}<span class="badge badge--pending">{{ s.status }}</span>{% endif %}
+      </td>
+      <td class="text-small text-muted">
+        {% if s.deployed_at %}{{ s.deployed_at.strftime('%Y-%m-%d %H:%M UTC') }}{% else %}&mdash;{% endif %}
+      </td>
+      <td>
+        <a class="btn btn--ghost btn--sm" href="/agent/stacks/{{ s.id }}/scheduler">Scheduler&hellip;</a>
+        <a class="btn btn--ghost btn--sm" href="/agent/stacks/{{ s.id }}/locust">Locust&hellip;</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 {% endblock %}

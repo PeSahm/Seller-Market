@@ -28,16 +28,22 @@ from app.models.users import User
 from app.routers.dashboard import _ctx, templates
 from app.schemas.agent import AgentCreate
 from app.schemas.customer import CustomerCreate, CustomerUpdate
+from app.schemas.locust import LocustUpsert
+from app.schemas.scheduler import SchedulerJobUpsert
 from app.schemas.server import ServerCreatePassword, ServerCreatePubkey
 from app.schemas.settings_page import SettingsUpdate
 from app.security.deps import require_admin
 from app.services import agents as services_agents
 from app.services import customers as services_customers
 from app.services import distribution as services_distribution
+from app.services import locust_configs as services_locust
+from app.services import scheduler_jobs as services_scheduler
 from app.services import servers as services_servers
 from app.services import settings_store
 from app.services import stacks as services_stacks
 from app.services.customers import OptimisticLockError
+from app.services.locust_configs import OptimisticLockError as LocustLockError
+from app.services.scheduler_jobs import OptimisticLockError as SchedulerLockError
 from app.services.ssh.exceptions import SSHError
 
 logger = logging.getLogger(__name__)
@@ -1279,6 +1285,436 @@ async def admin_stack_deprovision(
     )
 
 
+# ---------------------------------------------------------------------------
+# Stacks scheduler + locust (Phase 5)
+# ---------------------------------------------------------------------------
+#
+# Per-stack editors for ``scheduler_jobs`` (the two cron-like trading jobs)
+# and ``locust_configs`` (the load-test parameters). Each editor lives at its
+# own URL so the routes stay small and the templates can focus on one form
+# at a time. After every successful upsert we re-push the rendered JSON to
+# the remote host — that push is best-effort: the DB is the source of truth
+# and a subsequent Redeploy from the stack detail page will converge if the
+# server happens to be unreachable right now.
+#
+# Both editors share the same UX patterns as the customer-edit form (Phase
+# 4): sticky form values on validation error, optimistic locking via a
+# hidden ``version`` field, and a server-rendered diff preview of the
+# proposed remote file against its current contents.
+
+
+def _diff_preview(before_text: str, after_text: str) -> list[str]:
+    """Return a unified diff between two JSON snapshots.
+
+    Wraps :func:`_compute_config_diff` so the scheduler / locust routes can
+    re-use the customer-page diff machinery without paying for the
+    ``config.ini`` password-redaction pass (neither ``scheduler_config.json``
+    nor ``locust_config.json`` carries secret material).
+    """
+    return _compute_config_diff(before_text, after_text)
+
+
+@router.get("/stacks/{stack_id}/scheduler")
+async def admin_stack_scheduler(
+    stack_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Render the scheduler editor for both jobs (cache_warmup + run_trading).
+
+    The two jobs share the page so the operator can eyeball both times at a
+    glance and avoid the "I edited cache_warmup but forgot run_trading"
+    failure mode. Missing rows render as empty forms with ``version=0`` —
+    the upsert handler treats that as a create.
+
+    A best-effort diff preview is included below the forms. If the SFTP read
+    fails (server unreachable, stack not yet provisioned) we degrade to an
+    empty diff — the operator can still save the form.
+    """
+    stack = await services_stacks.get_stack(db, stack_id)
+    if stack is None:
+        raise HTTPException(status_code=404, detail="stack not found")
+
+    jobs = await services_scheduler.list_jobs(db, stack_id=stack_id)
+    jobs_by_name = {j.name: j for j in jobs}
+
+    before_text = ""
+    after_text = ""
+    diff_lines: list[str] = []
+    diff_error: Optional[str] = None
+    try:
+        before_text, after_text = (
+            await services_stacks.render_scheduler_config_for_stack_preview(
+                db, stack_id
+            )
+        )
+        diff_lines = _diff_preview(before_text, after_text)
+    except SSHError as exc:
+        diff_error = (
+            "Could not fetch the current remote file for preview: "
+            f"{exc}"
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    ctx = _ctx(request, user, current_tab="/admin/stacks")
+    ctx["stack"] = stack
+    ctx["jobs_by_name"] = jobs_by_name
+    ctx["form_error"] = None
+    ctx["form_values"] = {}
+    ctx["before_text"] = before_text
+    ctx["after_text"] = after_text
+    ctx["diff_lines"] = diff_lines
+    ctx["diff_error"] = diff_error
+    ctx["save_url_prefix"] = f"/admin/stacks/{stack_id}/scheduler"
+    ctx["back_url"] = f"/admin/stacks/{stack_id}"
+    return templates.TemplateResponse("admin/stack_scheduler.html", ctx)
+
+
+@router.post("/stacks/{stack_id}/scheduler/{name}")
+async def admin_stack_scheduler_save(
+    stack_id: UUID,
+    name: str,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    time: str = Form(...),
+    enabled: Optional[str] = Form(None),  # checkbox: "on" or absent
+    version: int = Form(...),
+):
+    """Upsert one of the two scheduler jobs for a stack.
+
+    Form semantics:
+
+    * ``enabled`` is an HTML checkbox — the browser sends ``"on"`` when
+      checked and omits the field entirely when unchecked. We translate
+      that explicitly into a bool before handing it to pydantic.
+    * ``version=0`` means "first-time create"; the service treats it as a
+      sentinel. Updates echo the row's current ``version`` and a mismatch
+      raises ``OptimisticLockError`` → HTTP 409.
+
+    On a validation / lock / whitelist failure we re-render the editor with
+    a sticky form. SSH push failures are logged but NOT fatal — the DB row
+    is committed and a later Redeploy will converge.
+    """
+    if name not in ("cache_warmup", "run_trading"):
+        raise HTTPException(status_code=400, detail="unknown job name")
+
+    enabled_bool = enabled == "on"
+
+    def _rerender_with_error(message: str, code: int):
+        """Re-render the editor with an inline error + sticky form values.
+
+        We deliberately re-read the rows so the *other* (non-edited) job's
+        version is current — a long-running form session shouldn't lose the
+        unrelated job's lock just because this one failed to save.
+        """
+        return _render_scheduler_form_with_override(
+            request, user, db,
+            stack_id=stack_id, form_error=message, status_code=code,
+            sticky_name=name, sticky_time=time, sticky_enabled=enabled_bool,
+            sticky_version=version,
+        )
+
+    try:
+        payload = SchedulerJobUpsert(
+            time=time, enabled=enabled_bool, version=version,
+        )
+    except (ValidationError, ValueError) as exc:
+        # Per the Phase 4 pattern: no raw ``str(exc)`` for ``ValidationError``
+        # in flashes (pydantic's defaults are verbose and contain internal
+        # field paths). Use a generic banner for shape errors and the
+        # service's own message for ``ValueError`` (e.g. whitelist refusal).
+        message = (
+            "Invalid input. Please review the form fields and try again."
+            if isinstance(exc, ValidationError)
+            else str(exc)
+        )
+        return await _rerender_with_error(message, status.HTTP_400_BAD_REQUEST)
+
+    try:
+        await services_scheduler.upsert_job(
+            db, stack_id, name, payload, actor_id=user.id
+        )
+    except SchedulerLockError:
+        return await _rerender_with_error(
+            "This job was changed by someone else while you were editing. "
+            "Reload the page and re-apply your changes.",
+            status.HTTP_409_CONFLICT,
+        )
+    except ValueError as exc:
+        # Service-level rejection (unknown name / command not in whitelist).
+        return await _rerender_with_error(str(exc), status.HTTP_400_BAD_REQUEST)
+
+    # Best-effort push to remote. SSH failures don't roll back the DB row.
+    try:
+        await services_stacks.push_scheduler_config_for_stack(
+            db, stack_id, actor_id=user.id
+        )
+    except SSHError as exc:
+        logger.warning(
+            "admin_stack_scheduler_save: push failed stack=%s: %s",
+            stack_id, exc,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return _flash_redirect(request, f"/admin/stacks/{stack_id}/scheduler")
+
+
+async def _render_scheduler_form_with_override(
+    request: Request,
+    user: User,
+    db: AsyncSession,
+    *,
+    stack_id: UUID,
+    form_error: str,
+    status_code: int,
+    sticky_name: str,
+    sticky_time: str,
+    sticky_enabled: bool,
+    sticky_version: int,
+):
+    """Re-render the scheduler editor with an inline error for one job.
+
+    Pulled into a helper so the POST handler can call it from any error
+    branch without duplicating the context-building boilerplate. The
+    sticky-fields apply to ``sticky_name`` only; the other job re-renders
+    from its persisted row.
+    """
+    stack = await services_stacks.get_stack(db, stack_id)
+    if stack is None:
+        raise HTTPException(status_code=404, detail="stack not found")
+    jobs = await services_scheduler.list_jobs(db, stack_id=stack_id)
+    jobs_by_name = {j.name: j for j in jobs}
+
+    # Diff preview — same best-effort treatment as on GET.
+    before_text = ""
+    after_text = ""
+    diff_lines: list[str] = []
+    diff_error: Optional[str] = None
+    try:
+        before_text, after_text = (
+            await services_stacks.render_scheduler_config_for_stack_preview(
+                db, stack_id
+            )
+        )
+        diff_lines = _diff_preview(before_text, after_text)
+    except SSHError as exc:
+        diff_error = (
+            "Could not fetch the current remote file for preview: "
+            f"{exc}"
+        )
+    except LookupError as exc:
+        # Stack disappeared between the initial check and this rerender
+        # (e.g. concurrent deprovision). Return 404 not 500.
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    ctx = _ctx(request, user, current_tab="/admin/stacks")
+    ctx["stack"] = stack
+    ctx["jobs_by_name"] = jobs_by_name
+    ctx["form_error"] = form_error
+    ctx["form_values"] = {
+        "name": sticky_name,
+        "time": sticky_time,
+        "enabled": sticky_enabled,
+        "version": sticky_version,
+    }
+    ctx["before_text"] = before_text
+    ctx["after_text"] = after_text
+    ctx["diff_lines"] = diff_lines
+    ctx["diff_error"] = diff_error
+    ctx["save_url_prefix"] = f"/admin/stacks/{stack_id}/scheduler"
+    ctx["back_url"] = f"/admin/stacks/{stack_id}"
+    return templates.TemplateResponse(
+        "admin/stack_scheduler.html", ctx, status_code=status_code,
+    )
+
+
+@router.get("/stacks/{stack_id}/locust")
+async def admin_stack_locust(
+    stack_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Render the locust-config editor for a stack.
+
+    There's at most one locust row per stack (UNIQUE on ``stack_id``), so
+    this is a single-form page. Missing row → empty form with ``version=0``.
+    We also resolve the current ``agent_locust_processes_cap`` so the
+    template can show it as a hint next to the ``processes`` input.
+    """
+    stack = await services_stacks.get_stack(db, stack_id)
+    if stack is None:
+        raise HTTPException(status_code=404, detail="stack not found")
+
+    locust = await services_locust.get_locust_config(db, stack_id)
+    processes_cap = int(
+        await settings_store.get_setting(db, "agent_locust_processes_cap")
+    )
+
+    before_text = ""
+    after_text = ""
+    diff_lines: list[str] = []
+    diff_error: Optional[str] = None
+    try:
+        before_text, after_text = (
+            await services_stacks.render_locust_config_for_stack_preview(
+                db, stack_id
+            )
+        )
+        diff_lines = _diff_preview(before_text, after_text)
+    except SSHError as exc:
+        diff_error = (
+            "Could not fetch the current remote file for preview: "
+            f"{exc}"
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    ctx = _ctx(request, user, current_tab="/admin/stacks")
+    ctx["stack"] = stack
+    ctx["locust"] = locust  # may be None
+    ctx["processes_cap"] = processes_cap
+    ctx["form_error"] = None
+    ctx["form_values"] = {}
+    ctx["before_text"] = before_text
+    ctx["after_text"] = after_text
+    ctx["diff_lines"] = diff_lines
+    ctx["diff_error"] = diff_error
+    ctx["save_url"] = f"/admin/stacks/{stack_id}/locust"
+    ctx["back_url"] = f"/admin/stacks/{stack_id}"
+    return templates.TemplateResponse("admin/stack_locust.html", ctx)
+
+
+@router.post("/stacks/{stack_id}/locust")
+async def admin_stack_locust_save(
+    stack_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    users: int = Form(...),
+    spawn_rate: int = Form(...),
+    run_time: str = Form(...),
+    host: str = Form(...),
+    processes: int = Form(...),
+    version: int = Form(...),
+):
+    """Upsert the locust config row for a stack.
+
+    Validation flow mirrors the scheduler save handler: pydantic checks
+    field shape, then the service layer checks the dynamic ``processes``
+    cap against the admin-tunable setting. SSH push of the rendered JSON is
+    best-effort.
+    """
+    sticky = {
+        "users": users,
+        "spawn_rate": spawn_rate,
+        "run_time": run_time,
+        "host": host,
+        "processes": processes,
+        "version": version,
+    }
+
+    async def _rerender(message: str, code: int):
+        stack = await services_stacks.get_stack(db, stack_id)
+        if stack is None:
+            raise HTTPException(status_code=404, detail="stack not found")
+        locust = await services_locust.get_locust_config(db, stack_id)
+        processes_cap = int(
+            await settings_store.get_setting(
+                db, "agent_locust_processes_cap"
+            )
+        )
+        # Diff preview is informational only — re-do it best-effort.
+        before_text = ""
+        after_text = ""
+        diff_lines: list[str] = []
+        diff_error: Optional[str] = None
+        try:
+            before_text, after_text = (
+                await services_stacks.render_locust_config_for_stack_preview(
+                    db, stack_id
+                )
+            )
+            diff_lines = _diff_preview(before_text, after_text)
+        except SSHError as exc:
+            diff_error = (
+                "Could not fetch the current remote file for preview: "
+                f"{exc}"
+            )
+        except LookupError as exc:
+            # Stack disappeared between the initial check and this
+            # rerender. Return 404 not 500.
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        ctx = _ctx(request, user, current_tab="/admin/stacks")
+        ctx["stack"] = stack
+        ctx["locust"] = locust
+        ctx["processes_cap"] = processes_cap
+        ctx["form_error"] = message
+        ctx["form_values"] = sticky
+        ctx["before_text"] = before_text
+        ctx["after_text"] = after_text
+        ctx["diff_lines"] = diff_lines
+        ctx["diff_error"] = diff_error
+        ctx["save_url"] = f"/admin/stacks/{stack_id}/locust"
+        ctx["back_url"] = f"/admin/stacks/{stack_id}"
+        return templates.TemplateResponse(
+            "admin/stack_locust.html", ctx, status_code=code,
+        )
+
+    try:
+        payload = LocustUpsert(
+            users=users,
+            spawn_rate=spawn_rate,
+            run_time=run_time,
+            host=host,
+            processes=processes,
+            version=version,
+        )
+    except (ValidationError, ValueError) as exc:
+        message = (
+            "Invalid input. Please review the form fields and try again."
+            if isinstance(exc, ValidationError)
+            else str(exc)
+        )
+        return await _rerender(message, status.HTTP_400_BAD_REQUEST)
+
+    try:
+        await services_locust.upsert_locust_config(
+            db, stack_id, payload, actor_id=user.id
+        )
+    except LocustLockError:
+        return await _rerender(
+            "This locust config was changed by someone else while you were "
+            "editing. Reload the page and re-apply your changes.",
+            status.HTTP_409_CONFLICT,
+        )
+    except ValueError as exc:
+        # Dynamic processes-cap exceeded (or another service-side rejection).
+        return await _rerender(str(exc), status.HTTP_400_BAD_REQUEST)
+
+    try:
+        await services_stacks.push_locust_config_for_stack(
+            db, stack_id, actor_id=user.id
+        )
+    except SSHError as exc:
+        logger.warning(
+            "admin_stack_locust_save: push failed stack=%s: %s",
+            stack_id, exc,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return _flash_redirect(request, f"/admin/stacks/{stack_id}/locust")
+
+
 @router.get("/settings")
 async def admin_settings(
     request: Request,
@@ -1300,13 +1736,21 @@ async def admin_settings_save(
     db: AsyncSession = Depends(get_db),
     ocr_service_url: str = Form(...),
     agent_image_tag: str = Form(...),
+    agent_locust_processes_cap: int = Form(...),
 ):
     """Persist the admin Settings form.
 
     Validation lives in :class:`~app.schemas.settings_page.SettingsUpdate`.
     On failure we re-render the page with the user's typed values and a
-    form-level error (no field-by-field errors yet — the form only has two
-    fields, so a single banner is fine).
+    form-level error (no field-by-field errors yet — the form is small enough
+    that a single banner is fine).
+
+    The ``agent_locust_processes_cap`` field (Phase 5) is a fleet-wide ceiling
+    on the per-agent locust ``processes`` value. Per-agent overrides are
+    clamped to this cap by the locust-config editor and the renderer; the cap
+    itself is stored as a string in the ``settings`` table for uniformity with
+    the other rows. Pydantic gives us int → range validation; we re-stringify
+    on the way to ``set_setting``.
 
     On success we 303-redirect back to the page; HTMX callers see the same
     redirect via ``HX-Redirect`` so their URL bar updates.
@@ -1315,6 +1759,7 @@ async def admin_settings_save(
         validated = SettingsUpdate(
             ocr_service_url=ocr_service_url,
             agent_image_tag=agent_image_tag,
+            agent_locust_processes_cap=agent_locust_processes_cap,
         )
     except (ValidationError, ValueError) as exc:
         ctx = _ctx(request, user, current_tab="/admin/settings")
@@ -1323,6 +1768,7 @@ async def admin_settings_save(
         ctx["settings_values"] = {
             "ocr_service_url": ocr_service_url,
             "agent_image_tag": agent_image_tag,
+            "agent_locust_processes_cap": agent_locust_processes_cap,
         }
         if isinstance(exc, ValidationError):
             ctx["form_error"] = (
@@ -1341,6 +1787,12 @@ async def admin_settings_save(
     )
     await settings_store.set_setting(
         db, "agent_image_tag", validated.agent_image_tag, updated_by=user.id
+    )
+    await settings_store.set_setting(
+        db,
+        "agent_locust_processes_cap",
+        str(validated.agent_locust_processes_cap),
+        updated_by=user.id,
     )
     await db.commit()
 

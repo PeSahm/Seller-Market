@@ -36,6 +36,14 @@ DEFAULTS: dict[str, str] = {
     # Published trading-bot image — same one the existing root-level
     # deployment uses. See https://github.com/PeSahm/Seller-Market/pkgs/container/seller-market
     "agent_image_tag": "ghcr.io/pesahm/seller-market:latest",
+    # Per-stack ``processes`` ceiling for locust runs (Phase 5). Stored as
+    # the string form of an int so this dict can stay ``dict[str, str]`` —
+    # callers that need the numeric value do their own ``int()`` parse
+    # (see :func:`app.services.locust_configs._resolve_processes_cap`).
+    # Default ``4`` was chosen as a conservative cap on a 32-core fleet
+    # host: ~8 concurrent agents can each run a 4-process load without
+    # over-subscribing the box.
+    "agent_locust_processes_cap": "4",
 }
 
 
