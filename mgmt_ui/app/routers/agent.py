@@ -178,11 +178,15 @@ async def agent_dashboard(
     # can't act on (the admin needs to ack them anyway). The list page
     # surfaces info-level rows when the agent visits /agent/health.
     my_stack_ids = {s.id for s in my_stacks}
-    unacked = await services_health.list_signals(db, acked=False, limit=200)
-    own_unacked = (
-        unacked
-        if user.role == "admin"
-        else [s for s in unacked if s.stack_id in my_stack_ids]
+    # Tenant scope at the SQL layer (stack_ids=...) rather than after a
+    # global LIMIT — a noisy stack from another agent could otherwise
+    # push this agent's own unacked rows off the bottom of the 200-row
+    # window. Admin sees the whole fleet (stack_ids=None).
+    own_unacked = await services_health.list_signals(
+        db,
+        acked=False,
+        stack_ids=None if user.role == "admin" else my_stack_ids,
+        limit=200,
     )
     health_summary = {
         "unacked_total": len(own_unacked),
@@ -1665,19 +1669,23 @@ async def agent_health(
     elif acked == "no":
         acked_filter = False
 
+    # Tenant scope pushed into the SQL: pass stack_ids when the caller
+    # is an agent and they haven't already narrowed to a single stack
+    # they own. This guarantees their own rows can't be displaced by a
+    # noisy neighbouring stack inside the 300-row LIMIT window — the
+    # previous post-filter could silently drop signals an agent should
+    # have seen.
+    sql_stack_ids: Optional[set[UUID]] = None
+    if filter_stack is None and user.role != "admin":
+        sql_stack_ids = my_stack_ids
     rows = await services_health.list_signals(
         db,
         stack_id=filter_stack,
+        stack_ids=sql_stack_ids,
         severity=sev_filter,
         acked=acked_filter,
         limit=300,
     )
-    # Final tenant guard: when we didn't filter by a specific stack (or
-    # the agent's filter was dropped), the service returned EVERY signal
-    # in the cap window — post-filter down to just the agent's own
-    # stacks. Admins skip this because they're allowed to see everything.
-    if filter_stack is None and user.role != "admin":
-        rows = [r for r in rows if r.stack_id in my_stack_ids]
 
     # Pre-load ack'er usernames so the row template can render them
     # without lazy-loading per row.

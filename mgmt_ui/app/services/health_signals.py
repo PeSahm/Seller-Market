@@ -39,10 +39,10 @@ import re
 import shlex
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Iterable, Optional
 from uuid import UUID
 
-from sqlalchemy import desc, select, text
+from sqlalchemy import desc, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import hash_lock_key
@@ -390,17 +390,32 @@ async def ack_signal(
     ``ack_by`` / ``ack_at`` (which would lose the audit trail of who
     actually triaged it first).
 
+    Race-safety: we use a conditional UPDATE
+    (``WHERE id = :id AND ack_at IS NULL``) so the database atomically
+    picks one winner. The Python-level "check ack_at, then set" pattern
+    let two sessions both pass the read and then commit competing values
+    — the later commit overwrote the first ack and the audit log
+    accumulated a duplicate. ``returning(...)`` lets us know whether
+    THIS call performed the update (rowcount==1 with a returned row) or
+    lost the race (no rows).
+
     Commits immediately so the ack is visible to other transactions
     before any UI redirect.
     """
-    row = await db.get(HealthSignal, signal_id)
-    if row is None:
-        return None
-    if row.ack_at is not None:
-        return None
     now = datetime.now(timezone.utc)
-    row.ack_by = actor_id
-    row.ack_at = now
+    stmt = (
+        update(HealthSignal)
+        .where(HealthSignal.id == signal_id)
+        .where(HealthSignal.ack_at.is_(None))
+        .values(ack_by=actor_id, ack_at=now)
+        .returning(HealthSignal)
+    )
+    result = await db.execute(stmt)
+    row = result.scalar_one_or_none()
+    if row is None:
+        # Either the signal doesn't exist or it's already acked — either
+        # way no audit row, no commit (no work done in this txn).
+        return None
     db.add(
         AuditLog(
             actor_user_id=actor_id,
@@ -425,6 +440,7 @@ async def list_signals(
     db: AsyncSession,
     *,
     stack_id: Optional[UUID] = None,
+    stack_ids: Optional[Iterable[UUID]] = None,
     kind: Optional[str] = None,
     severity: Optional[str] = None,
     acked: Optional[bool] = None,
@@ -439,15 +455,30 @@ async def list_signals(
     both. ``limit`` defaults to 200 to match the UI's table page; callers
     paginating manually can override.
 
-    No tenant scoping happens here — the router layer is responsible for
-    constraining ``stack_id`` to stacks the caller owns. Agents see only
-    their own stacks; admins see everything.
+    Tenant scoping: pass ``stack_ids`` (an iterable of UUIDs) to restrict
+    rows to those stacks at the SQL layer. This is the correct way to
+    scope an agent's view — applying the limit AFTER the filter ensures
+    a noisy neighbouring stack can't push the agent's own signals off
+    the bottom of the page. ``stack_ids=None`` means "no per-stack
+    scope" (admin's whole-fleet view). An empty iterable returns the
+    empty list — explicitly distinguished from None so a router that
+    computed an empty agent-owned-stack set doesn't accidentally surface
+    the fleet.
+
+    Per-signal ``stack_id`` (singular) is for filtering down to a
+    specific stack the caller has already authorised, e.g. via a query
+    param on /admin/health.
     """
     stmt = (
         select(HealthSignal)
         .order_by(desc(HealthSignal.ts))
         .limit(limit)
     )
+    if stack_ids is not None:
+        stack_ids_list = list(stack_ids)
+        if not stack_ids_list:
+            return []
+        stmt = stmt.where(HealthSignal.stack_id.in_(stack_ids_list))
     if stack_id is not None:
         stmt = stmt.where(HealthSignal.stack_id == stack_id)
     if kind is not None:
