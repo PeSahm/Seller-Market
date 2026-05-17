@@ -38,6 +38,8 @@ os.environ.setdefault(
 )
 os.environ["ENABLE_HEALTH_WORKER"] = "false"
 os.environ["ENABLE_TRADE_INGESTOR"] = "false"
+os.environ["ENABLE_HEALTH_SCANNER"] = "false"
+os.environ["ENABLE_JANITOR"] = "false"
 
 import pytest  # noqa: E402  — imports must follow env wiring
 
@@ -47,3 +49,5 @@ def _disable_health_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     """Belt-and-braces: re-assert the env vars inside every test."""
     monkeypatch.setenv("ENABLE_HEALTH_WORKER", "false")
     monkeypatch.setenv("ENABLE_TRADE_INGESTOR", "false")
+    monkeypatch.setenv("ENABLE_HEALTH_SCANNER", "false")
+    monkeypatch.setenv("ENABLE_JANITOR", "false")

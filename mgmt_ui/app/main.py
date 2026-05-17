@@ -21,6 +21,8 @@ from app.routers.ws import run_stream as ws_run_stream
 from app.security.deps import get_current_user
 from app.settings import get_settings
 from app.workers.health import run_health_worker
+from app.workers.health_scanner import run_health_scanner
+from app.workers.janitor import run_janitor
 from app.workers.stack_health import run_stack_health_worker
 from app.workers.trade_ingestor import run_trade_ingest_worker
 
@@ -118,6 +120,15 @@ def create_app() -> FastAPI:
     # files via the parallel ``services.trade_ingestor.ingest_stack_once``.
     app.state.trade_ingest_stop = asyncio.Event()
     app.state.trade_ingest_task = None  # type: Optional[asyncio.Task[None]]
+    # Phase 8: background health-signal scanner. Polls every stack every
+    # ``health_scan_interval_seconds`` and upserts health_signals rows via
+    # ``services.health_signals.scan_stack_once``.
+    app.state.health_scanner_stop = asyncio.Event()
+    app.state.health_scanner_task = None  # type: Optional[asyncio.Task[None]]
+    # Phase 8: background janitor. Sweeps old order_results / run_logs /
+    # health_signals on a slow cadence via ``services.janitor.run_janitor_tick``.
+    app.state.janitor_stop = asyncio.Event()
+    app.state.janitor_task = None  # type: Optional[asyncio.Task[None]]
 
     @app.on_event("startup")
     async def _start_health_worker() -> None:
@@ -194,6 +205,64 @@ def create_app() -> FastAPI:
             await asyncio.wait_for(task, timeout=5.0)
         except asyncio.TimeoutError:
             logger.warning("trade ingestor worker did not stop in 5s; cancelling")
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    @app.on_event("startup")
+    async def _start_health_scanner() -> None:
+        if not settings.enable_health_scanner:
+            logger.info("health scanner worker disabled via settings")
+            return
+        app.state.health_scanner_task = asyncio.create_task(
+            run_health_scanner(
+                app.state.health_scanner_stop,
+                interval_seconds=settings.health_scan_interval_seconds,
+            ),
+            name="health-scanner-worker",
+        )
+
+    @app.on_event("shutdown")
+    async def _stop_health_scanner() -> None:
+        task: Optional[asyncio.Task[None]] = app.state.health_scanner_task
+        if task is None:
+            return
+        app.state.health_scanner_stop.set()
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("health scanner worker did not stop in 5s; cancelling")
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    @app.on_event("startup")
+    async def _start_janitor() -> None:
+        if not settings.enable_janitor:
+            logger.info("janitor worker disabled via settings")
+            return
+        app.state.janitor_task = asyncio.create_task(
+            run_janitor(
+                app.state.janitor_stop,
+                interval_seconds=settings.janitor_interval_seconds,
+            ),
+            name="janitor-worker",
+        )
+
+    @app.on_event("shutdown")
+    async def _stop_janitor() -> None:
+        task: Optional[asyncio.Task[None]] = app.state.janitor_task
+        if task is None:
+            return
+        app.state.janitor_stop.set()
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("janitor worker did not stop in 5s; cancelling")
             task.cancel()
             try:
                 await task

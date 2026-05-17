@@ -159,12 +159,62 @@
     {% endif %}
   </article>
 
-  {# Health signals — Phase 8 #}
+  {# Health signals — live data from Phase 8 #}
   <article class="card">
     <div class="card-header">
       <h2 class="h3">Health signals</h2>
+      <a class="btn btn--ghost btn--sm" href="/admin/health">view all &rarr;</a>
     </div>
-    <p class="text-muted text-small">Coming in Phase 8 — broker 429s, captcha failures, clock-skew warnings.</p>
+    {% if health_summary.unacked_total == 0 %}
+      <p class="text-muted text-small">All clear &mdash; no unacked signals.</p>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-value">{{ health_summary.unacked_total }}</div>
+          <div class="metric-label text-muted text-small">unacked</div>
+        </div>
+        {% if health_summary.critical %}
+        <div class="metric">
+          <div class="metric-value">
+            <a href="/admin/health?severity=critical&amp;acked=no">
+              <span class="badge badge--down">{{ health_summary.critical }}</span>
+            </a>
+          </div>
+          <div class="metric-label text-muted text-small">critical</div>
+        </div>
+        {% endif %}
+        {% if health_summary.error %}
+        <div class="metric">
+          <div class="metric-value">
+            <a href="/admin/health?severity=error&amp;acked=no">
+              <span class="badge badge--down">{{ health_summary.error }}</span>
+            </a>
+          </div>
+          <div class="metric-label text-muted text-small">error</div>
+        </div>
+        {% endif %}
+        {% if health_summary.warning %}
+        <div class="metric">
+          <div class="metric-value">
+            <a href="/admin/health?severity=warning&amp;acked=no">
+              <span class="badge badge--pending">{{ health_summary.warning }}</span>
+            </a>
+          </div>
+          <div class="metric-label text-muted text-small">warning</div>
+        </div>
+        {% endif %}
+        {% if health_summary.info %}
+        <div class="metric">
+          <div class="metric-value">
+            <a href="/admin/health?severity=info&amp;acked=no">
+              <span class="badge">{{ health_summary.info }}</span>
+            </a>
+          </div>
+          <div class="metric-label text-muted text-small">info</div>
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
   </article>
 
   {# Recent runs — live data from Phase 6 #}

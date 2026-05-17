@@ -1,0 +1,136 @@
+{#
+  Agent health-signals list (Phase 8) — read-only.
+
+  Same shape as the admin page but with NO Ack buttons. Per the plan,
+  only admins can ack signals (keeps the audit trail centralised on one
+  operator role). The footer points the agent at their admin to escalate.
+
+  Cross-tenant safety: the router post-filters by stack_id IN my_stack_ids
+  before this template ever runs; we can render every signal in
+  ``signals`` without further guarding here.
+
+  Filter bar drops the "kind" free-text input the admin page has — agents
+  rarely know the catalogue's kind names off the top of their head.
+  Severity + stack + ack-status is enough for the agent's "is anything
+  broken on my fleet right now" question.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Health signals{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Health signals</h1>
+    <p class="text-muted text-small">
+      Anomalies detected by the in-stack log scanner on your stacks &mdash;
+      broker rate limits, captcha failures, auth failures, OCR outages.
+      This view is read-only; ask your admin to acknowledge a row once
+      it's been handled.
+    </p>
+  </div>
+</div>
+
+{% set _any_filter = filter_stack_id or filter_severity or filter_acked %}
+
+<form method="get" action="/agent/health" class="filter-bar">
+  <select name="severity" class="input">
+    <option value="">Any severity</option>
+    {% for sev in ['critical', 'error', 'warning', 'info'] %}
+      <option value="{{ sev }}" {% if filter_severity == sev %}selected{% endif %}>{{ sev }}</option>
+    {% endfor %}
+  </select>
+  <select name="stack_id" class="input">
+    <option value="">All my stacks</option>
+    {% for s in all_stacks %}
+      <option value="{{ s.id }}" {% if filter_stack_id and filter_stack_id == s.id|string %}selected{% endif %}>
+        {{ s.compose_project }}
+      </option>
+    {% endfor %}
+  </select>
+  <select name="acked" class="input">
+    <option value="" {% if filter_acked == '' %}selected{% endif %}>Any ack status</option>
+    <option value="no" {% if filter_acked == 'no' %}selected{% endif %}>Unacked</option>
+    <option value="yes" {% if filter_acked == 'yes' %}selected{% endif %}>Acked</option>
+  </select>
+  <button class="btn btn--ghost btn--sm" type="submit">Apply</button>
+  {% if _any_filter %}
+    <a class="btn btn--ghost btn--sm" href="/agent/health">Clear</a>
+  {% endif %}
+</form>
+
+{% if not signals %}
+<div class="card">
+  {% if _any_filter %}
+    <p class="text-muted">All clear &mdash; no signals match these filters.</p>
+    <p class="text-small text-muted">
+      Try widening the severity or clearing the stack filter.
+    </p>
+  {% else %}
+    <p class="text-muted">All clear &mdash; no health signals.</p>
+    <p class="text-small text-muted">
+      The scanner runs in the background; new anomalies will surface here
+      within a tick of being logged on one of your stacks.
+    </p>
+  {% endif %}
+</div>
+{% else %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>When</th>
+      <th>Severity</th>
+      <th>Kind</th>
+      <th>Message</th>
+      <th>Stack</th>
+      <th>Acked by</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for signal in signals %}
+    {% set stack = stacks_by_id.get(signal.stack_id) if signal.stack_id else None %}
+    <tr class="signal-row">
+      <td class="text-small text-muted">
+        {{ signal.ts.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+      </td>
+      <td>
+        {% if signal.severity in ('critical', 'error') %}
+          <span class="badge badge--down">{{ signal.severity }}</span>
+        {% elif signal.severity == 'warning' %}
+          <span class="badge badge--pending">{{ signal.severity }}</span>
+        {% else %}
+          <span class="badge">{{ signal.severity }}</span>
+        {% endif %}
+      </td>
+      <td><code class="text-small">{{ signal.kind }}</code></td>
+      <td dir="auto">{{ signal.message }}</td>
+      <td>
+        {% if stack %}
+          <a href="/agent/stacks/{{ stack.id }}"><code class="text-small">{{ stack.compose_project }}</code></a>
+        {% else %}
+          <span class="text-muted">&mdash;</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if signal.ack_at %}
+          {% set acker = users_by_id.get(signal.ack_by) if users_by_id else None %}
+          {% if acker %}
+            <span class="text-small" dir="auto">{{ acker.username }}</span>
+          {% else %}
+            <span class="text-muted">&mdash;</span>
+          {% endif %}
+          <div class="text-small text-muted">
+            {{ signal.ack_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+          </div>
+        {% else %}
+          <span class="text-muted">&mdash;</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="text-small text-muted" style="margin-top: 12px;">
+  To acknowledge a signal, contact your admin.
+</p>
+{% endif %}
+{% endblock %}
