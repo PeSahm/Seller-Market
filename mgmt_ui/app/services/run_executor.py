@@ -393,6 +393,15 @@ async def _run_executor_loop(
                 await db.commit()
         except Exception:  # noqa: BLE001 — never let the cleanup raise
             logger.exception("release_lock failed for run=%s", run_id)
+        # Kick the ingestor so this run's order_results show up in the UI
+        # within seconds instead of waiting for the next polling tick.
+        # Import inside the try/except so a Phase-7 module-load failure
+        # can't break Phase 6's run finalization.
+        try:
+            from app.workers.trade_ingestor import kick_ingest_for_stack
+            kick_ingest_for_stack(stack_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("trade-ingest kick failed for run=%s (ignored)", run_id)
         # Sentinel publish so WS clients close cleanly.
         _publish(
             run_id, StreamingResult(exit_code=final_exit_code, captured=bytes(captured))

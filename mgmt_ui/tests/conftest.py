@@ -37,11 +37,13 @@ os.environ.setdefault(
     "/nonexistent/key.part2",
 )
 os.environ["ENABLE_HEALTH_WORKER"] = "false"
+os.environ["ENABLE_TRADE_INGESTOR"] = "false"
 
 import pytest  # noqa: E402  — imports must follow env wiring
 
 
 @pytest.fixture(autouse=True)
 def _disable_health_worker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Belt-and-braces: re-assert the env var inside every test."""
+    """Belt-and-braces: re-assert the env vars inside every test."""
     monkeypatch.setenv("ENABLE_HEALTH_WORKER", "false")
+    monkeypatch.setenv("ENABLE_TRADE_INGESTOR", "false")

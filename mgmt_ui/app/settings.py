@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     enable_stack_health_worker: bool = Field(
         default=True, alias="ENABLE_STACK_HEALTH_WORKER"
     )
+    enable_trade_ingestor: bool = Field(
+        default=True, alias="ENABLE_TRADE_INGESTOR"
+    )
+    trade_ingest_interval_seconds: int = Field(
+        default=30, alias="TRADE_INGEST_INTERVAL_SECONDS"
+    )
 
     # Run logs (Phase 6). Captured stdout+stderr from each docker exec
     # run is archived under this directory as ``<run_id>.log`` with mode
