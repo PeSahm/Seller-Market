@@ -8,12 +8,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
 import socket
 import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
 import paramiko
+
+# Aliased so the inner `_blocking` closure can reference it cleanly
+# without the surrounding scope colliding with any future `shlex` use.
+shlex_quote = shlex.quote
 
 from app.models.servers import Server
 from app.services.ssh.exceptions import SSHConnectionError, SSHError
@@ -60,6 +65,11 @@ async def stream_remote_command(
     queue: asyncio.Queue = asyncio.Queue()
     DONE = object()
     loop = asyncio.get_event_loop()
+    # Single-element bucket so the asyncio-side timeout handler can grab
+    # the paramiko Channel that the thread opened and close it from
+    # outside. Lists are thread-safe for the append-then-read access we
+    # do here.
+    chan_ref: list = []
 
     async def _pump() -> None:
         """Drive the SSH channel in a worker thread; push events into queue."""
@@ -73,8 +83,29 @@ async def stream_remote_command(
                         raise SSHConnectionError("ssh transport not active")
                     chan = transport.open_session()
                     try:
+                        # Expose the channel to the outer scope so the
+                        # asyncio-side timeout handler can forcibly close
+                        # it (which signals SSH_MSG_CHANNEL_CLOSE → docker
+                        # exec EOF → in-container process killed). See PR
+                        # #49 review #5.
+                        chan_ref.append(chan)
                         chan.settimeout(1.0)  # non-blocking-ish read cadence
-                        chan.exec_command(command)
+                        # Wrap the user-supplied command in the GNU
+                        # `timeout` utility (available on every supported
+                        # trading server image) as a belt-and-suspenders:
+                        # if our asyncio-side close somehow fails to kill
+                        # the remote (very unlikely with docker exec but
+                        # has bitten us before with backgrounded children),
+                        # the remote `timeout` SIGTERMs after the same
+                        # window, then SIGKILLs 5 s later. The extra 30 s
+                        # buffer means our local timeout fires first under
+                        # normal conditions.
+                        remote_timeout = int(timeout) + 30
+                        wrapped = (
+                            f"timeout --kill-after=5 {remote_timeout} sh -c "
+                            f"{shlex_quote(command)}"
+                        )
+                        chan.exec_command(wrapped)
                         stdout_buf = bytearray()
                         stderr_buf = bytearray()
                         # We loop until channel reports exit AND drains.
@@ -138,8 +169,24 @@ async def stream_remote_command(
                         asyncio.to_thread(_blocking), timeout=timeout
                     )
                 except asyncio.TimeoutError:
+                    # asyncio.wait_for cancels the inner coroutine but
+                    # CANNOT kill the thread that asyncio.to_thread
+                    # spawned. We have to close the SSH channel ourselves
+                    # to actually terminate the remote process — without
+                    # this, docker exec would keep running on the trading
+                    # server even though we've already finalized the run
+                    # as failed. See PR #49 review #5.
+                    if chan_ref:
+                        try:
+                            chan_ref[0].close()
+                        except Exception:  # noqa: BLE001
+                            pass
                     await queue.put(
-                        LineEvent("stderr", b"<run-executor> timeout exceeded; killed")
+                        LineEvent(
+                            "stderr",
+                            f"<run-executor> timeout exceeded ({timeout}s); "
+                            f"channel closed → remote SIGHUP".encode(),
+                        )
                     )
                     rc = -1
                 await queue.put(StreamingResult(exit_code=rc, captured=bytes(captured)))
