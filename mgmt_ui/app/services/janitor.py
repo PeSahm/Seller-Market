@@ -452,7 +452,27 @@ async def run_janitor_tick(
     Per-stack order_results cleanup iterates :class:`AgentStack` rows
     sequentially -- there's no parallelism here; the worker controls
     cadence and we keep SSH pressure low.
+
+    Raises:
+        ValueError: if any retention value is negative. A negative value
+            shifts the cutoff into the future and would purge *every*
+            qualifying row — a recoverable typo in a config file
+            shouldn't trigger mass deletion. Zero is allowed (delete
+            everything older than "now") since some operators legitimately
+            run a one-shot cleanup with retention_days=0.
     """
+    for name, value in (
+        ("order_results_retention_days", order_results_retention_days),
+        ("run_log_retention_days", run_log_retention_days),
+        ("health_signal_retention_days", health_signal_retention_days),
+    ):
+        if value < 0:
+            raise ValueError(
+                f"janitor retention {name}={value!r} must be >= 0; "
+                f"refusing to run with a negative retention which would "
+                f"shift the cutoff into the future and purge fresh data"
+            )
+
     tick = JanitorTickResult()
 
     # 1. Order results -- per stack.
