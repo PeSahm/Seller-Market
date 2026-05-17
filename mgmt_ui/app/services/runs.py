@@ -176,6 +176,16 @@ async def finalize_run(
         killed) — the latter aggregates both because operators tend to
         page on "any non-clean exit" rather than the specific reason.
     """
+    # Belt-and-braces: even though RunStatus is a Literal that the type
+    # checker would catch, a caller that bypassed type hints could pass
+    # ``"running"`` and produce a row with status=running AND finished_at
+    # set — corrupt. Reject explicitly. See PR #49 review #4.
+    if status not in ("success", "failed", "killed"):
+        raise ValueError(
+            f"finalize_run requires a terminal status "
+            f"(success / failed / killed); got {status!r}"
+        )
+
     run = await db.get(Run, run_id)
     if run is None:
         raise LookupError(f"run {run_id} not found")
