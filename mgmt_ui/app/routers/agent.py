@@ -152,10 +152,28 @@ async def agent_dashboard(
         "done": sum(1 for t in own_trades if t.is_done),
         "pending": sum(1 for t in own_trades if not t.is_done),
     }
+    # Phase 7 follow-up: "My stacks" card. Agents see only their own
+    # stacks; admins acting as agent see the whole fleet. Same convention
+    # as runs and trades above.
+    all_stacks = await services_stacks.list_stacks(db)
+    my_stacks = (
+        all_stacks
+        if user.role == "admin"
+        else [s for s in all_stacks if s.agent_id == user.id]
+    )
+    stacks_summary = {
+        "total": len(my_stacks),
+        "up": sum(1 for s in my_stacks if s.status == "up"),
+        "down": sum(1 for s in my_stacks if s.status == "down"),
+        "provisioning": sum(
+            1 for s in my_stacks if s.status == "provisioning"
+        ),
+    }
     ctx = _ctx(request, user, current_tab="/agent/dashboard")
     ctx["customer_summary"] = customer_summary
     ctx["runs_summary"] = runs_summary
     ctx["trades_summary"] = trades_summary
+    ctx["stacks_summary"] = stacks_summary
     return templates.TemplateResponse("agent/dashboard.html", ctx)
 
 
@@ -1193,6 +1211,63 @@ async def agent_stack_run_now(
     return Response(
         status_code=status.HTTP_303_SEE_OTHER,
         headers={"Location": redirect_to},
+    )
+
+
+@router.post("/stacks/{stack_id}/redeploy")
+async def agent_stack_redeploy(
+    stack_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-render config + ``docker compose up -d --force-recreate`` on the
+    agent's own stack.
+
+    Useful when the agent has just saved a new scheduler time or locust
+    config and wants the in-container scheduler to pick it up
+    immediately instead of waiting for the next 1-second poll (the bot
+    DOES poll the bind-mounted file every second, but the container
+    has to be re-created if any volume mount's inode changed — which
+    is rare for the in-place write we do, but harmless to force).
+
+    Tenant scoping: 404 (not 403) if this isn't the agent's own stack.
+    Deprovision is intentionally *not* exposed to agents — that
+    destructive action stays admin-only.
+    """
+    _require_agent_or_admin(user)
+    stack = await _load_stack_for_agent(db, user, stack_id)
+    try:
+        result = await services_stacks.redeploy_stack(
+            db, stack.id, actor_id=user.id
+        )
+    except RuntimeError as exc:
+        # Compose lock busy — surface as a 400 with the partial.
+        from app.schemas.stack import StackActionResult
+        result = StackActionResult(
+            ok=False,
+            stack_id=stack.id,
+            status=stack.status,
+            message=str(exc),
+            log_tail="",
+        )
+    except SSHError as exc:
+        # Same graceful-degrade as admin: render the action partial with
+        # the error instead of bubbling a 500.
+        from app.schemas.stack import StackActionResult
+        result = StackActionResult(
+            ok=False,
+            stack_id=stack.id,
+            status="down",
+            message=f"redeploy failed: {exc}",
+            log_tail=str(exc),
+        )
+    ctx = _ctx(request, user, current_tab="/agent/stacks")
+    ctx["result"] = result
+    # Re-use the admin partial — it's identical markup, no admin-only
+    # bits leaked into it.
+    return templates.TemplateResponse(
+        "admin/partials/stack_action_result.html", ctx
     )
 
 

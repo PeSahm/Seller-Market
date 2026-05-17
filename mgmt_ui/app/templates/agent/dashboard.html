@@ -46,9 +46,47 @@
     {% endif %}
   </article>
 
+  {# My stacks — live data #}
   <article class="card">
-    <h2 class="h3">My stacks</h2>
-    <p class="text-muted text-small">(coming soon)</p>
+    <div class="card-header">
+      <h2 class="h3">My stacks</h2>
+      <a class="btn btn--ghost btn--sm" href="/agent/stacks">view all →</a>
+    </div>
+    {% if stacks_summary.total == 0 %}
+      <p class="text-muted text-small">No stacks yet.</p>
+      <p class="text-small text-muted">
+        Stacks are provisioned by your admin when you assign your first customer to a server.
+      </p>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-value">{{ stacks_summary.total }}</div>
+          <div class="metric-label text-muted text-small">total</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--up">{{ stacks_summary.up }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">up</div>
+        </div>
+        {% if stacks_summary.down %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--down">{{ stacks_summary.down }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">down</div>
+        </div>
+        {% endif %}
+        {% if stacks_summary.provisioning %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--pending">{{ stacks_summary.provisioning }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">provisioning</div>
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
   </article>
 
   {# Phase 6: live run counts. Admins acting as agent see the whole fleet
