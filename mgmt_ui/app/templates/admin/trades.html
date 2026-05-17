@@ -133,6 +133,7 @@
     <tr>
       <th>When</th>
       <th>Customer</th>
+      <th>Tracking #</th>
       <th>Symbol / ISIN</th>
       <th>Side</th>
       <th>Price</th>
@@ -160,6 +161,7 @@
           <span class="text-muted">&mdash;</span>
         {% endif %}
       </td>
+      <td><code class="text-small" dir="ltr">{{ t.tracking_number }}</code></td>
       <td>
         {% if t.symbol %}
           <code class="text-small" dir="auto">{{ t.symbol }}</code>
@@ -177,10 +179,20 @@
       <td class="text-small">{{ t.volume }}</td>
       <td class="text-small">{{ t.executed_volume }}</td>
       <td>
-        {% if t.is_done %}
-          <span class="badge badge--up" title="{{ t.state_desc }}">done</span>
+        {# Show the broker's actual state_desc (e.g. "ثبت سفارش در هسته"
+           = order placed in core, "اجرا شده" = executed). The
+           up/pending colour comes from is_done; the label itself comes
+           from the broker so a Persian-speaking operator can tell the
+           difference between "queued at broker" and "executed". #}
+        {% if t.state_desc %}
+          {% if t.is_done %}
+            <span class="badge badge--up" dir="auto">{{ t.state_desc }}</span>
+          {% else %}
+            <span class="badge badge--pending" dir="auto">{{ t.state_desc }}</span>
+          {% endif %}
         {% else %}
-          <span class="badge badge--pending" title="{{ t.state_desc }}">pending</span>
+          {% if t.is_done %}<span class="badge badge--up">done</span>
+          {% else %}<span class="badge badge--pending">pending</span>{% endif %}
         {% endif %}
       </td>
       <td class="text-small">

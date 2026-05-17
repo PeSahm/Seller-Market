@@ -85,6 +85,7 @@
   <thead><tr>
     <th>When</th>
     <th>Customer</th>
+    <th>Tracking #</th>
     <th>Symbol / ISIN</th>
     <th>Side</th>
     <th>Price</th>
@@ -114,6 +115,7 @@
           <span class="text-muted">—</span>
         {% endif %}
       </td>
+      <td><code class="text-small" dir="ltr">{{ t.tracking_number }}</code></td>
       <td class="text-small">
         {% if t.symbol %}<code dir="auto">{{ t.symbol }}</code>{% else %}<code>{{ t.isin }}</code>{% endif %}
       </td>
@@ -130,10 +132,19 @@
       <td class="text-small text-muted">{{ t.volume }}</td>
       <td class="text-small">{{ t.executed_volume }}</td>
       <td>
-        {% if t.is_done %}
-          <span class="badge badge--up" title="{{ t.state_desc }}">{{ t.state_desc }}</span>
+        {# State badge shows the broker's actual state_desc verbatim
+           (e.g. "ثبت سفارش در هسته" = order placed in core, "اجرا شده"
+           = executed). is_done picks the badge colour. dir="auto"
+           keeps the Persian text rendering correctly. #}
+        {% if t.state_desc %}
+          {% if t.is_done %}
+            <span class="badge badge--up" dir="auto">{{ t.state_desc }}</span>
+          {% else %}
+            <span class="badge badge--pending" dir="auto">{{ t.state_desc }}</span>
+          {% endif %}
         {% else %}
-          <span class="badge badge--pending" title="{{ t.state_desc }}">{{ t.state_desc }}</span>
+          {% if t.is_done %}<span class="badge badge--up">done</span>
+          {% else %}<span class="badge badge--pending">pending</span>{% endif %}
         {% endif %}
       </td>
       <td class="text-small">
