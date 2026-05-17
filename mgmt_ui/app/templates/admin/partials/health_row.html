@@ -1,0 +1,65 @@
+{#
+  Single health-signal row (Phase 8).
+
+  Used both in the main /admin/health table render AND as the HTMX swap
+  target after /admin/health/<id>/ack. Both contexts must populate the
+  same vars:
+
+    - signal:       the HealthSignal row
+    - stack:        the AgentStack (may be None for stack-less signals)
+    - users_by_id:  optional dict mapping UUID -> User for the ack'er
+
+  Severity badge palette:
+    critical / error -> badge--down (red)
+    warning          -> badge--pending (amber)
+    info             -> plain badge (grey)
+
+  We render the row's id attribute as ``signal-<id>`` so an HTMX retarget
+  outside the table (e.g. a toast pointer) still has a stable hook, and
+  so a later "ack from anywhere" affordance can target by id.
+#}
+<tr id="signal-{{ signal.id }}" class="signal-row">
+  <td class="text-small text-muted">
+    {{ signal.ts.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+  </td>
+  <td>
+    {% if signal.severity in ('critical', 'error') %}
+      <span class="badge badge--down">{{ signal.severity }}</span>
+    {% elif signal.severity == 'warning' %}
+      <span class="badge badge--pending">{{ signal.severity }}</span>
+    {% else %}
+      <span class="badge">{{ signal.severity }}</span>
+    {% endif %}
+  </td>
+  <td><code class="text-small">{{ signal.kind }}</code></td>
+  <td dir="auto">{{ signal.message }}</td>
+  <td>
+    {% if stack %}
+      <a href="/admin/stacks/{{ stack.id }}"><code class="text-small">{{ stack.compose_project }}</code></a>
+    {% else %}
+      <span class="text-muted">&mdash;</span>
+    {% endif %}
+  </td>
+  <td>
+    {% if signal.ack_at %}
+      {% set acker = users_by_id.get(signal.ack_by) if users_by_id else None %}
+      <span class="text-small" dir="auto">{{ acker.username if acker else signal.ack_by }}</span>
+      <div class="text-small text-muted">
+        {{ signal.ack_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+      </div>
+    {% else %}
+      <span class="text-muted">&mdash;</span>
+    {% endif %}
+  </td>
+  <td>
+    {% if not signal.ack_at %}
+      <button
+        class="btn btn--ghost btn--sm"
+        type="button"
+        hx-post="/admin/health/{{ signal.id }}/ack"
+        hx-target="closest tr"
+        hx-swap="outerHTML"
+      >Ack</button>
+    {% endif %}
+  </td>
+</tr>

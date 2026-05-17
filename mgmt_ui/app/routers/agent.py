@@ -46,6 +46,7 @@ from app.schemas.scheduler import SchedulerJobUpsert
 from app.security.deps import get_current_user
 from app.services import agents as services_agents
 from app.services import customers as services_customers
+from app.services import health_signals as services_health
 from app.services import locust_configs as services_locust
 from app.services import run_executor
 from app.services import runs as services_runs
@@ -169,11 +170,32 @@ async def agent_dashboard(
             1 for s in my_stacks if s.status == "provisioning"
         ),
     }
+    # Phase 8: unacked health-signals roll-up scoped to the agent's stacks.
+    # Admins acting-as-agent see the whole fleet (same convention as the
+    # runs and trades cards above); agents see only signals tagged to one
+    # of their own stacks. We deliberately drop the "info" tier from the
+    # agent card — info-level signals are operational noise the agent
+    # can't act on (the admin needs to ack them anyway). The list page
+    # surfaces info-level rows when the agent visits /agent/health.
+    my_stack_ids = {s.id for s in my_stacks}
+    unacked = await services_health.list_signals(db, acked=False, limit=200)
+    own_unacked = (
+        unacked
+        if user.role == "admin"
+        else [s for s in unacked if s.stack_id in my_stack_ids]
+    )
+    health_summary = {
+        "unacked_total": len(own_unacked),
+        "critical": sum(1 for s in own_unacked if s.severity == "critical"),
+        "error": sum(1 for s in own_unacked if s.severity == "error"),
+        "warning": sum(1 for s in own_unacked if s.severity == "warning"),
+    }
     ctx = _ctx(request, user, current_tab="/agent/dashboard")
     ctx["customer_summary"] = customer_summary
     ctx["runs_summary"] = runs_summary
     ctx["trades_summary"] = trades_summary
     ctx["stacks_summary"] = stacks_summary
+    ctx["health_summary"] = health_summary
     return templates.TemplateResponse("agent/dashboard.html", ctx)
 
 
@@ -1572,6 +1594,111 @@ async def agent_trade_detail(
     ctx["run"] = run
     ctx["raw_pretty"] = raw_pretty
     return templates.TemplateResponse("agent/trade_detail.html", ctx)
+
+
+# ---------------------------------------------------------------------------
+# Health signals (Phase 8)
+# ---------------------------------------------------------------------------
+#
+# Read-only list scoped to the current agent's stacks. Admins acting-as-agent
+# see the whole fleet, same convention as /agent/runs and /agent/trades.
+#
+# Agents cannot ack signals here — only admins can, via /admin/health/<id>/ack.
+# Keeping the ack action admin-only preserves a clean audit trail (one
+# operator role doing the triage) and matches the broader "destructive /
+# state-changing actions stay admin-only" pattern in this module.
+#
+# Cross-tenant safety: we load the agent's own stacks first, build a set
+# of allowed stack ids, then post-filter the signals list. An agent who
+# hand-edits a stack_id query param that belongs to someone else gets
+# silently dropped (NOT 404'd) so we don't leak the existence of other
+# tenants' stacks.
+
+
+@router.get("/health")
+async def agent_health(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    stack_id: Optional[str] = None,
+    severity: Optional[str] = None,
+    acked: Optional[str] = None,
+):
+    """Agent's own stacks' health signals.
+
+    Admins see the whole fleet (same convention as /agent/runs etc).
+    Filtering and signal listing match the admin route's contract. The
+    ``stack_id`` filter is silently dropped if it refers to a stack the
+    agent does not own — we never 404 on cross-tenant UUIDs because that
+    would let an agent probe the UUID space.
+    """
+    _require_agent_or_admin(user)
+    all_stacks = await services_stacks.list_stacks(db)
+    my_stacks = (
+        all_stacks
+        if user.role == "admin"
+        else [s for s in all_stacks if s.agent_id == user.id]
+    )
+    my_stack_ids = {s.id for s in my_stacks}
+
+    def _uuid_or_none(s):
+        if not s:
+            return None
+        try:
+            return UUID(s)
+        except (ValueError, TypeError):
+            return None
+
+    filter_stack = _uuid_or_none(stack_id)
+    if filter_stack is not None and filter_stack not in my_stack_ids:
+        # Silently drop a stack filter the agent doesn't own. NOT 404 —
+        # we don't want to leak whether *some other* agent's stack id is
+        # valid.
+        filter_stack = None
+
+    sev_filter = (
+        severity if severity in ("info", "warning", "error", "critical") else None
+    )
+    acked_filter: Optional[bool] = None
+    if acked == "yes":
+        acked_filter = True
+    elif acked == "no":
+        acked_filter = False
+
+    rows = await services_health.list_signals(
+        db,
+        stack_id=filter_stack,
+        severity=sev_filter,
+        acked=acked_filter,
+        limit=300,
+    )
+    # Final tenant guard: when we didn't filter by a specific stack (or
+    # the agent's filter was dropped), the service returned EVERY signal
+    # in the cap window — post-filter down to just the agent's own
+    # stacks. Admins skip this because they're allowed to see everything.
+    if filter_stack is None and user.role != "admin":
+        rows = [r for r in rows if r.stack_id in my_stack_ids]
+
+    # Pre-load ack'er usernames so the row template can render them
+    # without lazy-loading per row.
+    ack_user_ids = {r.ack_by for r in rows if r.ack_by}
+    users_by_id: dict[UUID, "User"] = {}
+    if ack_user_ids:
+        result = await db.execute(
+            select(User).where(User.id.in_(ack_user_ids))
+        )
+        for u in result.scalars().all():
+            users_by_id[u.id] = u
+
+    ctx = _ctx(request, user, current_tab="/agent/health")
+    ctx["signals"] = rows
+    ctx["stacks_by_id"] = {s.id: s for s in my_stacks}
+    ctx["users_by_id"] = users_by_id
+    ctx["all_stacks"] = sorted(my_stacks, key=lambda s: s.compose_project)
+    ctx["filter_stack_id"] = stack_id or ""
+    ctx["filter_severity"] = severity or ""
+    ctx["filter_acked"] = acked or ""
+    return templates.TemplateResponse("agent/health.html", ctx)
 
 
 # Silence unused-import lint for AgentStack + select — referenced indirectly

@@ -177,5 +177,56 @@
       </div>
     {% endif %}
   </article>
+
+  {# Phase 8: Health signals — unacked counts scoped to the agent's own stacks
+     (admins acting as agent see the whole fleet). We deliberately omit the
+     "info" tier metric the admin card surfaces — info-level signals are
+     operational noise the agent can't action (only the admin can ack). #}
+  <article class="card">
+    <div class="card-header">
+      <h2 class="h3">Health signals</h2>
+      <a class="btn btn--ghost btn--sm" href="/agent/health">view all &rarr;</a>
+    </div>
+    {% if health_summary.unacked_total == 0 %}
+      <p class="text-muted text-small">All clear &mdash; no unacked signals.</p>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-value">{{ health_summary.unacked_total }}</div>
+          <div class="metric-label text-muted text-small">unacked</div>
+        </div>
+        {% if health_summary.critical %}
+        <div class="metric">
+          <div class="metric-value">
+            <a href="/agent/health?severity=critical&amp;acked=no">
+              <span class="badge badge--down">{{ health_summary.critical }}</span>
+            </a>
+          </div>
+          <div class="metric-label text-muted text-small">critical</div>
+        </div>
+        {% endif %}
+        {% if health_summary.error %}
+        <div class="metric">
+          <div class="metric-value">
+            <a href="/agent/health?severity=error&amp;acked=no">
+              <span class="badge badge--down">{{ health_summary.error }}</span>
+            </a>
+          </div>
+          <div class="metric-label text-muted text-small">error</div>
+        </div>
+        {% endif %}
+        {% if health_summary.warning %}
+        <div class="metric">
+          <div class="metric-value">
+            <a href="/agent/health?severity=warning&amp;acked=no">
+              <span class="badge badge--pending">{{ health_summary.warning }}</span>
+            </a>
+          </div>
+          <div class="metric-label text-muted text-small">warning</div>
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
+  </article>
 </div>
 {% endblock %}

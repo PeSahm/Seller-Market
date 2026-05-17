@@ -1,0 +1,107 @@
+{#
+  Global health signals (Phase 8).
+
+  Filter bar (severity / kind / stack / acked) -> Apply / Clear. Each row
+  in the table is rendered through ``admin/partials/health_row.html`` so
+  the HTMX ack swap drops the SAME markup back in place; if the row layout
+  ever changes, edit one file.
+
+  Empty-state copy distinguishes filtered vs. unfiltered: with filters we
+  say "no signals match" (operator's filter is wrong); without we say "all
+  clear" (genuine good news).
+
+  Filter values round-trip through the URL so a filtered view is
+  bookmarkable, matching the pattern used on /admin/runs and /admin/trades.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Health signals{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Health signals</h1>
+    <p class="text-muted text-small">
+      Anomalies detected by the in-stack log scanner — broker rate limits,
+      captcha failures, auth failures, OCR outages. Click <strong>Ack</strong>
+      to close out a row once you've handled it; an acked row will not
+      surface again unless the underlying condition reappears after the
+      ack (deliberate — repeated alerts after triage deserve their own
+      row in the audit log).
+    </p>
+  </div>
+</div>
+
+{% set _any_filter =
+  filter_stack_id or filter_kind or filter_severity or filter_acked %}
+
+<form method="get" action="/admin/health" class="filter-bar">
+  <select name="severity" class="input">
+    <option value="">Any severity</option>
+    {% for sev in ['critical', 'error', 'warning', 'info'] %}
+      <option value="{{ sev }}" {% if filter_severity == sev %}selected{% endif %}>{{ sev }}</option>
+    {% endfor %}
+  </select>
+  <input
+    type="text"
+    name="kind"
+    class="input"
+    value="{{ filter_kind or '' }}"
+    placeholder="kind (e.g. broker_rate_limit)"
+    autocomplete="off"
+  >
+  <select name="stack_id" class="input">
+    <option value="">All stacks</option>
+    {% for s in all_stacks %}
+      <option value="{{ s.id }}" {% if filter_stack_id and filter_stack_id == s.id|string %}selected{% endif %}>
+        {{ s.compose_project }}
+      </option>
+    {% endfor %}
+  </select>
+  <select name="acked" class="input">
+    <option value="" {% if filter_acked == '' %}selected{% endif %}>Any ack status</option>
+    <option value="no" {% if filter_acked == 'no' %}selected{% endif %}>Unacked</option>
+    <option value="yes" {% if filter_acked == 'yes' %}selected{% endif %}>Acked</option>
+  </select>
+  <button class="btn btn--ghost btn--sm" type="submit">Apply</button>
+  {% if _any_filter %}
+    <a class="btn btn--ghost btn--sm" href="/admin/health">Clear</a>
+  {% endif %}
+</form>
+
+{% if not signals %}
+<div class="card">
+  {% if _any_filter %}
+    <p class="text-muted">All clear &mdash; no signals match these filters.</p>
+    <p class="text-small text-muted">
+      Try widening the severity or clearing the kind filter.
+    </p>
+  {% else %}
+    <p class="text-muted">All clear &mdash; no health signals.</p>
+    <p class="text-small text-muted">
+      The scanner runs in the background; new anomalies will surface here
+      within a tick of being logged on a stack.
+    </p>
+  {% endif %}
+</div>
+{% else %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>When</th>
+      <th>Severity</th>
+      <th>Kind</th>
+      <th>Message</th>
+      <th>Stack</th>
+      <th>Acked by</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for signal in signals %}
+      {% set stack = stacks_by_id.get(signal.stack_id) if signal.stack_id else None %}
+      {% include "admin/partials/health_row.html" %}
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

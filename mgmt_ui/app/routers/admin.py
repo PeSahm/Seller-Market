@@ -37,6 +37,7 @@ from app.security.deps import require_admin
 from app.services import agents as services_agents
 from app.services import customers as services_customers
 from app.services import distribution as services_distribution
+from app.services import health_signals as services_health
 from app.services import locust_configs as services_locust
 from app.services import run_executor
 from app.services import runs as services_runs
@@ -136,6 +137,21 @@ async def admin_dashboard(
         "pending": sum(1 for t in recent_trades if not t.is_done),
     }
 
+    # Phase 8: unacked health-signals roll-up. We pull up to 200 unacked
+    # rows (newest-first) and bucket by severity so the dashboard card can
+    # render a compact "N unacked / X critical / Y error" strip. The 200
+    # cap matches the operator's "if you have more than a screen of
+    # unacked alerts, the dashboard isn't the right place to triage them"
+    # heuristic — the full list page does its own paginated read.
+    unacked = await services_health.list_signals(db, acked=False, limit=200)
+    health_summary = {
+        "unacked_total": len(unacked),
+        "critical": sum(1 for s in unacked if s.severity == "critical"),
+        "error": sum(1 for s in unacked if s.severity == "error"),
+        "warning": sum(1 for s in unacked if s.severity == "warning"),
+        "info": sum(1 for s in unacked if s.severity == "info"),
+    }
+
     ctx = _ctx(request, user, current_tab="/admin/dashboard")
     ctx["server_summary"] = server_summary
     ctx["stack_summary"] = stack_summary
@@ -143,6 +159,7 @@ async def admin_dashboard(
     ctx["customer_summary"] = customer_summary
     ctx["recent_runs_summary"] = recent_runs_summary
     ctx["recent_trades_summary"] = recent_trades_summary
+    ctx["health_summary"] = health_summary
     return templates.TemplateResponse("admin/dashboard.html", ctx)
 
 
@@ -2234,3 +2251,123 @@ async def admin_trade_detail(
     ctx["run"] = run
     ctx["raw_pretty"] = raw_pretty
     return templates.TemplateResponse("admin/trade_detail.html", ctx)
+
+
+# ---------------------------------------------------------------------------
+# Health signals (Phase 8)
+# ---------------------------------------------------------------------------
+#
+# Read-only list + per-row ack. The scanner that *produces* signals lives in
+# :mod:`app.services.health_signals` and is driven by a worker outside this
+# router; admin pages here just surface the table and let an operator close
+# out a row by clicking "Ack" (which HTMX-swaps the row partial in place so
+# the page doesn't full-reload).
+#
+# Filters are empty-string tolerant and degrade to "no filter" on
+# unparseable input — same defensive parse as /admin/trades and /admin/runs
+# so a hand-edited URL with a bad UUID doesn't 422 the operator's
+# bookmarked view.
+
+
+@router.get("/health")
+async def admin_health(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    stack_id: Optional[str] = None,
+    kind: Optional[str] = None,
+    severity: Optional[str] = None,
+    acked: Optional[str] = None,
+):
+    """Global health-signal list, filterable.
+
+    Empty / unparseable filter values degrade to "no filter" — matches
+    the existing pattern in /admin/trades. ``acked`` accepts the strings
+    ``"yes"`` / ``"no"`` (anything else, incl. empty, means "either").
+    """
+
+    def _uuid_or_none(s):
+        if not s:
+            return None
+        try:
+            return UUID(s)
+        except (ValueError, TypeError):
+            return None
+
+    filter_stack = _uuid_or_none(stack_id)
+    filter_kind = kind or None
+    filter_sev = (
+        severity if severity in ("info", "warning", "error", "critical") else None
+    )
+    acked_filter: Optional[bool] = None
+    if acked == "yes":
+        acked_filter = True
+    elif acked == "no":
+        acked_filter = False
+
+    signals = await services_health.list_signals(
+        db,
+        stack_id=filter_stack,
+        kind=filter_kind,
+        severity=filter_sev,
+        acked=acked_filter,
+        limit=300,
+    )
+    stacks_by_id = {s.id: s for s in await services_stacks.list_stacks(db)}
+    # Pre-load every user referenced as an ack'er so the row template can
+    # render the username instead of the raw UUID. Cheap because the set
+    # of ack'ers is bounded by the number of admins, not signals.
+    ack_user_ids = {s.ack_by for s in signals if s.ack_by}
+    users_by_id: dict[UUID, "User"] = {}
+    if ack_user_ids:
+        result = await db.execute(
+            select(User).where(User.id.in_(ack_user_ids))
+        )
+        for u in result.scalars().all():
+            users_by_id[u.id] = u
+
+    ctx = _ctx(request, user, current_tab="/admin/health")
+    ctx["signals"] = signals
+    ctx["stacks_by_id"] = stacks_by_id
+    ctx["users_by_id"] = users_by_id
+    ctx["all_stacks"] = sorted(
+        stacks_by_id.values(), key=lambda s: s.compose_project
+    )
+    ctx["filter_stack_id"] = stack_id or ""
+    ctx["filter_kind"] = kind or ""
+    ctx["filter_severity"] = severity or ""
+    ctx["filter_acked"] = acked or ""
+    return templates.TemplateResponse("admin/health.html", ctx)
+
+
+@router.post("/health/{signal_id}/ack")
+async def admin_health_ack(
+    signal_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ack a health signal. Returns the ack'd row partial for HTMX swap.
+
+    The service layer's :func:`services_health.ack_signal` is a no-op when
+    the row is already ack'd (deliberate — two operators clicking "ack"
+    near-simultaneously shouldn't overwrite the first ack's audit trail).
+    We surface that as a 404 here so HTMX can drop the stale row without
+    a confusing "200 but no change" response.
+    """
+    sig = await services_health.ack_signal(
+        db, signal_id=signal_id, actor_id=user.id
+    )
+    if sig is None:
+        raise HTTPException(404, "signal not found or already acked")
+    stack = (
+        await services_stacks.get_stack(db, sig.stack_id)
+        if sig.stack_id
+        else None
+    )
+    ctx = _ctx(request, user, current_tab="/admin/health")
+    ctx["signal"] = sig
+    ctx["stack"] = stack
+    # The row template renders the ack'er's username from this lookup.
+    ctx["users_by_id"] = {user.id: user}
+    return templates.TemplateResponse("admin/partials/health_row.html", ctx)
