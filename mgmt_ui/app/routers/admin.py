@@ -153,16 +153,29 @@ async def admin_dashboard(
         "info": sum(1 for s in unacked if s.severity == "info"),
     }
 
-    # Phase 9: recent audit-log roll-up. Top 10 rows newest-first power the
-    # "Recent admin actions" dashboard card. We pre-resolve actor users in
-    # one extra query so the template can show usernames without N+1.
-    recent_audit = await services_audit.list_audit(db, limit=10)
-    audit_users_by_id: dict = {}
-    if recent_audit:
-        actor_ids = {r.actor_user_id for r in recent_audit if r.actor_user_id}
-        if actor_ids:
-            result = await db.execute(select(User).where(User.id.in_(actor_ids)))
-            audit_users_by_id = {u.id: u for u in result.scalars().all()}
+    # Phase 9: audit roll-up for the dashboard card. We pull the most
+    # recent 100 actions to compute a compact metric-row summary (total,
+    # distinct actors, last-action time) instead of rendering a 10-row
+    # table that visually dominated the rest of the dashboard grid. The
+    # full table is a single click away on /admin/audit. Pre-resolve the
+    # most-recent actor's username in one extra query so the "last by"
+    # line on the card doesn't N+1.
+    from datetime import datetime, timezone, timedelta
+    since_24h = datetime.now(timezone.utc) - timedelta(hours=24)
+    recent_audit_rows = await services_audit.list_audit(db, limit=100)
+    audit_summary: dict = {
+        "total": len(recent_audit_rows),
+        "last_24h": sum(1 for r in recent_audit_rows if r.ts >= since_24h),
+        "distinct_actors": len({
+            r.actor_user_id for r in recent_audit_rows if r.actor_user_id
+        }),
+        "latest": recent_audit_rows[0] if recent_audit_rows else None,
+        "latest_actor_name": None,
+    }
+    if recent_audit_rows and recent_audit_rows[0].actor_user_id:
+        latest_actor = await db.get(User, recent_audit_rows[0].actor_user_id)
+        if latest_actor:
+            audit_summary["latest_actor_name"] = latest_actor.username
 
     ctx = _ctx(request, user, current_tab="/admin/dashboard")
     ctx["server_summary"] = server_summary
@@ -172,8 +185,7 @@ async def admin_dashboard(
     ctx["recent_runs_summary"] = recent_runs_summary
     ctx["recent_trades_summary"] = recent_trades_summary
     ctx["health_summary"] = health_summary
-    ctx["recent_audit"] = recent_audit
-    ctx["audit_users_by_id"] = audit_users_by_id
+    ctx["audit_summary"] = audit_summary
     return templates.TemplateResponse("admin/dashboard.html", ctx)
 
 
