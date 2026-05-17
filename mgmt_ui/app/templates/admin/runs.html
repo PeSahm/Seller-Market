@@ -111,9 +111,27 @@
       </td>
       <td><span class="text-small">{{ r.trigger }}</span></td>
       <td>
+        {% set _trades = trade_counts_by_run.get(r.id, 0) %}
+        {# A run that exited non-zero but DID place at least one trade is
+           a "partial" — common case is the bot's post-trade summary
+           crashes after the first order succeeded (so later orders fail
+           with insufficient-funds). The trade DID land at the broker;
+           a red "failed" badge over-promises the badness. #}
         {% if r.status == 'running' %}<span class="badge badge--pending">running</span>
-        {% elif r.status == 'success' %}<span class="badge badge--up">success</span>
+        {% elif r.status == 'success' %}
+          <span class="badge badge--up">success</span>
+          {% if _trades %}<span class="badge badge--up" title="trades placed">{{ _trades }} trade{% if _trades != 1 %}s{% endif %}</span>{% endif %}
+        {% elif r.status == 'failed' and _trades %}
+          <span class="badge badge--pending"
+                title="exit_code != 0 but {{ _trades }} trade{% if _trades != 1 %}s{% endif %} placed at the broker">
+            partial &middot; {{ _trades }} trade{% if _trades != 1 %}s{% endif %}
+          </span>
         {% elif r.status == 'failed' %}<span class="badge badge--down">failed</span>
+        {% elif r.status == 'killed' and _trades %}
+          <span class="badge badge--pending"
+                title="killed but {{ _trades }} trade{% if _trades != 1 %}s{% endif %} placed at the broker">
+            partial &middot; {{ _trades }} trade{% if _trades != 1 %}s{% endif %}
+          </span>
         {% elif r.status == 'killed' %}<span class="badge badge--down">killed</span>
         {% else %}<span class="badge">{{ r.status }}</span>{% endif %}
       </td>

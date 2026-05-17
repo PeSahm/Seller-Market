@@ -1328,9 +1328,24 @@ async def agent_runs(
         if user.role == "admin" or s.agent_id == user.id
     }
 
+    # Bulk-count trades per run so a "failed" run that actually placed
+    # orders is rendered as "partial" rather than misleading red.
+    from sqlalchemy import func as _sa_func
+    from app.models.trades import TradeResult
+    trade_counts_by_run: dict[UUID, int] = {}
+    if runs:
+        run_ids = [r.id for r in runs]
+        rows = await db.execute(
+            select(TradeResult.run_id, _sa_func.count(TradeResult.id))
+            .where(TradeResult.run_id.in_(run_ids))
+            .group_by(TradeResult.run_id)
+        )
+        trade_counts_by_run = {rid: cnt for rid, cnt in rows.all()}
+
     ctx = _ctx(request, user, current_tab="/agent/runs")
     ctx["runs"] = runs
     ctx["stacks_by_id"] = stacks_by_id
+    ctx["trade_counts_by_run"] = trade_counts_by_run
     ctx["filter_stack_id"] = stack_id or ""
     ctx["filter_job"] = job_name or ""
     ctx["filter_status"] = status or ""
