@@ -52,14 +52,29 @@ class Settings(BaseSettings):
     trade_ingest_interval_seconds: int = Field(
         default=30, alias="TRADE_INGEST_INTERVAL_SECONDS"
     )
+    # Phase 8 background workers. Intervals are validated at parse time
+    # so a misconfigured env var can't turn the worker into a tight
+    # retry loop; retention days are validated >= 0 so a negative value
+    # can't shift the janitor cutoff into the future (which would purge
+    # fresh data on the next tick).
     enable_health_scanner: bool = Field(default=True, alias="ENABLE_HEALTH_SCANNER")
-    health_scan_interval_seconds: int = Field(default=60, alias="HEALTH_SCAN_INTERVAL_SECONDS")
+    health_scan_interval_seconds: int = Field(
+        default=60, alias="HEALTH_SCAN_INTERVAL_SECONDS", ge=1
+    )
 
     enable_janitor: bool = Field(default=True, alias="ENABLE_JANITOR")
-    janitor_interval_seconds: int = Field(default=3600, alias="JANITOR_INTERVAL_SECONDS")
-    janitor_order_results_retention_days: int = Field(default=14, alias="JANITOR_ORDER_RESULTS_RETENTION_DAYS")
-    janitor_run_log_retention_days: int = Field(default=90, alias="JANITOR_RUN_LOG_RETENTION_DAYS")
-    janitor_health_signal_retention_days: int = Field(default=30, alias="JANITOR_HEALTH_SIGNAL_RETENTION_DAYS")
+    janitor_interval_seconds: int = Field(
+        default=3600, alias="JANITOR_INTERVAL_SECONDS", ge=1
+    )
+    janitor_order_results_retention_days: int = Field(
+        default=14, alias="JANITOR_ORDER_RESULTS_RETENTION_DAYS", ge=0
+    )
+    janitor_run_log_retention_days: int = Field(
+        default=90, alias="JANITOR_RUN_LOG_RETENTION_DAYS", ge=0
+    )
+    janitor_health_signal_retention_days: int = Field(
+        default=30, alias="JANITOR_HEALTH_SIGNAL_RETENTION_DAYS", ge=0
+    )
 
     # Run logs (Phase 6). Captured stdout+stderr from each docker exec
     # run is archived under this directory as ``<run_id>.log`` with mode
