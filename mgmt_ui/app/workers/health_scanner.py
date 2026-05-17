@@ -70,6 +70,14 @@ async def run_health_scanner(
     *,
     interval_seconds: int = _DEFAULT_INTERVAL,
 ) -> None:
+    if interval_seconds <= 0:
+        # Same defensive guard as run_janitor — settings.py validates
+        # env vars but a direct programmatic caller could still hand us
+        # 0/negative, which would spin the loop tightly.
+        raise ValueError(
+            f"run_health_scanner: interval_seconds must be > 0 "
+            f"(got {interval_seconds})"
+        )
     logger.info(
         "health-scanner worker started (interval=%ss, max_concurrent=%d)",
         interval_seconds, _MAX_CONCURRENT,

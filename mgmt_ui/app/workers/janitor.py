@@ -54,6 +54,15 @@ async def run_janitor(
     *,
     interval_seconds: int = _DEFAULT_INTERVAL,
 ) -> None:
+    if interval_seconds <= 0:
+        # Defense in depth: settings.py already validates the env-var
+        # path via Field(ge=1), but a direct programmatic caller could
+        # still hand us 0 or a negative — which would make wait_for
+        # time out immediately and the loop would spin invoking
+        # janitor ticks back-to-back. Refuse fast.
+        raise ValueError(
+            f"run_janitor: interval_seconds must be > 0 (got {interval_seconds})"
+        )
     logger.info("janitor worker started (interval=%ss)", interval_seconds)
     stop_event = stop_event or asyncio.Event()
     while not stop_event.is_set():
