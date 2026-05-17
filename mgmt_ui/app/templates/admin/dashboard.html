@@ -218,5 +218,43 @@
       </div>
     {% endif %}
   </article>
+
+  {# Recent trades — live data from Phase 7 #}
+  <article class="card">
+    <div class="card-header">
+      <h2 class="h3">Recent trades</h2>
+      <a class="btn btn--ghost btn--sm" href="/admin/trades">view all &rarr;</a>
+    </div>
+    {% if not recent_trades_summary or recent_trades_summary.total == 0 %}
+      <p class="text-muted text-small">No trades yet.</p>
+      <p class="text-small text-muted">
+        They'll appear here within ~30s of the bot writing an
+        <code>order_results</code> file.
+      </p>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-value">{{ recent_trades_summary.total }}</div>
+          <div class="metric-label text-muted text-small">total</div>
+        </div>
+        {% if recent_trades_summary.done %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--up">{{ recent_trades_summary.done }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">done</div>
+        </div>
+        {% endif %}
+        {% if recent_trades_summary.pending %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--pending">{{ recent_trades_summary.pending }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">pending</div>
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
+  </article>
 </div>
 {% endblock %}

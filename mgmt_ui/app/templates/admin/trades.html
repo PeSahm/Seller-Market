@@ -1,0 +1,195 @@
+{#
+  Global trade history (Phase 7).
+
+  Filter form (date range / agent / customer / broker / symbol or ISIN /
+  state / side) + a table of recent trades. Filters round-trip through
+  the query string so a filtered view is bookmarkable, mirroring the
+  pattern used on /admin/runs and /admin/customers.
+
+  The customer-id filter has no picker in the bar (there'd be too many
+  for a useful <select>) — it's surfaced as a hidden round-trip so that
+  links like "trades for customer X" on the customer detail page can
+  send the operator here with the filter pre-applied. To clear a
+  customer filter the user clicks "Clear all".
+
+  Empty-state copy depends on whether any filters are active: with
+  filters we tell the user to clear them; without filters we explain
+  the ~30s pickup lag from the trade ingestor.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Trades{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Trades</h1>
+    <p class="text-muted text-small">
+      Order results ingested from agent stacks. Each row is a single
+      broker order — partially-filled orders show their remaining
+      volume in the detail page. Manual and scheduler-fired runs are
+      interleaved here; use the filters below to narrow the list.
+    </p>
+  </div>
+</div>
+
+{% set _any_filter =
+  filter_agent_id or filter_customer_id or filter_broker
+  or filter_symbol_or_isin or filter_state or filter_side
+  or filter_since or filter_until %}
+
+<form method="get" action="/admin/trades" class="filter-bar">
+  {# Preserve a customer-id filter that was set via an inbound link — the
+     bar has no picker for it but we don't want the user to lose it just
+     because they tweaked a different filter. The "Clear all" button
+     drops it. #}
+  {% if filter_customer_id %}
+    <input type="hidden" name="customer_id" value="{{ filter_customer_id }}">
+  {% endif %}
+
+  <input
+    type="date"
+    name="since"
+    class="input"
+    value="{{ filter_since or '' }}"
+    title="Ingested on or after"
+    placeholder="since"
+  >
+  <input
+    type="date"
+    name="until"
+    class="input"
+    value="{{ filter_until or '' }}"
+    title="Ingested on or before"
+    placeholder="until"
+  >
+  <select name="agent_id" class="input">
+    <option value="">All agents</option>
+    {% for a in all_agents %}
+      <option value="{{ a.id }}" {% if filter_agent_id and filter_agent_id == a.id|string %}selected{% endif %} dir="auto">
+        {{ a.username }}{% if a.deleted_at %} (deleted){% endif %}
+      </option>
+    {% endfor %}
+  </select>
+  <input
+    type="text"
+    name="broker"
+    class="input"
+    value="{{ filter_broker or '' }}"
+    placeholder="broker"
+    autocomplete="off"
+  >
+  <input
+    type="text"
+    name="symbol_or_isin"
+    class="input"
+    value="{{ filter_symbol_or_isin or '' }}"
+    placeholder="symbol or ISIN"
+    autocomplete="off"
+  >
+  <select name="state" class="input" title="Broker state code">
+    <option value="">Any state</option>
+    {% for code, label in [
+      ('0', '0 — new'),
+      ('2', '2 — partial'),
+      ('4', '4 — done'),
+      ('5', '5 — cancelled'),
+      ('6', '6 — expired'),
+      ('7', '7 — rejected'),
+    ] %}
+      <option value="{{ code }}" {% if filter_state and filter_state == code %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <select name="side" class="input">
+    <option value="">Any side</option>
+    <option value="1" {% if filter_side == '1' %}selected{% endif %}>Buy</option>
+    <option value="2" {% if filter_side == '2' %}selected{% endif %}>Sell</option>
+  </select>
+  <button class="btn btn--ghost btn--sm" type="submit">Apply</button>
+  {% if _any_filter %}
+    <a class="btn btn--ghost btn--sm" href="/admin/trades">Clear all</a>
+  {% endif %}
+</form>
+
+{% if not trades %}
+<div class="card">
+  {% if _any_filter %}
+    <p class="text-muted">No trades match these filters.</p>
+    <p class="text-small text-muted">
+      Try widening the date range or clearing a chip — the bot only
+      ingests order_results files older than ~30s, so the most recent
+      activity may not be picked up yet.
+    </p>
+  {% else %}
+    <p class="text-muted">No trades yet.</p>
+    <p class="text-small text-muted">
+      They'll appear here within ~30s of the bot writing an
+      <code>order_results</code> file.
+    </p>
+  {% endif %}
+</div>
+{% else %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>When</th>
+      <th>Customer</th>
+      <th>Symbol / ISIN</th>
+      <th>Side</th>
+      <th>Price</th>
+      <th>Volume</th>
+      <th>Executed</th>
+      <th>State</th>
+      <th>Net amount</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for t in trades %}
+    {% set cust = customers_by_id.get(t.customer_id) %}
+    <tr class="trade-row">
+      <td class="text-small text-muted">
+        {{ t.ingested_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+      </td>
+      <td>
+        {% if cust %}
+          <a href="/admin/customers/{{ cust.id }}" dir="auto">{{ cust.display_name }}</a>
+          <div class="text-small text-muted">
+            <span class="badge">{{ cust.broker }}</span>
+          </div>
+        {% else %}
+          <span class="text-muted">&mdash;</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if t.symbol %}
+          <code class="text-small" dir="auto">{{ t.symbol }}</code>
+          <div class="text-small text-muted"><code>{{ t.isin }}</code></div>
+        {% else %}
+          <code class="text-small">{{ t.isin }}</code>
+        {% endif %}
+      </td>
+      <td>
+        {% if t.side == 1 %}<span class="badge badge--up">Buy</span>
+        {% elif t.side == 2 %}<span class="badge badge--down">Sell</span>
+        {% else %}<span class="badge">side={{ t.side }}</span>{% endif %}
+      </td>
+      <td class="text-small">{{ t.price }}</td>
+      <td class="text-small">{{ t.volume }}</td>
+      <td class="text-small">{{ t.executed_volume }}</td>
+      <td>
+        {% if t.is_done %}
+          <span class="badge badge--up" title="{{ t.state_desc }}">done</span>
+        {% else %}
+          <span class="badge badge--pending" title="{{ t.state_desc }}">pending</span>
+        {% endif %}
+      </td>
+      <td class="text-small">
+        {% if t.net_amount is not none %}{{ t.net_amount }}{% else %}<span class="text-muted">&mdash;</span>{% endif %}
+      </td>
+      <td><a class="btn btn--ghost btn--sm" href="/admin/trades/{{ t.id }}">view &rarr;</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}
