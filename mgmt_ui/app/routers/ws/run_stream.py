@@ -1,0 +1,134 @@
+"""WebSocket endpoint for live run-log streaming."""
+from __future__ import annotations
+
+import asyncio
+import logging
+import uuid
+from uuid import UUID
+
+from fastapi import APIRouter, Cookie, WebSocket, WebSocketDisconnect
+from jose import JWTError
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.websockets import WebSocketState
+
+from app.db import AsyncSessionLocal
+from app.models.users import User
+from app.security.auth import decode_token
+from app.services import run_executor
+from app.services import runs as services_runs
+from app.services.ssh.streaming import LineEvent, StreamingResult
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+async def _resolve_user(token: str | None, db: AsyncSession) -> User | None:
+    """Decode the JWT cookie and load the :class:`User`. Return ``None`` on any failure.
+
+    We inline the JWT decode + DB lookup here rather than depending on
+    :func:`app.security.deps.get_current_user` because that helper is wired
+    to raise HTTP 401, which doesn't translate cleanly to a WebSocket close.
+    The convention from :mod:`app.security.deps` (lookup by ``sub`` UUID,
+    treat soft-deleted users as missing) is preserved.
+    """
+    if not token:
+        return None
+    try:
+        payload = decode_token(token)
+    except JWTError:
+        return None
+    except Exception:  # noqa: BLE001 — never let an auth bug leak past close
+        return None
+    subject = payload.get("sub")
+    if not subject:
+        return None
+    try:
+        user_id = uuid.UUID(subject)
+    except (ValueError, TypeError):
+        return None
+    user = await db.get(User, user_id)
+    if user is None:
+        return None
+    if user.deleted_at is not None:
+        return None
+    return user
+
+
+@router.websocket("/ws/runs/{run_id}")
+async def run_stream(
+    websocket: WebSocket,
+    run_id: UUID,
+    access_token: str | None = Cookie(default=None),
+) -> None:
+    """Live-stream the run's stdout/stderr to the browser.
+
+    Auth: JWT cookie (same one used by HTML routes).
+    Access: admin sees all; agent sees only their own runs.
+    """
+    await websocket.accept()
+    try:
+        async with AsyncSessionLocal() as db:
+            user = await _resolve_user(access_token, db)
+            if user is None:
+                await websocket.close(code=4401)
+                return
+            run = await services_runs.get_run(db, run_id)
+            if run is None or not services_runs.can_user_see_run(user, run):
+                await websocket.close(code=4404)
+                return
+    except Exception:  # noqa: BLE001
+        logger.exception("ws auth/lookup failed for run=%s", run_id)
+        await websocket.close(code=1011)
+        return
+
+    queue = run_executor.subscribe(run_id)
+
+    # Replay archived log on initial connect so the user sees what they missed.
+    # NOTE: only the archive (post-finalize) covers historical bytes; for
+    # in-flight runs the executor is publishing new lines into the queue, and
+    # we'll deliver them in order after this replay.
+    async with AsyncSessionLocal() as db:
+        run = await services_runs.get_run(db, run_id)
+        if run and run.log_blob_ref:
+            archived = await services_runs.read_run_log(run)
+            if archived:
+                for line in archived.splitlines():
+                    await websocket.send_text(line.decode("utf-8", errors="replace"))
+        if run and run.status != "running":
+            # Run already finished — send the terminal marker and close.
+            await websocket.send_text(
+                f"<run-stream> run finished: {run.status} "
+                f"(exit_code={run.exit_code})"
+            )
+            await websocket.close(code=1000)
+            return
+
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=60.0)
+            except asyncio.TimeoutError:
+                # Heartbeat — keeps idle proxies from cutting the connection.
+                if websocket.client_state != WebSocketState.CONNECTED:
+                    return
+                await websocket.send_text("<run-stream> ping")
+                continue
+
+            if isinstance(item, LineEvent):
+                prefix = "" if item.stream == "stdout" else "!! "
+                await websocket.send_text(
+                    prefix + item.data.decode("utf-8", errors="replace")
+                )
+            elif isinstance(item, StreamingResult):
+                await websocket.send_text(
+                    f"<run-stream> done (exit_code={item.exit_code})"
+                )
+                await websocket.close(code=1000)
+                return
+    except WebSocketDisconnect:
+        return
+    except Exception:  # noqa: BLE001
+        logger.exception("ws stream failed for run=%s", run_id)
+        if websocket.client_state == WebSocketState.CONNECTED:
+            await websocket.close(code=1011)
