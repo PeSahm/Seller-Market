@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, computed_field
 
 HealthSeverity = Literal["info", "warning", "error", "critical"]
 
@@ -50,9 +50,15 @@ class HealthSignalOut(BaseModel):
     ack_by: Optional[UUID]
     ack_at: Optional[datetime]
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def is_acked(self) -> bool:
-        """``True`` iff an operator has acknowledged this signal."""
+        """``True`` iff an operator has acknowledged this signal.
+
+        ``@computed_field`` makes Pydantic v2 include this in
+        ``model_dump()`` / FastAPI serialisation — a bare ``@property``
+        would be silently dropped from JSON responses.
+        """
         return self.ack_at is not None
 
 
