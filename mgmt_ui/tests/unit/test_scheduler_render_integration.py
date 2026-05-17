@@ -20,7 +20,10 @@ We deliberately avoid spinning up a live DB or any SSH layer:
 The four tests cover the four expected branches:
 
 1. Two enabled jobs → both appear, top-level ``"enabled": True``.
-2. All jobs disabled → top-level ``"enabled": False``.
+2. All jobs disabled → top-level ``"enabled": True`` (per-job flags stay
+   False). The top-level controls poll cadence, not job firing; we keep
+   it on so a re-enable is picked up within 1s — see
+   :func:`_build_render_context` for the rationale.
 3. Custom :class:`LocustConfig` row → renderer emits its values verbatim.
 4. No :class:`LocustConfig` row → renderer emits the documented defaults.
 """
@@ -232,7 +235,7 @@ async def test_scheduler_render_emits_real_jobs(
 
 
 # ---------------------------------------------------------------------------
-# 2. test_scheduler_render_all_disabled_yields_top_level_disabled
+# 2. test_scheduler_render_keeps_top_level_enabled_even_when_all_jobs_disabled
 # ---------------------------------------------------------------------------
 
 
