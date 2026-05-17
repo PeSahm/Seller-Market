@@ -1,0 +1,133 @@
+{#
+  Global runs list (Phase 6).
+
+  Filter form (stack / agent / job / status) + a table of recent runs.
+  Filters round-trip through the query string so the filtered view is
+  bookmarkable, mirroring the pattern used on /admin/customers.
+
+  Empty-state copy depends on whether any filters are active: with
+  filters we tell the user to clear them; without filters we point at
+  the run-now buttons on a stack detail page.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Runs{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Runs</h1>
+    <p class="text-muted text-small">
+      Recent <code>cache_warmup</code> and <code>run_trading</code> executions
+      across every agent stack. Manual runs and scheduler-fired runs are
+      interleaved here; use the filters below (stack, agent, job, status)
+      to narrow the list.
+    </p>
+  </div>
+</div>
+
+<form method="get" action="/admin/runs" class="filter-bar">
+  <select name="stack_id" class="input">
+    <option value="">All stacks</option>
+    {% for s in all_stacks %}
+      <option value="{{ s.id }}" {% if filter_stack_id and filter_stack_id == s.id|string %}selected{% endif %}>
+        {{ s.compose_project }}
+      </option>
+    {% endfor %}
+  </select>
+  <select name="agent_id" class="input">
+    <option value="">All agents</option>
+    {% for a in all_agents %}
+      <option value="{{ a.id }}" {% if filter_agent_id and filter_agent_id == a.id|string %}selected{% endif %} dir="auto">
+        {{ a.username }}{% if a.deleted_at %} (deleted){% endif %}
+      </option>
+    {% endfor %}
+  </select>
+  <select name="job_name" class="input">
+    <option value="">Any job</option>
+    {% for j in ['cache_warmup', 'run_trading'] %}
+      <option value="{{ j }}" {% if filter_job == j %}selected{% endif %}>{{ j }}</option>
+    {% endfor %}
+  </select>
+  <select name="status" class="input">
+    <option value="">Any status</option>
+    {% for st in ['running', 'success', 'failed', 'killed'] %}
+      <option value="{{ st }}" {% if filter_status == st %}selected{% endif %}>{{ st }}</option>
+    {% endfor %}
+  </select>
+  <button class="btn btn--ghost btn--sm" type="submit">Filter</button>
+  {% if filter_stack_id or filter_agent_id or filter_job or filter_status %}
+    <a class="btn btn--ghost btn--sm" href="/admin/runs">Clear</a>
+  {% endif %}
+</form>
+
+{% if not runs %}
+<div class="card">
+  {% if filter_stack_id or filter_agent_id or filter_job or filter_status %}
+    <p class="text-muted">No runs match these filters.</p>
+  {% else %}
+    <p class="text-muted">No runs yet.</p>
+    <p class="text-small text-muted">
+      Click <strong>Run cache_warmup</strong> on a stack detail page to fire one.
+    </p>
+  {% endif %}
+</div>
+{% else %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>When</th>
+      <th>Job</th>
+      <th>Stack</th>
+      <th>Agent</th>
+      <th>Trigger</th>
+      <th>Status</th>
+      <th>Duration</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in runs %}
+    {% set stk = stacks_by_id.get(r.stack_id) %}
+    {% set agt = agents_by_id.get(r.agent_id) %}
+    <tr class="run-row">
+      <td class="text-small text-muted">
+        {{ r.started_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+      </td>
+      <td><code class="text-small">{{ r.job_name }}</code></td>
+      <td>
+        {% if stk %}
+          <a href="/admin/stacks/{{ stk.id }}"><code class="text-small">{{ stk.compose_project }}</code></a>
+        {% else %}
+          <span class="text-muted">&mdash;</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if agt %}
+          <span dir="auto">{{ agt.username }}</span>
+          {% if agt.deleted_at %}<span class="badge badge--down" title="agent soft-deleted">deleted</span>{% endif %}
+        {% else %}
+          <span class="text-muted">&mdash;</span>
+        {% endif %}
+      </td>
+      <td><span class="text-small">{{ r.trigger }}</span></td>
+      <td>
+        {% if r.status == 'running' %}<span class="badge badge--pending">running</span>
+        {% elif r.status == 'success' %}<span class="badge badge--up">success</span>
+        {% elif r.status == 'failed' %}<span class="badge badge--down">failed</span>
+        {% elif r.status == 'killed' %}<span class="badge badge--down">killed</span>
+        {% else %}<span class="badge">{{ r.status }}</span>{% endif %}
+      </td>
+      <td class="text-small text-muted">
+        {% if r.finished_at and r.started_at %}
+          {{ '%.1fs'|format((r.finished_at - r.started_at).total_seconds()) }}
+        {% else %}
+          &mdash;
+        {% endif %}
+      </td>
+      <td><a class="btn btn--ghost btn--sm" href="/admin/runs/{{ r.id }}">view &rarr;</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

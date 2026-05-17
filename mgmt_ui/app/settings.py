@@ -47,6 +47,13 @@ class Settings(BaseSettings):
         default=True, alias="ENABLE_STACK_HEALTH_WORKER"
     )
 
+    # Run logs (Phase 6). Captured stdout+stderr from each docker exec
+    # run is archived under this directory as ``<run_id>.log`` with mode
+    # 0600. Relative to the mgmt_ui working directory by default; set
+    # ``RUN_LOGS_DIR`` in production to an absolute path on a volume
+    # that's backed up alongside the database.
+    run_logs_dir: str = Field(default="./run_logs", alias="RUN_LOGS_DIR")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

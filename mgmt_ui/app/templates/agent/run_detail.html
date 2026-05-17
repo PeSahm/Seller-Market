@@ -1,0 +1,106 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Run {{ run.job_name }}{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">
+      Run <code>{{ run.job_name }}</code>
+      {% if run.status == 'running' %}<span class="badge badge--pending">running</span>
+      {% elif run.status == 'success' %}<span class="badge badge--up">success</span>
+      {% elif run.status == 'failed' %}<span class="badge badge--down">failed</span>
+      {% elif run.status == 'killed' %}<span class="badge badge--down">killed</span>
+      {% else %}<span class="badge badge--pending">{{ run.status }}</span>{% endif %}
+    </h1>
+    <p class="text-muted text-small">
+      {# We deliberately render the agent USERNAME here, not the UUID — the
+         raw UUID would leak tenant info to anyone over-the-shoulder. #}
+      {% if agent %}<span dir="auto">{{ agent.username }}</span> &middot; {% endif %}
+      {% if stack %}<a href="/agent/stacks/{{ stack.id }}"><code>{{ stack.compose_project }}</code></a>
+      {% else %}<span class="text-muted">(stack vanished)</span>{% endif %}
+      &middot; trigger <code>{{ run.trigger }}</code>
+    </p>
+  </div>
+  <div class="header-actions">
+    <a class="btn btn--ghost btn--sm" href="/agent/runs">&larr; All runs</a>
+  </div>
+</div>
+
+<section class="card">
+  <h2 class="h3">Timing</h2>
+  <dl class="kv">
+    <dt>Started</dt>
+    <dd class="text-small">
+      {{ run.started_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+    </dd>
+    <dt>Finished</dt>
+    <dd class="text-small">
+      {% if run.finished_at %}
+        {{ run.finished_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+      {% else %}<span class="text-muted">still running</span>{% endif %}
+    </dd>
+    <dt>Duration</dt>
+    <dd class="text-small">
+      {% if run.finished_at and run.started_at %}
+        {{ '%.1f' % (run.finished_at - run.started_at).total_seconds() }}s
+      {% else %}<span class="text-muted">—</span>{% endif %}
+    </dd>
+    <dt>Exit code</dt>
+    <dd class="text-small">
+      {% if run.exit_code is not none %}<code>{{ run.exit_code }}</code>
+      {% else %}<span class="text-muted">—</span>{% endif %}
+    </dd>
+  </dl>
+</section>
+
+<section class="card" style="margin-top: 12px;">
+  <h2 class="h3">
+    Log
+    {% if run.status == 'running' %}
+      <span id="ws-status" class="badge badge--pending text-small">connecting…</span>
+    {% endif %}
+  </h2>
+  <pre id="log-pane"
+       class="text-small log-pane"
+       style="max-height: 60vh; overflow: auto; background: #111; color: #eee; padding: 12px; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word;"
+  >{% if archived_log %}{{ archived_log }}{% elif run.status == 'running' %}{# stream starts below #}{% else %}(no log captured){% endif %}</pre>
+</section>
+
+{% if run.status == 'running' %}
+<script>
+  // Live-log stream via WebSocket. The endpoint (``/ws/runs/{run_id}``) is
+  // owned by app.routers.ws (parallel agent B) and does its OWN tenant
+  // check via the session cookie — the URL is not a security boundary.
+  (function () {
+    var runId = "{{ run.id }}";
+    var pane = document.getElementById("log-pane");
+    var statusEl = document.getElementById("ws-status");
+    var scheme = (location.protocol === "https:") ? "wss:" : "ws:";
+    var url = scheme + "//" + location.host + "/ws/runs/" + runId;
+    var ws;
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      if (statusEl) { statusEl.textContent = "ws unavailable"; }
+      return;
+    }
+    ws.onopen = function () {
+      if (statusEl) { statusEl.textContent = "live"; statusEl.className = "badge badge--up text-small"; }
+    };
+    ws.onmessage = function (ev) {
+      // Append chunk and keep the view pinned to the bottom unless the
+      // user has scrolled up to read history (within 40px of bottom).
+      var nearBottom = (pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 40);
+      pane.textContent += ev.data;
+      if (nearBottom) { pane.scrollTop = pane.scrollHeight; }
+    };
+    ws.onclose = function () {
+      if (statusEl) { statusEl.textContent = "closed — reload for final"; statusEl.className = "badge badge--pending text-small"; }
+    };
+    ws.onerror = function () {
+      if (statusEl) { statusEl.textContent = "error"; statusEl.className = "badge badge--down text-small"; }
+    };
+  })();
+</script>
+{% endif %}
+{% endblock %}

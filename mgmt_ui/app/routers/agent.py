@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.models.customers import Customer
+from app.models.runs import StackRunLock
 from app.models.stacks import AgentStack
 from app.models.users import User
 from app.routers.dashboard import _ctx, templates
@@ -43,14 +44,18 @@ from app.schemas.customer import (
 from app.schemas.locust import LocustUpsert
 from app.schemas.scheduler import SchedulerJobUpsert
 from app.security.deps import get_current_user
+from app.services import agents as services_agents
 from app.services import customers as services_customers
 from app.services import locust_configs as services_locust
+from app.services import run_executor
+from app.services import runs as services_runs
 from app.services import scheduler_jobs as services_scheduler
 from app.services import servers as services_servers
 from app.services import settings_store
 from app.services import stacks as services_stacks
 from app.services.customers import OptimisticLockError
 from app.services.locust_configs import OptimisticLockError as LocustLockError
+from app.services.run_locks import StackRunLockBusyError
 from app.services.scheduler_jobs import OptimisticLockError as SchedulerLockError
 from app.services.ssh.exceptions import SSHError
 
@@ -117,8 +122,25 @@ async def agent_dashboard(
             1 for c in my_customers if c.assignment_status == "pending"
         ),
     }
+    # Phase 6: "Recent runs" card on the agent dashboard. Admins acting as
+    # agent see the whole fleet (same convention as the customers card above);
+    # agents only see their own runs. Cap at 100 since we just compute counts.
+    own_runs = await services_runs.list_runs(
+        db,
+        agent_id=user.id if user.role != "admin" else None,
+        limit=100,
+    )
+    runs_summary = {
+        "total": len(own_runs),
+        "running": sum(1 for r in own_runs if r.status == "running"),
+        "success": sum(1 for r in own_runs if r.status == "success"),
+        "failed": sum(
+            1 for r in own_runs if r.status in ("failed", "killed")
+        ),
+    }
     ctx = _ctx(request, user, current_tab="/agent/dashboard")
     ctx["customer_summary"] = customer_summary
+    ctx["runs_summary"] = runs_summary
     return templates.TemplateResponse("agent/dashboard.html", ctx)
 
 
@@ -164,8 +186,16 @@ async def agent_logs(
     request: Request,
     user: User = Depends(get_current_user),
 ):
+    """Permanent redirect: the Phase-6 "Runs" page replaces the old placeholder.
+
+    Kept so any bookmarks or in-flight links to ``/agent/logs`` still land
+    somewhere useful instead of 404'ing.
+    """
     _require_agent_or_admin(user)
-    return _render(request, user, "agent/logs.html", "/agent/logs")
+    return Response(
+        status_code=status.HTTP_308_PERMANENT_REDIRECT,
+        headers={"Location": "/agent/runs"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1027,6 +1057,228 @@ async def agent_stack_locust_save(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return _flash_redirect(request, f"/agent/stacks/{stack_id}/locust")
+
+
+# ---------------------------------------------------------------------------
+# Stack detail + runs (Phase 6)
+# ---------------------------------------------------------------------------
+#
+# The Phase-6 "run now" flow lives entirely on the agent side: an agent picks
+# one of their own stacks, hits "Run cache_warmup" or "Run trading", and the
+# router fires :func:`run_executor.start_manual_run`. The executor doesn't do
+# RBAC — tenant scoping happens HERE, in this router, by loading the stack
+# first and bailing with 404 (NOT 403) when the caller is an agent who
+# doesn't own it. The same pattern guards the runs list + detail endpoints.
+#
+# The live-log WebSocket (``/ws/runs/{run_id}``) is owned by parallel agent B
+# in :mod:`app.routers.ws`; we just point the detail template at that URL.
+
+
+@router.get("/stacks/{stack_id}")
+async def agent_stack_detail(
+    stack_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-stack detail page for an agent.
+
+    Surfaces the Phase-5 editors (scheduler / locust) and the Phase-6 "run
+    now" buttons + a small "recent runs for this stack" panel.
+
+    Tenant-guarded: :func:`_load_stack_for_agent` raises 404 if the caller
+    is an agent and the stack belongs to someone else — we never let an
+    agent learn that another tenant's stack id is valid.
+    """
+    _require_agent_or_admin(user)
+    stack = await _load_stack_for_agent(db, user, stack_id)
+    server = await services_servers.get_server(db, stack.server_id)
+    agent_user = await services_agents.get_agent(db, stack.agent_id)
+    stack_runs = await services_runs.list_runs(db, stack_id=stack_id, limit=10)
+    ctx = _ctx(request, user, current_tab="/agent/stacks")
+    ctx["stack"] = stack
+    ctx["server"] = server
+    ctx["agent"] = agent_user
+    ctx["stack_runs"] = stack_runs
+    return templates.TemplateResponse("agent/stack_detail.html", ctx)
+
+
+@router.post("/stacks/{stack_id}/run/{job_name}")
+async def agent_stack_run_now(
+    stack_id: UUID,
+    job_name: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Fire a manual run on one of the current agent's stacks.
+
+    Re-uses the same :func:`run_executor.start_manual_run` as a hypothetical
+    admin path — RBAC is *not* the executor's job. Tenant scoping is done
+    HERE: if the caller is an agent and the stack belongs to someone else
+    we 404 (NOT 403) so we don't leak the existence of other tenants'
+    stacks via UUID enumeration.
+
+    Lock-busy is surfaced as 409 ("another run already in flight") so the
+    UI can render a "try again in a moment" toast rather than treating it
+    as a server error.
+    """
+    _require_agent_or_admin(user)
+    if job_name not in ("cache_warmup", "run_trading"):
+        raise HTTPException(
+            status_code=400, detail=f"unknown job_name: {job_name}"
+        )
+    # _load_stack_for_agent does both the existence check AND the
+    # cross-tenant 404 — see the helper for the exact comparison.
+    stack = await _load_stack_for_agent(db, user, stack_id)
+    try:
+        run = await run_executor.start_manual_run(
+            stack_id=stack.id,
+            agent_id=stack.agent_id,
+            job_name=job_name,
+            actor_id=user.id,
+        )
+    except StackRunLockBusyError:
+        # Browser users get redirected to the in-flight run's live log
+        # instead of a raw 409 JSON. HTMX / JSON callers still get the 409
+        # so they can decide how to handle it.
+        in_flight = await db.execute(
+            select(StackRunLock).where(StackRunLock.stack_id == stack.id)
+        )
+        lock_row = in_flight.scalar_one_or_none()
+        if request.headers.get("HX-Request") or "application/json" in (
+            request.headers.get("accept") or ""
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="another run is already in flight on this stack",
+            )
+        target = (
+            f"/agent/runs/{lock_row.run_id}"
+            if lock_row is not None
+            else f"/agent/stacks/{stack.id}"
+        )
+        return Response(
+            status_code=status.HTTP_303_SEE_OTHER,
+            headers={"Location": target},
+        )
+
+    redirect_to = f"/agent/runs/{run.id}"
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": redirect_to})
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER,
+        headers={"Location": redirect_to},
+    )
+
+
+@router.get("/runs")
+async def agent_runs(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    stack_id: Optional[str] = None,
+    job_name: Optional[str] = None,
+    status: Optional[str] = None,  # noqa: A002 — query param name
+):
+    """List the current agent's own runs.
+
+    Admins see the whole fleet (so they can debug across tenants). Agents
+    see only runs whose ``agent_id`` equals their user id — the filter is
+    applied at the service layer, NOT post-hoc, so we never load other
+    tenants' rows into memory.
+
+    The three query params (``stack_id`` / ``job_name`` / ``status``) are
+    empty-string tolerant: blank values are treated as "no filter" rather
+    than 422, so the filter form can submit ``?status=`` for "all".
+    """
+    _require_agent_or_admin(user)
+
+    filter_stack: Optional[UUID]
+    if stack_id:
+        try:
+            filter_stack = UUID(stack_id)
+        except ValueError:
+            # Bad UUID in the URL bar — treat as "no filter" rather than 422.
+            filter_stack = None
+    else:
+        filter_stack = None
+    filter_job = job_name if job_name in ("cache_warmup", "run_trading") else None
+    filter_status = (
+        status if status in ("running", "success", "failed", "killed") else None
+    )
+
+    own_agent_id = None if user.role == "admin" else user.id
+    runs = await services_runs.list_runs(
+        db,
+        agent_id=own_agent_id,
+        stack_id=filter_stack,
+        status=filter_status,
+        limit=200,
+    )
+    if filter_job:
+        runs = [r for r in runs if r.job_name == filter_job]
+
+    # Pre-load the stacks lookup so the template can render each row's
+    # compose_project without lazy-loading per row. Filter the dict to
+    # only the stacks the caller is allowed to see (admins: all).
+    all_stacks = await services_stacks.list_stacks(db)
+    stacks_by_id = {
+        s.id: s
+        for s in all_stacks
+        if user.role == "admin" or s.agent_id == user.id
+    }
+
+    ctx = _ctx(request, user, current_tab="/agent/runs")
+    ctx["runs"] = runs
+    ctx["stacks_by_id"] = stacks_by_id
+    ctx["filter_stack_id"] = stack_id or ""
+    ctx["filter_job"] = job_name or ""
+    ctx["filter_status"] = status or ""
+    ctx["all_stacks"] = sorted(
+        stacks_by_id.values(), key=lambda s: s.compose_project
+    )
+    return templates.TemplateResponse("agent/runs.html", ctx)
+
+
+@router.get("/runs/{run_id}")
+async def agent_run_detail(
+    run_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-run detail page (live log via WS while running, archived after).
+
+    Tenant-guarded via :func:`services_runs.can_user_see_run` — same 404
+    masking pattern as the rest of this module (we never tell an agent
+    that *some other agent's* run id is valid).
+    """
+    _require_agent_or_admin(user)
+    run = await services_runs.get_run(db, run_id)
+    if run is None or not services_runs.can_user_see_run(user, run):
+        raise HTTPException(status_code=404, detail="run not found")
+
+    stack = await services_stacks.get_stack(db, run.stack_id)
+    agent_user = await services_agents.get_agent(db, run.agent_id)
+
+    # Archived log is only relevant once the run has finished; while
+    # ``running`` the template opens a WebSocket and streams stdout live
+    # (the WS handler will replay any already-buffered output).
+    archived_log = ""
+    if run.status != "running":
+        bs = await services_runs.read_run_log(run)
+        archived_log = bs.decode("utf-8", errors="replace")
+
+    ctx = _ctx(request, user, current_tab="/agent/runs")
+    ctx["run"] = run
+    ctx["stack"] = stack
+    # NOTE: we pass ``agent`` (the stack owner's User row) so the template
+    # can show the *username* — never the raw UUID, which would leak
+    # tenant info to anyone over-the-shoulder.
+    ctx["agent"] = agent_user
+    ctx["archived_log"] = archived_log
+    return templates.TemplateResponse("agent/run_detail.html", ctx)
 
 
 # Silence unused-import lint for AgentStack + select — referenced indirectly

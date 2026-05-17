@@ -1,0 +1,106 @@
+{#
+  Run detail page (Phase 6).
+
+  Identity card + log viewer. While ``run.status == 'running'`` we open a
+  WebSocket to ``/ws/runs/{run_id}`` (parallel agent B) and append each
+  text frame to the ``#run-log`` <pre>. Once the run finishes the WS
+  closes server-side; the page does NOT auto-reload — the user has to
+  hit refresh to see the final ``status`` badge and exit_code. This is a
+  deliberate trade-off: an auto-reload would lose any text the user has
+  scrolled back to, and the WS already streams the tail in real time.
+
+  For finished runs the server pre-renders the archived log into the
+  same <pre>, so the page is fully usable without JavaScript.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Run {{ run.id }}{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">{{ run.job_name }}</h1>
+    <p class="text-muted text-small">
+      run &middot; {{ run.trigger }} &middot;
+      {% if run.status == 'running' %}<span class="badge badge--pending">running</span>
+      {% elif run.status == 'success' %}<span class="badge badge--up">success</span>
+      {% elif run.status == 'failed' %}<span class="badge badge--down">failed</span>
+      {% else %}<span class="badge">{{ run.status }}</span>{% endif %}
+    </p>
+  </div>
+  <div class="header-actions">
+    <a class="btn btn--ghost btn--sm" href="/admin/runs">&larr; all runs</a>
+    {% if stack %}<a class="btn btn--ghost btn--sm" href="/admin/stacks/{{ stack.id }}">stack &rarr;</a>{% endif %}
+  </div>
+</div>
+
+<section class="card">
+  <h2 class="h2">Identity</h2>
+  <dl class="kv">
+    <dt>Run ID</dt><dd><code class="text-small">{{ run.id }}</code></dd>
+    <dt>Stack</dt>
+    <dd>
+      {% if stack %}
+        <a href="/admin/stacks/{{ stack.id }}"><code>{{ stack.compose_project }}</code></a>
+      {% else %}
+        <span class="text-muted">&mdash;</span>
+      {% endif %}
+    </dd>
+    <dt>Agent</dt>
+    <dd>
+      {% if agent %}
+        <a href="/admin/agents/{{ agent.id }}" dir="auto">{{ agent.username }}</a>
+      {% else %}
+        <span class="text-muted">&mdash;</span>
+      {% endif %}
+    </dd>
+    <dt>Job</dt><dd><code>{{ run.job_name }}</code></dd>
+    <dt>Trigger</dt><dd><code>{{ run.trigger }}</code></dd>
+    <dt>Started</dt><dd>{{ run.started_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</dd>
+    <dt>Finished</dt>
+    <dd>
+      {% if run.finished_at %}
+        {{ run.finished_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+      {% else %}
+        <span class="text-muted">in progress&hellip;</span>
+      {% endif %}
+    </dd>
+    <dt>Exit code</dt>
+    <dd>
+      {% if run.exit_code is none %}
+        <span class="text-muted">&mdash;</span>
+      {% else %}
+        <code>{{ run.exit_code }}</code>
+      {% endif %}
+    </dd>
+  </dl>
+</section>
+
+<section class="card" style="margin-top: 16px;">
+  <div class="card-header">
+    <h2 class="h2">Log</h2>
+    {% if run.status == 'running' %}<span class="badge badge--pending">live</span>{% endif %}
+  </div>
+  <pre id="run-log" class="log-viewer">{{ archived_log }}</pre>
+</section>
+
+{% if run.status == 'running' %}
+<script>
+  (function() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var url = proto + '//' + location.host + '/ws/runs/{{ run.id }}';
+    var log = document.getElementById('run-log');
+    var ws = new WebSocket(url);
+    ws.onmessage = function(e) {
+      log.textContent += e.data + '\n';
+      log.scrollTop = log.scrollHeight;
+    };
+    ws.onclose = function() {
+      log.textContent += '\n[stream closed]\n';
+    };
+    ws.onerror = function() {
+      log.textContent += '\n[stream error]\n';
+    };
+  })();
+</script>
+{% endif %}
+{% endblock %}

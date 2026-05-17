@@ -1,0 +1,32 @@
+{#
+  Run-now button strip (Phase 6, agent).
+
+  Renders two POST forms (one per job_name) that fire a manual run on the
+  given stack. The trading button is styled as `--danger` because the run
+  places real orders; both forms confirm() before submit.
+
+  Required context:
+    - stack: an :class:`app.models.stacks.AgentStack` row (we use stack.id).
+
+  Tenant scoping happens server-side in
+  ``agent_stack_run_now`` (see app/routers/agent.py). The button itself
+  is not a security boundary.
+#}
+<div class="run-now-strip" style="display: flex; gap: 8px; align-items: center;">
+  <form method="post"
+        action="/agent/stacks/{{ stack.id }}/run/cache_warmup"
+        onsubmit="return confirm('Run cache_warmup now? The scheduler will be paused for the duration.');"
+        style="display: inline; margin: 0;">
+    <button type="submit" class="btn btn--primary btn--sm">
+      Run cache_warmup
+    </button>
+  </form>
+  <form method="post"
+        action="/agent/stacks/{{ stack.id }}/run/run_trading"
+        onsubmit="return confirm('Run trading now? This will place real orders. The scheduler will be paused for the duration.');"
+        style="display: inline; margin: 0;">
+    <button type="submit" class="btn btn--danger btn--sm">
+      Run trading
+    </button>
+  </form>
+</div>

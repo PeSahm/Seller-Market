@@ -17,6 +17,7 @@ from app.routers import admin as admin_router
 from app.routers import agent as agent_router
 from app.routers import auth as auth_router
 from app.routers import health as health_router
+from app.routers.ws import run_stream as ws_run_stream
 from app.security.deps import get_current_user
 from app.settings import get_settings
 from app.workers.health import run_health_worker
@@ -53,6 +54,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router.router)
     app.include_router(admin_router.router)
     app.include_router(agent_router.router)
+    app.include_router(ws_run_stream.router)
 
     # Root: route to admin or agent dashboard based on role.
     @app.get("/", include_in_schema=False)

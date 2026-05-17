@@ -23,6 +23,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
+from app.models.runs import StackRunLock
 from app.models.servers import ServerClockSkewSample
 from app.models.users import User
 from app.routers.dashboard import _ctx, templates
@@ -37,12 +38,15 @@ from app.services import agents as services_agents
 from app.services import customers as services_customers
 from app.services import distribution as services_distribution
 from app.services import locust_configs as services_locust
+from app.services import run_executor
+from app.services import runs as services_runs
 from app.services import scheduler_jobs as services_scheduler
 from app.services import servers as services_servers
 from app.services import settings_store
 from app.services import stacks as services_stacks
 from app.services.customers import OptimisticLockError
 from app.services.locust_configs import OptimisticLockError as LocustLockError
+from app.services.run_locks import StackRunLockBusyError
 from app.services.scheduler_jobs import OptimisticLockError as SchedulerLockError
 from app.services.ssh.exceptions import SSHError
 
@@ -104,11 +108,26 @@ async def admin_dashboard(
         "pending": sum(1 for c in all_customers if c.assignment_status == "pending"),
     }
 
+    # Phase 6: recent-runs roll-up. We pull the most recent 200 runs and
+    # bucket them by terminal status so the dashboard card can render the
+    # "10 success / 2 failed" metric strip without paging through the full
+    # history table. The cap matches ``list_runs``'s natural upper bound;
+    # callers wanting more granular reporting use ``/admin/runs`` directly.
+    recent_runs = await services_runs.list_runs(db, limit=200)
+    recent_runs_summary = {
+        "total": len(recent_runs),
+        "running": sum(1 for r in recent_runs if r.status == "running"),
+        "success": sum(1 for r in recent_runs if r.status == "success"),
+        "failed": sum(1 for r in recent_runs if r.status == "failed"),
+        "killed": sum(1 for r in recent_runs if r.status == "killed"),
+    }
+
     ctx = _ctx(request, user, current_tab="/admin/dashboard")
     ctx["server_summary"] = server_summary
     ctx["stack_summary"] = stack_summary
     ctx["pending_summary"] = pending_summary
     ctx["customer_summary"] = customer_summary
+    ctx["recent_runs_summary"] = recent_runs_summary
     return templates.TemplateResponse("admin/dashboard.html", ctx)
 
 
@@ -1215,11 +1234,18 @@ async def admin_stack_detail(
         # Log + degrade so the admin can still see the page and take action.
         logger.info("stack_files_preview failed for stack=%s: %s", stack_id, exc)
 
+    # Phase 6: surface the most recent runs on this stack so admins can
+    # see "what's been firing on here lately" without leaving the detail
+    # page. 10 is a deliberate cap — anything bigger and the section
+    # crowds the file preview below it; deeper history lives on /admin/runs.
+    stack_runs = await services_runs.list_runs(db, stack_id=stack_id, limit=10)
+
     ctx = _ctx(request, user, current_tab="/admin/stacks")
     ctx["stack"] = stack
     ctx["server"] = server
     ctx["agent"] = agent
     ctx["files"] = files
+    ctx["stack_runs"] = stack_runs
     return templates.TemplateResponse("admin/stack_detail.html", ctx)
 
 
@@ -1838,3 +1864,181 @@ async def admin_act_as(
 # test-connection partial endpoint if we ever need to return a raw fragment
 # instead of a TemplateResponse.
 _ = HTMLResponse
+
+
+# ---------------------------------------------------------------------------
+# Run-now + runs history (Phase 6)
+# ---------------------------------------------------------------------------
+#
+# Two manual-trigger routes (one per job_name) + a global runs list + a
+# run-detail page with a live log viewer. The detail page upgrades to a
+# WebSocket stream while ``status == 'running'`` and falls back to the
+# archived ``read_run_log`` blob for finished runs — that switchover is
+# handled in the template, not here.
+#
+# The manual-run POST acts ON BEHALF OF the stack's owning agent: we
+# never trust the admin's ``user.id`` as the run's ``agent_id`` because
+# the run belongs to the agent whose orders are at stake, not the human
+# who clicked the button. Mirrors :func:`services_runs.can_user_see_run`.
+
+
+@router.post("/stacks/{stack_id}/run/{job_name}")
+async def admin_stack_run_now(
+    stack_id: UUID,
+    job_name: str,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Fire a manual run on an admin-owned stack.
+
+    The ``agent_id`` for the run is taken from the stack itself (a stack
+    belongs to one agent), NOT from ``user`` — admin acts ON BEHALF OF
+    the owning agent. A 409 surfaces if another run already holds the
+    per-stack lock; the operator can then click through to the in-flight
+    run's detail page and decide whether to wait or kill it.
+    """
+    if job_name not in ("cache_warmup", "run_trading"):
+        raise HTTPException(
+            status_code=400, detail=f"unknown job_name: {job_name}"
+        )
+    stack = await services_stacks.get_stack(db, stack_id)
+    if stack is None:
+        raise HTTPException(status_code=404, detail="stack not found")
+    try:
+        run = await run_executor.start_manual_run(
+            stack_id=stack.id,
+            agent_id=stack.agent_id,
+            job_name=job_name,
+            actor_id=user.id,
+        )
+    except StackRunLockBusyError:
+        # Another run is already in flight on this stack. Browser users
+        # should land on THAT run's detail page (live log) rather than a
+        # JSON 409 — they wanted to watch a run, here's the one already
+        # going. We look up the existing lock to find its run_id.
+        in_flight = await db.execute(
+            select(StackRunLock).where(StackRunLock.stack_id == stack.id)
+        )
+        lock_row = in_flight.scalar_one_or_none()
+        # Programmatic clients (HTMX / JSON) get the explicit 409 so they
+        # can act on it. Plain browser navigation gets the redirect.
+        if request.headers.get("HX-Request") or "application/json" in (
+            request.headers.get("accept") or ""
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="another run is already in flight on this stack",
+            )
+        target = (
+            f"/admin/runs/{lock_row.run_id}"
+            if lock_row is not None
+            else f"/admin/stacks/{stack.id}"
+        )
+        return Response(
+            status_code=status.HTTP_303_SEE_OTHER,
+            headers={"Location": target},
+        )
+
+    redirect_to = f"/admin/runs/{run.id}"
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": redirect_to})
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER,
+        headers={"Location": redirect_to},
+    )
+
+
+@router.get("/runs")
+async def admin_runs(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    stack_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    job_name: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    """List recent runs across all stacks, optionally filtered.
+
+    All filter args take empty strings (sent by an unselected
+    ``<option value="">``) and treat them as "no filter". UUIDs that fail
+    to parse raise the standard 422 from :func:`uuid.UUID`; we don't
+    bother with a custom 400 because the only way to feed a malformed
+    UUID is to hand-edit the URL.
+
+    The ``job_name`` filter is post-filtered in Python because the
+    service-layer signature predates the addition of the job column. Cap
+    is 200 — see the matching dashboard summary for the same rationale.
+    """
+    filter_stack = UUID(stack_id) if stack_id else None
+    filter_agent = UUID(agent_id) if agent_id else None
+    filter_job = job_name if job_name in ("cache_warmup", "run_trading") else None
+    filter_status = (
+        status if status in ("running", "success", "failed", "killed") else None
+    )
+
+    runs = await services_runs.list_runs(
+        db,
+        agent_id=filter_agent,
+        stack_id=filter_stack,
+        status=filter_status,
+        limit=200,
+    )
+    if filter_job:
+        runs = [r for r in runs if r.job_name == filter_job]
+
+    # Lookups for column display. ``include_deleted=True`` so a run
+    # against a since-deleted agent still resolves to a username instead
+    # of "—" in the table.
+    agents = {
+        a.id: a
+        for a in await services_agents.list_agents(db, include_deleted=True)
+    }
+    stacks_by_id = {s.id: s for s in await services_stacks.list_stacks(db)}
+
+    ctx = _ctx(request, user, current_tab="/admin/runs")
+    ctx["runs"] = runs
+    ctx["agents_by_id"] = agents
+    ctx["stacks_by_id"] = stacks_by_id
+    ctx["filter_stack_id"] = stack_id
+    ctx["filter_agent_id"] = agent_id
+    ctx["filter_job"] = job_name
+    ctx["filter_status"] = status
+    ctx["all_agents"] = sorted(agents.values(), key=lambda a: a.username)
+    ctx["all_stacks"] = sorted(
+        stacks_by_id.values(), key=lambda s: s.compose_project
+    )
+    return templates.TemplateResponse("admin/runs.html", ctx)
+
+
+@router.get("/runs/{run_id}")
+async def admin_run_detail(
+    run_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Detail page: identity + live log via WS for running runs, archive for done.
+
+    The "running" branch defers all log content to the WebSocket stream
+    handled by :mod:`app.routers.ws` (parallel agent B); the "finished"
+    branch reads the archived bytes from :func:`services_runs.read_run_log`
+    and renders them in a static ``<pre>`` block. The template uses
+    ``run.status`` to pick which branch.
+    """
+    run = await services_runs.get_run(db, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    stack = await services_stacks.get_stack(db, run.stack_id)
+    agent = await services_agents.get_agent(db, run.agent_id)
+    archived_log = ""
+    if run.status != "running":
+        bs = await services_runs.read_run_log(run)
+        archived_log = bs.decode("utf-8", errors="replace")
+    ctx = _ctx(request, user, current_tab="/admin/runs")
+    ctx["run"] = run
+    ctx["stack"] = stack
+    ctx["agent"] = agent
+    ctx["archived_log"] = archived_log
+    return templates.TemplateResponse("admin/run_detail.html", ctx)

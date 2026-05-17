@@ -1,0 +1,31 @@
+{#
+  Run-now buttons partial (Phase 6) — included from admin/stack_detail.html.
+
+  Inputs:
+    - stack: the AgentStack row (we use stack.id to build the POST URL).
+
+  Two POST forms, side-by-side, each with a confirm() guard. We use plain
+  form POSTs (not HTMX) because the route returns a 303 to the new run's
+  detail page — letting the browser do the redirect gives the operator
+  the clearest mental model: "I clicked run, I'm now watching the run".
+
+  ``run_trading`` gets the btn--danger styling because clicking it places
+  real orders; ``cache_warmup`` is safe to re-fire and uses the standard
+  primary style.
+#}
+<div class="run-now-strip">
+  <form method="post" action="/admin/stacks/{{ stack.id }}/run/cache_warmup"
+        onsubmit="return confirm('Run cache_warmup now? The scheduler will be paused for the duration.');"
+        style="display: inline;">
+    <button type="submit" class="btn btn--primary btn--sm">Run cache_warmup</button>
+  </form>
+  <form method="post" action="/admin/stacks/{{ stack.id }}/run/run_trading"
+        onsubmit="return confirm('Run trading now? This will place real orders. The scheduler will be paused for the duration.');"
+        style="display: inline; margin-left: 8px;">
+    <button type="submit" class="btn btn--danger btn--sm">Run trading</button>
+  </form>
+</div>
+<p class="text-small text-muted">
+  Manual runs acquire a per-stack lock and disable the scheduler temporarily,
+  then restore it on completion. Watch the live log on the run detail page.
+</p>

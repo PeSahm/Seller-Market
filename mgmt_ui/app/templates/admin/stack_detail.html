@@ -33,6 +33,13 @@
 <div id="stack-action-result" class="test-result-slot"></div>
 <div id="stack-action-spinner" class="htmx-indicator text-small text-muted">Working…</div>
 
+{# Phase 6: manual run-now controls. Placed above the file preview so the
+   primary action is visible without scrolling on a typical viewport. #}
+<section class="card" style="margin-bottom: 16px;">
+  <h2 class="h2">Run now</h2>
+  {% include "admin/partials/run_now_buttons.html" %}
+</section>
+
 <div class="server-detail-grid">
   <section class="card">
     <h2 class="h2">Identity</h2>
@@ -117,4 +124,53 @@
     {% endif %}
   </section>
 </div>
+
+{# Phase 6: scoped run history for this stack — last 10. Deeper history
+   lives at /admin/runs?stack_id=<id> (the "view all" link below). #}
+<section class="card" style="margin-top: 16px;">
+  <div class="card-header">
+    <h2 class="h2">Recent runs for this stack</h2>
+    <a class="btn btn--ghost btn--sm" href="/admin/runs?stack_id={{ stack.id }}">view all &rarr;</a>
+  </div>
+  {% if not stack_runs %}
+    <p class="text-muted text-small">No runs yet on this stack.</p>
+  {% else %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Job</th>
+          <th>Trigger</th>
+          <th>Status</th>
+          <th>Duration</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in stack_runs %}
+        <tr class="run-row">
+          <td class="text-small text-muted">{{ r.started_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</td>
+          <td><code class="text-small">{{ r.job_name }}</code></td>
+          <td><span class="text-small">{{ r.trigger }}</span></td>
+          <td>
+            {% if r.status == 'running' %}<span class="badge badge--pending">running</span>
+            {% elif r.status == 'success' %}<span class="badge badge--up">success</span>
+            {% elif r.status == 'failed' %}<span class="badge badge--down">failed</span>
+            {% elif r.status == 'killed' %}<span class="badge badge--down">killed</span>
+            {% else %}<span class="badge">{{ r.status }}</span>{% endif %}
+          </td>
+          <td class="text-small text-muted">
+            {% if r.finished_at and r.started_at %}
+              {{ '%.1fs'|format((r.finished_at - r.started_at).total_seconds()) }}
+            {% else %}
+              &mdash;
+            {% endif %}
+          </td>
+          <td><a class="btn btn--ghost btn--sm" href="/admin/runs/{{ r.id }}">view &rarr;</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
 {% endblock %}

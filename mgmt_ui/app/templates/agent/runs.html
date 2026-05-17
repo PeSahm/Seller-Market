@@ -1,0 +1,117 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Runs{% endblock %}
+
+{% block page_body %}
+<h1 class="h1">Runs</h1>
+<p class="text-muted text-small">
+  Every invocation of <code>cache_warmup</code> or <code>run_trading</code>
+  on one of your stacks — scheduled or fired manually — shows up here.
+  Click a row to see the captured log (live while it's running, archived
+  once it has finished).
+</p>
+
+{# Filter form. Empty values are treated as "no filter" server-side, so
+   submitting with all dropdowns blank shows everything. #}
+<form method="get" action="/agent/runs" class="filter-bar"
+      style="display: flex; gap: 12px; align-items: end; margin: 12px 0;">
+  <label class="field">
+    <span class="field-label text-small text-muted">Stack</span>
+    <select name="stack_id">
+      <option value="">— any —</option>
+      {% for s in all_stacks %}
+      <option value="{{ s.id }}"{% if filter_stack_id == s.id|string %} selected{% endif %}>
+        {{ s.compose_project }}
+      </option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span class="field-label text-small text-muted">Job</span>
+    <select name="job_name">
+      <option value="">— any —</option>
+      <option value="cache_warmup"{% if filter_job == 'cache_warmup' %} selected{% endif %}>cache_warmup</option>
+      <option value="run_trading"{% if filter_job == 'run_trading' %} selected{% endif %}>run_trading</option>
+    </select>
+  </label>
+  <label class="field">
+    <span class="field-label text-small text-muted">Status</span>
+    <select name="status">
+      <option value="">— any —</option>
+      <option value="running"{% if filter_status == 'running' %} selected{% endif %}>running</option>
+      <option value="success"{% if filter_status == 'success' %} selected{% endif %}>success</option>
+      <option value="failed"{% if filter_status == 'failed' %} selected{% endif %}>failed</option>
+      <option value="killed"{% if filter_status == 'killed' %} selected{% endif %}>killed</option>
+    </select>
+  </label>
+  <button type="submit" class="btn btn--ghost btn--sm">Apply</button>
+  <a href="/agent/runs" class="btn btn--ghost btn--sm">Reset</a>
+</form>
+
+{% if not runs %}
+<div class="card">
+  <p class="text-muted">No runs match the current filters.</p>
+  {% if filter_stack_id or filter_job or filter_status %}
+  <p class="text-small">
+    <a href="/agent/runs">Clear filters</a> to see all runs.
+  </p>
+  {% else %}
+  <p class="text-small text-muted">
+    Visit one of your <a href="/agent/stacks">stacks</a> to fire a
+    manual run.
+  </p>
+  {% endif %}
+</div>
+{% else %}
+<table class="table">
+  <thead><tr>
+    <th>Started</th>
+    <th>Stack</th>
+    <th>Job</th>
+    <th>Trigger</th>
+    <th>Status</th>
+    <th>Duration</th>
+    <th>Exit</th>
+  </tr></thead>
+  <tbody>
+    {% for r in runs %}
+    {% set stk = stacks_by_id.get(r.stack_id) %}
+    <tr>
+      <td class="text-small">
+        <a href="/agent/runs/{{ r.id }}">
+          {{ r.started_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+        </a>
+      </td>
+      <td class="text-small">
+        {% if stk %}
+          <a href="/agent/stacks/{{ stk.id }}"><code>{{ stk.compose_project }}</code></a>
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </td>
+      <td><code class="text-small">{{ r.job_name }}</code></td>
+      <td class="text-small text-muted">{{ r.trigger }}</td>
+      <td>
+        {% if r.status == 'running' %}<span class="badge badge--pending">running</span>
+        {% elif r.status == 'success' %}<span class="badge badge--up">success</span>
+        {% elif r.status == 'failed' %}<span class="badge badge--down">failed</span>
+        {% elif r.status == 'killed' %}<span class="badge badge--down">killed</span>
+        {% else %}<span class="badge badge--pending">{{ r.status }}</span>{% endif %}
+      </td>
+      <td class="text-small text-muted">
+        {% if r.finished_at and r.started_at %}
+          {{ '%.1f' % (r.finished_at - r.started_at).total_seconds() }}s
+        {% else %}—{% endif %}
+      </td>
+      <td class="text-small text-muted">
+        {% if r.exit_code is not none %}{{ r.exit_code }}{% else %}—{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="text-muted text-small">
+  Showing the most recent {{ runs|length }} run{% if runs|length != 1 %}s{% endif %}
+  (capped at 200).
+</p>
+{% endif %}
+{% endblock %}
