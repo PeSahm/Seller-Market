@@ -312,6 +312,7 @@ async def list_audit(
     actor_id: Optional[UUID] = None,
     action: Optional[str] = None,
     actions: Optional[Iterable[str]] = None,
+    action_contains: Optional[str] = None,
     target_type: Optional[str] = None,
     target_id: Optional[str] = None,
     since: Optional[datetime] = None,
@@ -330,6 +331,18 @@ async def list_audit(
     "no filter" rather than "no rows", since an empty multi-select on
     the form means the user didn't pick anything.
 
+    ``action_contains`` is a case-insensitive substring filter applied
+    in SQL (``ILIKE %term%``) so the LIMIT runs AFTER the filter — a
+    previous version of this code did the substring match in Python
+    AFTER fetching the top N, which silently dropped matching rows
+    that fell outside the cap window. The ``%`` and ``_`` metacharacters
+    in the user input are escaped (with ``\\`` as the escape char) so a
+    literal ``percent``-or-``underscore``-containing action name doesn't
+    accidentally match unrelated rows. If both ``action_contains`` and
+    one of ``action`` / ``actions`` are given, the substring filter is
+    ANDed on top — the routes never send both today, but the contract
+    is documented.
+
     ``limit`` defaults to 200 to match the UI's table page; callers
     paginating manually can override.
     """
@@ -345,6 +358,17 @@ async def list_audit(
         # else: empty multi-select -> no filter on action at all
     elif action is not None:
         stmt = stmt.where(AuditLog.action == action)
+
+    if action_contains:
+        # Escape the LIKE wildcards (%, _) and the escape char (\) itself
+        # so a user search like "user_id" doesn't behave as "user<any>id".
+        escaped = (
+            action_contains
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        stmt = stmt.where(AuditLog.action.ilike(f"%{escaped}%", escape="\\"))
 
     if target_type is not None:
         stmt = stmt.where(AuditLog.target_type == target_type)

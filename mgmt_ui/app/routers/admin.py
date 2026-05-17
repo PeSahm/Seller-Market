@@ -1934,10 +1934,12 @@ async def admin_audit(
 
     Parses query-string filters defensively: empty strings and unparseable
     UUIDs / ISO dates degrade to "no filter" rather than 422-ing the page.
-    The ``action`` filter is a case-insensitive substring match applied in
-    Python after the DB read — the action vocabulary is small (~27 values)
-    and a LIKE pattern doesn't move the needle on perf. Rows are capped at
-    300 so the page renders fast; the service layer caps independently too.
+    The ``action`` filter is a case-insensitive substring match pushed
+    into SQL via ``action_contains`` (``ILIKE %term%``) so the LIMIT
+    applies AFTER the filter — a previous Python-side post-filter
+    silently dropped matching rows that fell outside the 300-row cap
+    window. Rows are capped at 300 so the page renders fast; the
+    service layer caps independently too.
     """
     from datetime import datetime
 
@@ -1960,15 +1962,12 @@ async def admin_audit(
     rows = await services_audit.list_audit(
         db,
         actor_id=_parse_uuid_or_none(actor_id),
+        action_contains=action or None,
         target_type=target_type or None,
         since=_parse_date_or_none(since),
         until=_parse_date_or_none(until),
         limit=300,
     )
-    # Substring filter on ``action`` runs in Python — see docstring.
-    if action:
-        needle = action.lower()
-        rows = [r for r in rows if needle in r.action.lower()]
 
     # Preload actor users so each row can render a username without N+1.
     actor_ids = {r.actor_user_id for r in rows if r.actor_user_id}

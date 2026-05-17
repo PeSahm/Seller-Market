@@ -271,3 +271,68 @@ async def test_list_audit_orders_by_ts_desc() -> None:
     assert "order by audit_log.ts desc" in normalised, (
         f"expected ORDER BY ts DESC; got: {normalised}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. action_contains substring filter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_action_contains_compiles_to_ilike_in_sql() -> None:
+    """``action_contains=customer`` produces an ILIKE in the SQL WHERE.
+
+    Pins the fix for PR #55's "Apply ``action`` filtering before the
+    SQL LIMIT" finding — a Python-side post-filter was silently
+    dropping matching rows that fell outside the 300-row cap window.
+    """
+    db = _FakeDB()
+    await list_audit(db, action_contains="customer")  # type: ignore[arg-type]
+    sql = _compile_sql(db.statements[0]).lower()
+    assert "like" in sql, f"expected ILIKE in SQL; got: {sql}"
+    binds = _bound_params(db.statements[0])
+    # The pattern is wrapped with %...% by the helper.
+    assert any(
+        isinstance(v, str) and v.startswith("%") and v.endswith("%") and "customer" in v
+        for v in binds.values()
+    ), f"expected a '%customer%' bind value; got: {list(binds.values())}"
+
+
+@pytest.mark.asyncio
+async def test_action_contains_escapes_like_wildcards() -> None:
+    """Literal ``_`` / ``%`` in the search term must be escaped.
+
+    A naive ``ILIKE %term%`` with ``term="user_id"`` would match
+    ``user-id``, ``userXid``, etc. — semantics drift. We escape the
+    metacharacters so the user sees only literal substring matches.
+    """
+    db = _FakeDB()
+    await list_audit(db, action_contains="user_id")  # type: ignore[arg-type]
+    binds = _bound_params(db.statements[0])
+    pattern = next(
+        v for v in binds.values()
+        if isinstance(v, str) and v.startswith("%")
+    )
+    # The literal underscore in the user's input is escaped.
+    assert "\\_" in pattern, (
+        f"expected the underscore to be escaped in {pattern!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_action_contains_empty_string_means_no_filter() -> None:
+    """An empty/None ``action_contains`` should NOT add a WHERE clause.
+
+    Falsy values come through the empty-string-tolerant query-param
+    parsing in the route; they must not generate ``ILIKE '%%'`` which
+    matches everything (and adds a useless DB-side scan).
+    """
+    db = _FakeDB()
+    await list_audit(db, action_contains=None)  # type: ignore[arg-type]
+    db2 = _FakeDB()
+    await list_audit(db2, action_contains="")  # type: ignore[arg-type]
+    for stmt in (db.statements[0], db2.statements[0]):
+        sql = _compile_sql(stmt).lower()
+        assert "like" not in sql, (
+            f"empty action_contains must not produce LIKE; got: {sql}"
+        )
