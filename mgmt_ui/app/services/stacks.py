@@ -656,13 +656,34 @@ async def _push_files(
 
 
 async def _compose_up(
-    server: Server, stack: AgentStack
+    server: Server,
+    stack: AgentStack,
+    *,
+    force_recreate: bool = False,
 ) -> tuple[bool, str]:
     """Run ``docker compose up -d`` for the stack. Returns (ok, log_tail).
 
     We don't pass ``check=True`` because we want to capture the failure
     output for the admin instead of raising an opaque exception. The caller
     inspects ``ok`` to decide whether to flip status to ``up`` or ``down``.
+
+    ``force_recreate=True`` adds ``--force-recreate --pull always`` so the
+    container is destroyed and re-created from scratch. Used by
+    :func:`redeploy_stack` because:
+
+    * Each per-stack file is mounted as a **single-file bind mount**. Docker
+      staples a single-file bind to the destination INODE at the moment of
+      ``docker run`` — if the host file is replaced (e.g. anything that
+      called the old ``mv -f``-based atomic write, or a manual edit via an
+      editor that does atomic-rename-on-save), the container reads the
+      original frozen inode forever. ``--force-recreate`` re-attaches the
+      bind to the current inode.
+    * Settings changes (e.g. ``agent_image_tag`` on /admin/settings) only
+      take effect on container creation. ``--pull always`` ensures the new
+      image is fetched even when the tag string is unchanged (e.g. a
+      ``:latest`` push).
+    * Generally useful as a "reset this stack" knob for the admin — if a
+      container is in a weird state, redeploy now reliably fixes it.
 
     The compose project name is shell-quoted defensively even though
     ``find_or_create_stack`` only ever produces ``sm-agent-<uuid>``-shaped
@@ -671,9 +692,12 @@ async def _compose_up(
     hole. Same reasoning for ``stack_dir``.
     """
     run_command = _import_ssh_commands()
+    flags = " up -d"
+    if force_recreate:
+        flags = " up -d --force-recreate --pull always"
     cmd = (
         f"docker compose -p {_shell_quote(stack.compose_project)} "
-        f"-f {_shell_quote(stack.stack_dir + '/docker-compose.yml')} up -d"
+        f"-f {_shell_quote(stack.stack_dir + '/docker-compose.yml')}{flags}"
     )
     # 5-minute timeout: image pulls can be slow on a cold remote.
     result = await run_command(server, cmd, timeout=300.0, check=False)
@@ -753,6 +777,7 @@ async def _do_compose_action(
     *,
     audit_action: str,
     prepare_dirs: bool,
+    force_recreate: bool = False,
 ) -> StackActionResult:
     """Shared implementation for provision and redeploy.
 
@@ -764,13 +789,15 @@ async def _do_compose_action(
     3. Render all five files.
     4. (Optional) mkdir + touch on the remote — only on first provision.
     5. SFTP-push the files.
-    6. ``docker compose up -d``.
+    6. ``docker compose up -d`` (with ``--force-recreate --pull always``
+       on redeploy — see :func:`_compose_up` for the rationale).
     7. Flip status to ``up`` (success) or ``down`` (failure) and audit.
     8. Release the advisory lock in ``finally``.
 
-    The only difference is the audit action name and whether we run the
-    directory preparation step. Keeping the logic in one place means
-    "redeploy" can never accidentally drift from "provision" in subtle ways.
+    The only difference is the audit action name, whether we prepare
+    directories, and whether we force-recreate the container. Keeping the
+    logic in one place means "redeploy" can never accidentally drift from
+    "provision" in subtle ways.
     """
     stack = await get_stack(db, stack_id)
     if stack is None:
@@ -813,7 +840,9 @@ async def _do_compose_action(
                 if prepare_dirs:
                     await _prepare_remote_dirs(server, stack)
                 await _push_files(server, stack, files)
-                ok, log_tail = await _compose_up(server, stack)
+                ok, log_tail = await _compose_up(
+                    server, stack, force_recreate=force_recreate
+                )
             except Exception as exc:
                 # Any failure before/during compose flips status to
                 # ``down`` so the next admin action knows we left the
@@ -903,12 +932,25 @@ async def redeploy_stack(
     stack_id: UUID,
     actor_id: Optional[UUID],
 ) -> StackActionResult:
-    """Re-render config + ``docker compose up -d`` for an existing stack.
+    """Re-render config + force-recreate the container for an existing stack.
 
-    Useful when an admin changes the OCR URL or agent image tag in the
-    settings table and wants those changes to take effect without rebuilding
-    the directory tree. The mkdir/touch step is skipped because it's already
-    done.
+    Useful when an admin:
+
+    * Changes the OCR URL or agent image tag in the settings table.
+    * Wants to be sure recent config-file edits are visible to the running
+      container — single-file bind mounts pin the destination inode at
+      ``docker run`` time and any non-in-place file replacement on the
+      host leaves the container reading frozen content. (Our SFTP helper
+      writes in place to avoid this, but ``--force-recreate`` is the
+      belt-and-braces fix for any container created BEFORE that change
+      landed, or for files edited via tools that atomic-rename on save.)
+    * Wants a "reset this stack" knob to recover from a weird container
+      state.
+
+    The mkdir/touch step is skipped because the directory tree is already
+    in place from the first provision. ``--force-recreate`` + ``--pull
+    always`` (see :func:`_compose_up`) means redeploy is a few seconds
+    slower than provision, but reliably picks up every kind of change.
     """
     return await _do_compose_action(
         db,
@@ -916,6 +958,7 @@ async def redeploy_stack(
         actor_id,
         audit_action="stack.redeploy",
         prepare_dirs=False,
+        force_recreate=True,
     )
 
 
