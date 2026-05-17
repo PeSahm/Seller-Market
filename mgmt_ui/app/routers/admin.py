@@ -2139,10 +2139,21 @@ async def admin_trades(
         except (ValueError, TypeError):
             return None
 
+    def _parse_uuid_or_none(s):
+        """Same "degrade to no-filter on garbage" policy as the date / int
+        parsers above — a hand-edited URL with a malformed UUID
+        previously raised ValueError and 500'd the page."""
+        if not s:
+            return None
+        try:
+            return UUID(s)
+        except (ValueError, TypeError):
+            return None
+
     trades = await services_trades.list_trades(
         db,
-        agent_id=UUID(agent_id) if agent_id else None,
-        customer_id=UUID(customer_id) if customer_id else None,
+        agent_id=_parse_uuid_or_none(agent_id),
+        customer_id=_parse_uuid_or_none(customer_id),
         broker=broker or None,
         symbol_or_isin=symbol_or_isin or None,
         state=_parse_int_or_none(state),
