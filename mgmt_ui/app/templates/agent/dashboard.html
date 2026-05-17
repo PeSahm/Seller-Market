@@ -51,9 +51,54 @@
     <p class="text-muted text-small">(coming soon)</p>
   </article>
 
+  {# Phase 6: live run counts. Admins acting as agent see the whole fleet
+     (same convention as the customers card above) so this card mirrors the
+     server-side filter applied in agent_dashboard. #}
   <article class="card">
-    <h2 class="h3">Recent runs</h2>
-    <p class="text-muted text-small">(coming soon)</p>
+    <div class="card-header">
+      <h2 class="h3">Recent runs</h2>
+      <a class="btn btn--ghost btn--sm" href="/agent/runs">view all →</a>
+    </div>
+    {% if runs_summary.total == 0 %}
+      <p class="text-muted text-small">No runs yet.</p>
+      <p class="text-small text-muted">
+        Visit one of your <a href="/agent/stacks">stacks</a> to fire a
+        manual cache_warmup or trading run.
+      </p>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-value">{{ runs_summary.total }}</div>
+          <div class="metric-label text-muted text-small">total (last 100)</div>
+        </div>
+        {% if runs_summary.running %}
+        <div class="metric">
+          <div class="metric-value">
+            <a href="/agent/runs?status=running">
+              <span class="badge badge--pending">{{ runs_summary.running }}</span>
+            </a>
+          </div>
+          <div class="metric-label text-muted text-small">running</div>
+        </div>
+        {% endif %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge badge--up">{{ runs_summary.success }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">success</div>
+        </div>
+        {% if runs_summary.failed %}
+        <div class="metric">
+          <div class="metric-value">
+            <a href="/agent/runs?status=failed">
+              <span class="badge badge--down">{{ runs_summary.failed }}</span>
+            </a>
+          </div>
+          <div class="metric-label text-muted text-small">failed/killed</div>
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
   </article>
 </div>
 {% endblock %}

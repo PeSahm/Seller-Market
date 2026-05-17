@@ -1,0 +1,107 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Stack &mdash; {{ stack.compose_project }}{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">
+      {# Show the server name (and the agent's username for admin-acts-as-agent
+         observers); never the raw agent UUID — see run_detail.html for the
+         same anti-leak rule. #}
+      <span dir="auto">{{ server.name if server else "(unknown server)" }}</span>
+      {% if current_user.role == "admin" and agent %}
+        <span class="text-muted">·</span>
+        <span dir="auto" class="text-small">{{ agent.username }}</span>
+      {% endif %}
+    </h1>
+    <p class="text-muted text-small">
+      <code>{{ stack.compose_project }}</code>
+    </p>
+  </div>
+  <div class="header-actions">
+    <a class="btn btn--ghost btn--sm" href="/agent/stacks/{{ stack.id }}/scheduler">Scheduler&hellip;</a>
+    <a class="btn btn--ghost btn--sm" href="/agent/stacks/{{ stack.id }}/locust">Locust&hellip;</a>
+  </div>
+</div>
+
+{# Phase 6: run-now strip lives right under the header so the agent doesn't
+   have to scroll. Tenant scoping is enforced server-side in the POST handler. #}
+<section class="card" style="margin-bottom: 12px;">
+  <h2 class="h3">Run now</h2>
+  <p class="text-muted text-small">
+    Manually fire one of the two jobs on this stack. The in-container
+    scheduler is suppressed for the duration of the run so the manual fire
+    doesn't race with a scheduled one.
+  </p>
+  {% include "agent/partials/run_now_buttons.html" %}
+</section>
+
+<section class="card">
+  <h2 class="h2">Identity</h2>
+  <dl class="kv">
+    <dt>Status</dt>
+    <dd>
+      {% if stack.status == 'up' %}<span class="badge badge--up">up</span>
+      {% elif stack.status == 'down' %}<span class="badge badge--down">down</span>
+      {% elif stack.status == 'provisioning' %}<span class="badge badge--pending">provisioning</span>
+      {% elif stack.status == 'deprovisioning' %}<span class="badge badge--pending">deprovisioning</span>
+      {% else %}<span class="badge badge--pending">{{ stack.status }}</span>{% endif %}
+    </dd>
+    <dt>Server</dt>
+    <dd>
+      {% if server %}<span dir="auto">{{ server.name }}</span>
+      {% else %}<span class="text-muted">—</span>{% endif %}
+    </dd>
+    <dt>Deployed</dt>
+    <dd class="text-small">
+      {% if stack.deployed_at %}{{ stack.deployed_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+      {% else %}<span class="text-muted">never</span>{% endif %}
+    </dd>
+  </dl>
+</section>
+
+<section class="card" style="margin-top: 12px;">
+  <div class="card-header">
+    <h2 class="h3">Recent runs for this stack</h2>
+    <a class="btn btn--ghost btn--sm" href="/agent/runs?stack_id={{ stack.id }}">view all →</a>
+  </div>
+  {% if not stack_runs %}
+    <p class="text-muted text-small">No runs yet for this stack.</p>
+  {% else %}
+  <table class="table">
+    <thead><tr>
+      <th>Started</th>
+      <th>Job</th>
+      <th>Trigger</th>
+      <th>Status</th>
+      <th>Duration</th>
+    </tr></thead>
+    <tbody>
+      {% for r in stack_runs %}
+      <tr>
+        <td class="text-small">
+          <a href="/agent/runs/{{ r.id }}">
+            {{ r.started_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+          </a>
+        </td>
+        <td><code class="text-small">{{ r.job_name }}</code></td>
+        <td class="text-small text-muted">{{ r.trigger }}</td>
+        <td>
+          {% if r.status == 'running' %}<span class="badge badge--pending">running</span>
+          {% elif r.status == 'success' %}<span class="badge badge--up">success</span>
+          {% elif r.status == 'failed' %}<span class="badge badge--down">failed</span>
+          {% elif r.status == 'killed' %}<span class="badge badge--down">killed</span>
+          {% else %}<span class="badge badge--pending">{{ r.status }}</span>{% endif %}
+        </td>
+        <td class="text-small text-muted">
+          {% if r.finished_at and r.started_at %}
+            {{ '%.1f' % (r.finished_at - r.started_at).total_seconds() }}s
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}
