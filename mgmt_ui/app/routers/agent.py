@@ -795,6 +795,11 @@ async def agent_stack_scheduler_save(
                 "Could not fetch the current remote file for preview: "
                 f"{exc}"
             )
+        except LookupError as exc:
+            # Stack disappeared between the initial check and this
+            # rerender (e.g. concurrent deprovision). Return 404 instead
+            # of falling through to 500.
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         ctx = _ctx(request, user, current_tab="/agent/stacks")
         ctx["stack"] = stack
         ctx["jobs_by_name"] = jobs_by_name
@@ -956,6 +961,11 @@ async def agent_stack_locust_save(
                 "Could not fetch the current remote file for preview: "
                 f"{exc}"
             )
+        except LookupError as exc:
+            # Stack disappeared between the initial check and this
+            # rerender (e.g. concurrent deprovision). Return 404 instead
+            # of falling through to 500.
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         ctx = _ctx(request, user, current_tab="/agent/stacks")
         ctx["stack"] = stack
         ctx["locust"] = locust

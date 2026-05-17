@@ -1508,6 +1508,10 @@ async def _render_scheduler_form_with_override(
             "Could not fetch the current remote file for preview: "
             f"{exc}"
         )
+    except LookupError as exc:
+        # Stack disappeared between the initial check and this rerender
+        # (e.g. concurrent deprovision). Return 404 not 500.
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     ctx = _ctx(request, user, current_tab="/admin/stacks")
     ctx["stack"] = stack
@@ -1643,6 +1647,10 @@ async def admin_stack_locust_save(
                 "Could not fetch the current remote file for preview: "
                 f"{exc}"
             )
+        except LookupError as exc:
+            # Stack disappeared between the initial check and this
+            # rerender. Return 404 not 500.
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         ctx = _ctx(request, user, current_tab="/admin/stacks")
         ctx["stack"] = stack
         ctx["locust"] = locust
