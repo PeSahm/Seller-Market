@@ -1282,6 +1282,19 @@ async def admin_stack_redeploy(
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SSHError as exc:
+        # SSH/SFTP failure (host unreachable, key rejected, stack dir
+        # missing after a deprovision, etc.). The service already
+        # persisted status='down'; surface the error in the partial so
+        # the admin can see *why* it failed.
+        from app.schemas.stack import StackActionResult
+        result = StackActionResult(
+            ok=False,
+            stack_id=stack_id,
+            status="down",
+            message=f"redeploy failed: {exc}",
+            log_tail=str(exc),
+        )
     ctx = _ctx(request, user, current_tab="/admin/stacks")
     ctx["result"] = result
     return templates.TemplateResponse(
