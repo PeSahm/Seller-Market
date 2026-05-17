@@ -161,9 +161,16 @@ def test_module_import_does_not_require_ssh():
     This pins the "no SSH calls at module import" acceptance criterion —
     the lazy import of run_command lives inside scan_stack_once, not at
     module top-level.
+
+    Earlier tests in the suite already import ``app.services.health_signals``,
+    so a plain ``import`` here would be a cache hit on ``sys.modules`` and
+    silently miss a regression where someone moves an SSH import back to
+    module top-level. Force a fresh execution by popping the cached module
+    and re-importing it.
     """
-    # The import itself is the test — if module-load required SSH, this
-    # would have failed at collection time. Asserting len is just a way
-    # to keep pytest from optimising the import away.
-    from app.services.health_signals import _PATTERNS
-    assert len(_PATTERNS) >= 7
+    import importlib
+    import sys
+
+    sys.modules.pop("app.services.health_signals", None)
+    mod = importlib.import_module("app.services.health_signals")
+    assert len(mod._PATTERNS) >= 7
