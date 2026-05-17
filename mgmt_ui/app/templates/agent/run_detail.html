@@ -88,14 +88,28 @@
       if (statusEl) { statusEl.textContent = "live"; statusEl.className = "badge badge--up text-small"; }
     };
     ws.onmessage = function (ev) {
-      // Append chunk and keep the view pinned to the bottom unless the
-      // user has scrolled up to read history (within 40px of bottom).
+      // Append chunk + newline (each WS message is one bot log line; the
+      // server doesn't include the trailing \n). Keep the view pinned to
+      // the bottom unless the user has scrolled up to read history.
       var nearBottom = (pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 40);
-      pane.textContent += ev.data;
+      pane.textContent += ev.data + "\n";
       if (nearBottom) { pane.scrollTop = pane.scrollHeight; }
+      // Explicit done-sentinel sent by the executor when the underlying
+      // docker exec finishes. Flip the badge to "finished" immediately
+      // instead of waiting for the WS close, which can lag.
+      if (ev.data && ev.data.indexOf("<run-stream> done") === 0 && statusEl) {
+        statusEl.textContent = "finished — reload for archived log";
+        statusEl.className = "badge badge--up text-small";
+      }
     };
     ws.onclose = function () {
-      if (statusEl) { statusEl.textContent = "closed — reload for final"; statusEl.className = "badge badge--pending text-small"; }
+      if (statusEl) {
+        // Don't downgrade a "finished" badge to "closed".
+        if (statusEl.textContent.indexOf("finished") === -1) {
+          statusEl.textContent = "closed — reload for final";
+          statusEl.className = "badge badge--pending text-small";
+        }
+      }
     };
     ws.onerror = function () {
       if (statusEl) { statusEl.textContent = "error"; statusEl.className = "badge badge--down text-small"; }
