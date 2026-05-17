@@ -277,3 +277,24 @@ button { font: inherit; }
 .metric { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .metric-value { font-size: 1.5em; font-weight: 600; line-height: 1; }
 .metric-label { text-transform: uppercase; letter-spacing: 0.04em; }
+
+/* === Phase 6 run-now + runs history === */
+.run-now-strip { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.run-row td { vertical-align: middle; }
+.log-viewer {
+  background: #0e1116;
+  color: #e6edf3;
+  padding: 12px;
+  border-radius: var(--radius);
+  max-height: 60vh;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  white-space: pre;
+  margin: 0;
+}
+.log-viewer:empty::before {
+  content: "(no log captured)";
+  color: var(--fg-muted);
+  font-style: italic;
+}
