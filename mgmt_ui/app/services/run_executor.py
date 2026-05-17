@@ -12,12 +12,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import shlex
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 from weakref import WeakSet
 
+from sqlalchemy import delete, select
+
 from app.db import AsyncSessionLocal
-from app.models.runs import Run
+from app.models.runs import Run, StackRunLock
 from app.models.servers import Server
 from app.services import locust_configs as services_locust
 from app.services import run_locks
@@ -109,19 +112,78 @@ async def start_manual_run(
     executor task. Returns the new Run immediately so the HTTP handler can
     redirect the browser to its detail page.
 
-    If the lock can't be acquired, raises :class:`StackRunLockBusyError` —
-    handler surfaces as 409.
+    Concurrency is gated at TWO layers:
+
+    1. A Postgres session-level advisory lock keyed on ``stack_id``
+       serializes the whole "check existing lock → create Run → insert
+       StackRunLock" sequence. Non-blocking (``pg_try_advisory_lock``):
+       a concurrent caller is rejected immediately rather than queued.
+    2. The ``stack_run_locks`` table holds the durable "what's running
+       right now" record (with a TTL so a crashed mgmt process doesn't
+       strand the lock forever).
+
+    Without the advisory lock the SELECT + INSERT window was racy:
+    two clicks landed simultaneously, both saw "no existing lock", both
+    created Run rows, both inserted StackRunLock rows (one would later
+    crash on the PK), and the rejection branch finalized a "killed" run
+    polluting the history. With the gate, a rejected caller never
+    creates a Run row at all — clean history.
+
+    If the lock can't be acquired, raises :class:`StackRunLockBusyError`
+    — handler surfaces as 409 (or browser redirect to in-flight run).
     """
+    from sqlalchemy import text
+    from app.db import hash_lock_key
+
+    advisory_key = hash_lock_key("stack_run_acquire", str(stack_id))
+
     async with AsyncSessionLocal() as db:
-        run = await services_runs.start_run(
-            db,
-            stack_id=stack_id,
-            agent_id=agent_id,
-            job_name=job_name,
-            trigger="manual",
-            actor_id=actor_id,
+        # Layer 1: session-level advisory gate — non-blocking. Either we
+        # win the race instantly or another caller is already in flight
+        # acquiring this stack's lock; either way the user sees the same
+        # "busy" outcome.
+        gate = await db.execute(
+            text("SELECT pg_try_advisory_lock(:k)"), {"k": advisory_key}
         )
+        if not gate.scalar():
+            raise run_locks.StackRunLockBusyError(
+                stack_id,
+                holder="<concurrent acquire>",
+                expires_at=datetime.now(timezone.utc),
+            )
         try:
+            # Layer 2: check the durable row — held by another in-flight
+            # run? Then bail BEFORE creating any Run row.
+            existing = await db.execute(
+                select(StackRunLock).where(StackRunLock.stack_id == stack_id)
+            )
+            row = existing.scalar_one_or_none()
+            now = datetime.now(timezone.utc)
+            if row is not None:
+                if row.lease_expires_at > now:
+                    raise run_locks.StackRunLockBusyError(
+                        stack_id, row.holder, row.lease_expires_at
+                    )
+                # Stale lock — reclaim it. Logged inside acquire_lock too,
+                # but we delete here so the upcoming acquire_lock INSERT
+                # doesn't trip the PK constraint.
+                await db.execute(
+                    delete(StackRunLock).where(StackRunLock.stack_id == stack_id)
+                )
+                await db.commit()
+
+            # Now we know the stack is free. Create the Run row (this
+            # commits internally; advisory lock survives because it's
+            # session-level, not transaction-level).
+            run = await services_runs.start_run(
+                db,
+                stack_id=stack_id,
+                agent_id=agent_id,
+                job_name=job_name,
+                trigger="manual",
+                actor_id=actor_id,
+            )
+            # Insert the durable lock pointing at the Run we just made.
             await run_locks.acquire_lock(
                 db,
                 stack_id=stack_id,
@@ -130,18 +192,19 @@ async def start_manual_run(
                 holder=_holder_for(actor_id),
             )
             await db.commit()
-        except run_locks.StackRunLockBusyError:
-            # The run row was created but we can't proceed — mark it killed
-            # so the history reflects the rejection.
-            await services_runs.finalize_run(
-                db,
-                run_id=run.id,
-                status="killed",
-                exit_code=None,
-                captured_log=b"manual run rejected: another run already in flight\n",
-                actor_id=actor_id,
-            )
-            raise
+        finally:
+            # Release the advisory lock no matter what — including the
+            # busy-raise path, so the rejected caller doesn't strand it.
+            try:
+                await db.execute(
+                    text("SELECT pg_advisory_unlock(:k)"), {"k": advisory_key}
+                )
+                await db.commit()
+            except Exception:
+                logger.exception(
+                    "failed to release advisory lock key=%s for stack=%s",
+                    advisory_key, stack_id,
+                )
 
     # Fire-and-forget background task. We DON'T await it — the HTTP request
     # returns immediately and the browser opens a WebSocket for live log.
