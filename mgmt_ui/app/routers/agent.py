@@ -1541,12 +1541,20 @@ async def agent_trade_detail(
     if trade is None:
         raise HTTPException(status_code=404, detail="trade not found")
     customer = await services_customers.get_customer(db, trade.customer_id)
-    # Tenant check — `can_user_see_trade` returns False for non-admins when
-    # the customer's agent_id != user.id. Surfacing 404 (not 403) keeps the
-    # UUID space opaque to enumeration.
-    if customer is None or not services_trades.can_user_see_trade(
-        user, trade, customer
-    ):
+    # Tenant check:
+    # - Admins can always view, even if the customer row has been deleted
+    #   or the trade was ingested with a NULL/unmatched customer_id (which
+    #   the list view surfaces — denying detail access would break the
+    #   admin's only way to triage those rows).
+    # - Agents must own the customer; ``can_user_see_trade`` returns False
+    #   when the customer's agent_id != user.id, OR when customer is None
+    #   (an agent can never see an unmatched trade).
+    # - 404 not 403 on miss so an agent enumerating UUIDs can't tell
+    #   whether the trade exists.
+    if customer is None:
+        if user.role != "admin":
+            raise HTTPException(status_code=404, detail="trade not found")
+    elif not services_trades.can_user_see_trade(user, trade, customer):
         raise HTTPException(status_code=404, detail="trade not found")
 
     run = None
