@@ -1,7 +1,116 @@
+{#
+  Global audit-log feed (Phase 9).
+
+  Every mutating service in the codebase writes a row to ``audit_log``
+  (server CRUD, customer assign, run start/finish, health-signal ack,
+  settings save, ...). This page surfaces them back to admins as a
+  newest-first table with a filter bar; the per-row detail view lives
+  at ``/admin/audit/{id}`` and shows the redacted before/after JSON
+  diff.
+
+  Filters round-trip through the query string so a filtered view is
+  bookmarkable, mirroring the pattern used on ``/admin/trades`` and
+  ``/admin/runs``. The ``action`` field is a substring search (not
+  exact match) so an operator can type ``customer`` and see every
+  ``customer.*`` row without having to list each variant.
+
+  Up to 300 rows are loaded — for deeper history the operator refines
+  with the date range.
+#}
 {% extends "partials/page_shell.html" %}
 {% block page_title %}Audit log{% endblock %}
 
 {% block page_body %}
-<h1 class="h1">Audit log</h1>
-<p class="text-muted text-small">Coming in Phase 9 &mdash; see plan.</p>
+<div class="page-header">
+  <div>
+    <h1 class="h1">Audit log</h1>
+    <p class="text-muted text-small">
+      Newest first. Up to 300 rows; refine with filters for older history.
+    </p>
+  </div>
+</div>
+
+<form method="get" action="/admin/audit" class="filter-bar">
+  <select name="actor_id" class="input" title="Filter by actor">
+    <option value="">All actors</option>
+    {% for uid, uname in distinct_actors %}
+      <option value="{{ uid }}" {% if filter_actor_id == uid|string %}selected{% endif %} dir="auto">
+        {{ uname }}
+      </option>
+    {% endfor %}
+  </select>
+  <input
+    type="text"
+    name="action"
+    class="input"
+    value="{{ filter_action }}"
+    placeholder="action substring (e.g. customer)"
+    autocomplete="off"
+  >
+  <select name="target_type" class="input" title="Filter by target type">
+    <option value="">Any target</option>
+    {% for tt in ("server", "customer", "stack", "agent", "run", "trade", "health_signal", "setting", "user") %}
+      <option value="{{ tt }}" {% if filter_target_type == tt %}selected{% endif %}>{{ tt }}</option>
+    {% endfor %}
+  </select>
+  <input
+    type="date"
+    name="since"
+    class="input"
+    value="{{ filter_since }}"
+    title="Logged on or after"
+  >
+  <input
+    type="date"
+    name="until"
+    class="input"
+    value="{{ filter_until }}"
+    title="Logged on or before"
+  >
+  <button class="btn btn--ghost btn--sm" type="submit">Filter</button>
+  <a class="btn btn--ghost btn--sm" href="/admin/audit">Clear</a>
+</form>
+
+{% if not rows %}
+<div class="card">
+  <p class="text-muted">No audit entries match those filters.</p>
+  <p class="text-small text-muted">
+    Try widening the date range or clearing the action substring &mdash;
+    audit rows are produced by every mutating action in the system.
+  </p>
+</div>
+{% else %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>When</th>
+      <th>Actor</th>
+      <th>Action</th>
+      <th>Target</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    {% set actor = users_by_id.get(r.actor_user_id) %}
+    <tr>
+      <td class="text-small">{{ r.ts.strftime('%Y-%m-%d %H:%M:%S UTC') }}</td>
+      <td>
+        {% if actor %}
+          <span dir="auto">{{ actor.username }}</span>
+        {% else %}
+          <span class="text-muted">system</span>
+        {% endif %}
+      </td>
+      <td><code class="text-small">{{ r.action }}</code></td>
+      <td class="text-small text-muted">
+        <span class="badge">{{ r.target_type }}</span>
+        <code dir="ltr">{{ r.target_id[:12] }}</code>
+      </td>
+      <td><a class="btn btn--ghost btn--sm" href="/admin/audit/{{ r.id }}">view &rarr;</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 {% endblock %}

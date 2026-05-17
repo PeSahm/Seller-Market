@@ -306,5 +306,45 @@
       </div>
     {% endif %}
   </article>
+
+  {# Audit log roll-up — live data from Phase 9. Compact metric-row to
+     match the other cards' rhythm; the full filterable history lives on
+     /admin/audit. #}
+  <article class="card">
+    <div class="card-header">
+      <h2 class="h3">Audit log</h2>
+      <a class="btn btn--ghost btn--sm" href="/admin/audit">view all &rarr;</a>
+    </div>
+    {% if not audit_summary or audit_summary.total == 0 %}
+      <p class="text-muted text-small">No audit entries yet.</p>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-value">{{ audit_summary.last_24h }}</div>
+          <div class="metric-label text-muted text-small">last 24h</div>
+        </div>
+        {% if audit_summary.distinct_actors > 1 %}
+        <div class="metric">
+          <div class="metric-value">{{ audit_summary.distinct_actors }}</div>
+          <div class="metric-label text-muted text-small">actors</div>
+        </div>
+        {% endif %}
+      </div>
+      {% if audit_summary.latest %}
+      <p class="text-small text-muted" style="margin-top: var(--s2);">
+        Latest:
+        <code>{{ audit_summary.latest.action }}</code>
+        by
+        {% if audit_summary.latest_actor_name %}
+          <strong dir="auto">{{ audit_summary.latest_actor_name }}</strong>
+        {% else %}
+          <span class="text-muted">system</span>
+        {% endif %}
+        &middot;
+        <a href="/admin/audit/{{ audit_summary.latest.id }}">view &rarr;</a>
+      </p>
+      {% endif %}
+    {% endif %}
+  </article>
 </div>
 {% endblock %}

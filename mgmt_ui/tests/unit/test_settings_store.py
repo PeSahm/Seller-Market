@@ -30,18 +30,43 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 
 from app.db_base import Base  # noqa: E402
+from app.models.audit import AuditLog  # noqa: E402  (referenced by set_setting)
 from app.models.settings import Setting  # noqa: E402  (registers the table)
 from app.services import settings_store  # noqa: E402
 
 
 @pytest_asyncio.fixture
-async def db() -> AsyncIterator[AsyncSession]:
+async def db(monkeypatch) -> AsyncIterator[AsyncSession]:
     """Fresh in-memory SQLite session per test.
 
     Uses a private in-memory DB scoped to a single connection so the schema
     we create with :meth:`Base.metadata.create_all` is visible to the session
     that runs the tests.
+
+    Phase 9: ``set_setting`` also writes an ``audit_log`` row, but the
+    production ``AuditLog`` model uses PG-only types (``JSONB``,
+    ``gen_random_uuid()``) that SQLite can't materialise. The audit
+    backfill has its own dedicated test module (``test_settings_audit``)
+    that mocks the session and asserts the emission directly, so here
+    we monkeypatch ``Session.add`` to silently drop :class:`AuditLog`
+    instances — the existing test cases care about the ``Setting``
+    upsert behaviour, not the audit emit.
     """
+    # Wrap ``Session.add`` so AuditLog instances flow into a side channel
+    # instead of triggering an INSERT against a table we never created.
+    # Doing this at the sync-Session level (not the async wrapper)
+    # covers both the AsyncSession proxy and any direct sync access.
+    from sqlalchemy.orm import Session as SyncSession
+
+    original_add = SyncSession.add
+
+    def _filtering_add(self, instance, _warn=True):
+        if isinstance(instance, AuditLog):
+            return
+        return original_add(self, instance, _warn=_warn)
+
+    monkeypatch.setattr(SyncSession, "add", _filtering_add)
+
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
     async with engine.begin() as conn:
         # Only create the ``settings`` table; the other models pull in PG-
