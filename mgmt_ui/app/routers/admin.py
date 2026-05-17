@@ -23,6 +23,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
+from app.models.runs import StackRunLock
 from app.models.servers import ServerClockSkewSample
 from app.models.users import User
 from app.routers.dashboard import _ctx, templates
@@ -1911,10 +1912,33 @@ async def admin_stack_run_now(
             job_name=job_name,
             actor_id=user.id,
         )
-    except StackRunLockBusyError as exc:
-        # Tell the user to wait — and link them to the in-flight run's detail
-        # so they can watch it live.
-        raise HTTPException(status_code=409, detail=str(exc))
+    except StackRunLockBusyError:
+        # Another run is already in flight on this stack. Browser users
+        # should land on THAT run's detail page (live log) rather than a
+        # JSON 409 — they wanted to watch a run, here's the one already
+        # going. We look up the existing lock to find its run_id.
+        in_flight = await db.execute(
+            select(StackRunLock).where(StackRunLock.stack_id == stack.id)
+        )
+        lock_row = in_flight.scalar_one_or_none()
+        # Programmatic clients (HTMX / JSON) get the explicit 409 so they
+        # can act on it. Plain browser navigation gets the redirect.
+        if request.headers.get("HX-Request") or "application/json" in (
+            request.headers.get("accept") or ""
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="another run is already in flight on this stack",
+            )
+        target = (
+            f"/admin/runs/{lock_row.run_id}"
+            if lock_row is not None
+            else f"/admin/stacks/{stack.id}"
+        )
+        return Response(
+            status_code=status.HTTP_303_SEE_OTHER,
+            headers={"Location": target},
+        )
 
     redirect_to = f"/admin/runs/{run.id}"
     if request.headers.get("HX-Request"):

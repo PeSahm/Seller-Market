@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.models.customers import Customer
+from app.models.runs import StackRunLock
 from app.models.stacks import AgentStack
 from app.models.users import User
 from app.routers.dashboard import _ctx, templates
@@ -1137,8 +1138,30 @@ async def agent_stack_run_now(
             job_name=job_name,
             actor_id=user.id,
         )
-    except StackRunLockBusyError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except StackRunLockBusyError:
+        # Browser users get redirected to the in-flight run's live log
+        # instead of a raw 409 JSON. HTMX / JSON callers still get the 409
+        # so they can decide how to handle it.
+        in_flight = await db.execute(
+            select(StackRunLock).where(StackRunLock.stack_id == stack.id)
+        )
+        lock_row = in_flight.scalar_one_or_none()
+        if request.headers.get("HX-Request") or "application/json" in (
+            request.headers.get("accept") or ""
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="another run is already in flight on this stack",
+            )
+        target = (
+            f"/agent/runs/{lock_row.run_id}"
+            if lock_row is not None
+            else f"/agent/stacks/{stack.id}"
+        )
+        return Response(
+            status_code=status.HTTP_303_SEE_OTHER,
+            headers={"Location": target},
+        )
 
     redirect_to = f"/agent/runs/{run.id}"
     if request.headers.get("HX-Request"):
