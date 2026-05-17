@@ -400,33 +400,47 @@ async def ingest_stack_once(
         if not files:
             return summary
 
+        # Cursor advances only over the **contiguously successful** prefix
+        # of the sorted file list. If file B mid-batch fails (corrupt JSON,
+        # SFTP read error) but C succeeds, we MUST keep the cursor at A,
+        # not jump past B to C — otherwise B would be filtered out forever
+        # on the next tick by the f.name > last_filename guard and silently
+        # lost. We still PROCESS C in the same tick (its _upsert_trade
+        # rows are ON CONFLICT DO NOTHING, so re-ingesting it next tick
+        # after B is fixed is a cheap no-op) but only ADVANCE the cursor
+        # while every preceding file in the iteration has succeeded.
         max_filename = last_filename
         max_mtime = last_mtime
+        had_failure = False
         for rf in files:
             try:
                 raw = await fetch_file(server, rf.full_path)
                 payload = json.loads(raw)
             except (SSHError, json.JSONDecodeError) as exc:
-                # One bad file shouldn't stop the rest. We do NOT
-                # advance the cursor past this file, so the next tick
-                # will retry it — operators get repeated log lines
-                # until they fix it, which is the right alarm.
+                # One bad file shouldn't stop the rest from being
+                # processed THIS tick (idempotent upsert covers re-runs),
+                # but it MUST stop the cursor from advancing past this
+                # file — otherwise the failed file is gone forever from
+                # the next tick's view.
                 logger.warning(
                     "trade_ingestor: skip file=%s err=%s",
                     rf.full_path,
                     exc,
                 )
+                had_failure = True
                 continue
 
             orders = payload.get("orders") or []
             if not orders:
                 # Empty dumps are legitimate ("nothing to do this tick")
-                # — count them, advance the cursor, move on.
+                # — count them; advance the cursor IF no preceding file
+                # in this batch failed.
                 summary.files_skipped_empty += 1
-                if max_filename is None or rf.name > max_filename:
-                    max_filename = rf.name
-                if max_mtime is None or rf.mtime > max_mtime:
-                    max_mtime = rf.mtime
+                if not had_failure:
+                    if max_filename is None or rf.name > max_filename:
+                        max_filename = rf.name
+                    if max_mtime is None or rf.mtime > max_mtime:
+                        max_mtime = rf.mtime
                 continue
 
             broker = payload.get("broker_code") or ""
@@ -489,10 +503,17 @@ async def ingest_stack_once(
                     summary.orders_duplicate += 1
 
             summary.files_ingested += 1
-            if max_filename is None or rf.name > max_filename:
-                max_filename = rf.name
-            if max_mtime is None or rf.mtime > max_mtime:
-                max_mtime = rf.mtime
+            # Same contiguous-success rule: only advance the cursor if
+            # no preceding file in this batch failed. If had_failure is
+            # True, this file's inserts have already landed (they're
+            # idempotent via ON CONFLICT) and the next tick will re-see
+            # the file, do a no-op upsert, and then attempt the cursor
+            # advance again once the gap is closed.
+            if not had_failure:
+                if max_filename is None or rf.name > max_filename:
+                    max_filename = rf.name
+                if max_mtime is None or rf.mtime > max_mtime:
+                    max_mtime = rf.mtime
 
         # Cursor update lives in the same transaction as the inserts so
         # we never have a "rows inserted but cursor not advanced" or
