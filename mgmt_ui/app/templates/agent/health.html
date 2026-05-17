@@ -113,7 +113,11 @@
       <td>
         {% if signal.ack_at %}
           {% set acker = users_by_id.get(signal.ack_by) if users_by_id else None %}
-          <span class="text-small" dir="auto">{{ acker.username if acker else '&mdash;' }}</span>
+          {% if acker %}
+            <span class="text-small" dir="auto">{{ acker.username }}</span>
+          {% else %}
+            <span class="text-muted">&mdash;</span>
+          {% endif %}
           <div class="text-small text-muted">
             {{ signal.ack_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
           </div>
