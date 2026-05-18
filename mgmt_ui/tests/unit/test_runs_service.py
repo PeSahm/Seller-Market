@@ -35,7 +35,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services.runs import can_user_see_run, read_run_log
+from app.services.runs import can_user_see_run, force_kill_run, read_run_log
 
 
 # ---------------------------------------------------------------------------
@@ -205,3 +205,83 @@ async def test_read_run_log_none_ref_returns_empty() -> None:
 async def test_finalize_run_writes_log_with_sha256() -> None:
     """Placeholder for the finalize_run end-to-end test — see reason above."""
     raise AssertionError("intentionally skipped")
+
+
+# ---------------------------------------------------------------------------
+# force_kill_run — branch tests only
+# ---------------------------------------------------------------------------
+#
+# Like finalize_run, the happy path mutates a row + writes an audit + does a
+# delete + commits; covering it in unit tests would mostly assert on the
+# AsyncSession mock setup. The integration path is exercised via the admin
+# /force-kill route in the post-deploy smoke tests. Here we pin the two
+# refuse-paths the route layer relies on.
+
+
+class _FakeAsyncSession:
+    """Tiny ``AsyncSession``-shaped object — only ``get`` is exercised below."""
+
+    def __init__(self, run_to_return) -> None:
+        self._run = run_to_return
+        self.added: list = []
+        self.executed: list = []
+        self.committed: int = 0
+
+    async def get(self, model, key):  # noqa: D401 — mirror the real signature
+        return self._run
+
+    async def execute(self, stmt):
+        self.executed.append(stmt)
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def commit(self):
+        self.committed += 1
+
+    async def refresh(self, obj):
+        return obj
+
+
+@pytest.mark.asyncio
+async def test_force_kill_run_refuses_terminal_status() -> None:
+    """Force-kill on an already-finished row raises ``ValueError``.
+
+    The admin route translates the ValueError to HTTP 400 — without this
+    refusal the recovery action could clobber a successful run's
+    ``finished_at`` / ``exit_code`` and corrupt the audit trail.
+    """
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        stack_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        status="success",  # already terminal
+        exit_code=0,
+        finished_at=None,
+        job_name="cache_warmup",
+        trigger="manual",
+    )
+    db = _FakeAsyncSession(run)
+
+    with pytest.raises(ValueError, match="terminal status"):
+        await force_kill_run(db, run_id=run.id, actor_id=uuid.uuid4())
+
+    # Confirm we didn't mutate the row.
+    assert run.status == "success"
+    assert db.committed == 0
+
+
+@pytest.mark.asyncio
+async def test_force_kill_run_missing_row_raises_lookup() -> None:
+    """Unknown run id raises ``LookupError`` (route → 404).
+
+    Distinct from the terminal-status branch so the route can return
+    different HTTP codes (404 vs 400) and so a bug in the SELECT path
+    is caught separately from a bug in the status check.
+    """
+    db = _FakeAsyncSession(None)  # db.get returns None
+
+    with pytest.raises(LookupError):
+        await force_kill_run(db, run_id=uuid.uuid4(), actor_id=uuid.uuid4())
+
+    assert db.committed == 0

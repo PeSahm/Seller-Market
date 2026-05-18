@@ -2369,6 +2369,75 @@ async def admin_run_terminate(
     return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
 
 
+@router.post("/runs/{run_id}/force-kill")
+async def admin_run_force_kill(
+    run_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Recovery action: drop a stuck-running row to ``killed`` + clean lock.
+
+    Use this when the normal Terminate path has no effect — typically
+    because the api container restarted between ``start_manual_run``
+    and the click, so ``run_executor._running_tasks`` is empty and
+    ``terminate_run`` no-ops. Without this action the row stays
+    ``running`` until the stack lock's 10-min lease expires.
+
+    Mutation flow (transactional):
+      1. ``services_runs.force_kill_run`` updates the row + deletes
+         the lock + writes ``run.force_kill`` audit.
+      2. Best-effort SSH back to the trading host to ``kill -9`` any
+         leftover python in the bot container. Fire-and-forget so the
+         redirect isn't blocked on SSH latency.
+
+    Admin-only by design — there's no agent equivalent. It bypasses
+    the durable mutex; we don't want tenants doing that without a
+    super-user nudging the operator first.
+    """
+    try:
+        run = await services_runs.force_kill_run(
+            db, run_id=run_id, actor_id=user.id
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="run not found")
+    except ValueError as exc:
+        # Row was already terminal. Surface as 400 so HTMX flashes a
+        # toast; browsers see the response and the user can refresh.
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    logger.warning(
+        "admin %s force-killed run %s (stack=%s)",
+        user.username, run.id, run.stack_id,
+    )
+
+    # Best-effort remote cleanup. We fire-and-forget so a slow SSH
+    # never blocks the redirect — the DB row is already cleaned up
+    # which is the recovery-critical state. If the trading server
+    # is reachable, this kills any orphan python; if it isn't, the
+    # function logs and returns 0.
+    stack = await services_stacks.get_stack(db, run.stack_id)
+    if stack is not None:
+        server = await services_servers.get_server(db, stack.server_id)
+        if server is not None:
+            container = f"{stack.compose_project}-bot"
+            # Import inside the route so a module-load failure can't
+            # break the synchronous part of the recovery action.
+            from app.services.ssh.runs import remote_kill_run_processes
+            import asyncio
+            asyncio.create_task(
+                remote_kill_run_processes(server, container),
+                name=f"force-kill-ssh-{run.id}",
+            )
+
+    target = f"/admin/runs/{run_id}"
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target}
+    )
+
+
 # ---------------------------------------------------------------------------
 # Trades (Phase 7)
 # ---------------------------------------------------------------------------

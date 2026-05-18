@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import desc, select
+from sqlalchemy import delete as sa_delete, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditLog
@@ -213,6 +213,84 @@ async def finalize_run(
         db,
         actor_id=actor_id,
         action=action,
+        target_id=run.id,
+        before=before,
+        after=_public_snapshot(run),
+    )
+    await db.commit()
+    await db.refresh(run)
+    return run
+
+
+async def force_kill_run(
+    db: AsyncSession,
+    *,
+    run_id: UUID,
+    actor_id: Optional[UUID],
+) -> Run:
+    """Admin recovery: drop a stuck-running row to status='killed' + clean lock.
+
+    Use case: the api container restarted mid-run, so ``run_executor``'s
+    in-process ``_running_tasks`` registry is empty and the normal
+    Terminate button no-ops. Without this action the run row stays
+    ``running`` until the stack_run_locks lease expires (default 10 min).
+
+    Steps:
+
+    1. Verify the row exists and is currently ``running`` — refusing to
+       touch a row in a terminal state is what prevents "force kill a
+       successful run" foot-gun.
+    2. Update ``status='killed'``, ``finished_at=now``, ``exit_code=-1``.
+    3. Delete the matching ``stack_run_locks`` row in the same
+       transaction (compound WHERE on ``(stack_id, run_id)`` so a slow
+       executor coming back to life can't drop a NEWER lock).
+    4. Write an audit row with action ``run.force_kill`` — distinct
+       from ``run.terminate`` (button) and ``run.fail`` (system-side
+       finalize) so the operator can tell apart the recovery path.
+
+    Does NOT touch the remote SSH side — callers should follow up with
+    ``app.services.ssh.runs.remote_kill_run_processes`` to clean up any
+    leftover python on the trading host. We keep them separate so the DB
+    cleanup is synchronous and fast; the SSH best-effort happens after.
+
+    Raises:
+        LookupError: if the run id doesn't exist.
+        ValueError: if the row is already in a terminal status — the
+            route translates to HTTP 400.
+    """
+    from app.models.runs import StackRunLock
+
+    run = await db.get(Run, run_id)
+    if run is None:
+        raise LookupError(f"run {run_id} not found")
+    if run.status != "running":
+        raise ValueError(
+            f"run {run_id} is already in terminal status {run.status!r}; "
+            "refusing to force-kill"
+        )
+
+    before = _public_snapshot(run)
+    run.status = "killed"
+    run.finished_at = datetime.now(timezone.utc)
+    if run.exit_code is None:
+        # -1 conveys "we don't know what the remote exited with" — same
+        # convention the streamer uses for SIGHUP-via-channel-close.
+        run.exit_code = -1
+
+    # Delete the lock atomically — compound key so we don't snipe a
+    # successor lock if the row's executor task somehow finalised a
+    # nanosecond ahead of us.
+    await db.execute(
+        sa_delete(StackRunLock).where(
+            StackRunLock.stack_id == run.stack_id,
+            StackRunLock.run_id == run.id,
+        )
+    )
+
+    await _write_audit(
+        db,
+        actor_id=actor_id,
+        action="run.force_kill",
         target_id=run.id,
         before=before,
         after=_public_snapshot(run),
