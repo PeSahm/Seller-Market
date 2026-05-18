@@ -41,7 +41,44 @@ from typing import Optional
 
 from fastapi import HTTPException, Request, status
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
+from starlette.responses import HTMLResponse, JSONResponse, Response
+
+
+def _csrf_reject(request: Request, detail: str) -> Response:
+    """Build a 403 response in the right shape for the caller.
+
+    BaseHTTPMiddleware runs OUTSIDE the FastAPI exception-handler
+    stack, so raising HTTPException from here ends up wrapped as a
+    500. Returning a plain Response is the only way to get a clean
+    403 back to the client.
+
+    HTMX callers get a tiny HTML snippet so the swap target isn't
+    blanked out; plain browser navigations get a full HTML page;
+    JSON / API clients get a JSON body.
+    """
+    is_htmx = request.headers.get("HX-Request", "").lower() == "true"
+    accept = request.headers.get("accept", "")
+    if is_htmx:
+        return HTMLResponse(
+            content=f'<div class="flash flash--error">{detail}. Reload the page and retry.</div>',
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+    if "application/json" in accept and "text/html" not in accept:
+        return JSONResponse(
+            content={"detail": detail},
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+    return HTMLResponse(
+        content=(
+            "<!DOCTYPE html><html><head><title>Forbidden</title>"
+            "<meta charset='utf-8'></head><body>"
+            "<h1>403 Forbidden</h1>"
+            f"<p>{detail}.</p>"
+            "<p><a href='/'>Reload</a> and try again.</p>"
+            "</body></html>"
+        ),
+        status_code=status.HTTP_403_FORBIDDEN,
+    )
 
 # ---------------------------------------------------------------------------
 # Public constants -- import these from templates / route handlers rather
@@ -183,10 +220,11 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         if is_mutation and not _is_exempt(path):
             cookie_token = request.cookies.get(CSRF_COOKIE)
             if not cookie_token or not _verify_token(self.secret, cookie_token):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="CSRF token missing or invalid",
-                )
+                # NOTE: must return a Response here, NOT raise
+                # HTTPException — Starlette's BaseHTTPMiddleware wraps
+                # any raised exception into a 500 (because the middleware
+                # runs OUTSIDE the FastAPI exception handler stack).
+                return _csrf_reject(request, "CSRF token missing or invalid")
 
             # Submitted token can arrive in EITHER the X-CSRF-Token header
             # (HTMX / API JSON path) OR a csrf_token form field (plain
@@ -207,10 +245,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             if not submitted or not hmac.compare_digest(
                 str(submitted), str(cookie_token)
             ):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="CSRF token mismatch",
-                )
+                return _csrf_reject(request, "CSRF token mismatch")
 
         response: Response = await call_next(request)
 
