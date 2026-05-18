@@ -94,6 +94,7 @@
       </p>
 
       <form method="post" action="{{ save_url_prefix }}/{{ name }}">
+        {% include "partials/csrf.html" %}
         <div class="field">
           <label class="label" for="time__{{ name }}">Fire time (HH:MM:SS)</label>
           <input class="input" id="time__{{ name }}" name="time"

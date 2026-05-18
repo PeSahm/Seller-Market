@@ -44,6 +44,7 @@
 <form class="customer-assign-form"
       method="post"
       action="{% if customer.server_id %}/admin/customers/{{ customer.id }}/move{% else %}/admin/customers/{{ customer.id }}/assign{% endif %}">
+  {% include "partials/csrf.html" %}
   <div class="field">
     <label class="label" for="server_id">Target server</label>
     <select class="input" id="server_id"

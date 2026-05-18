@@ -27,6 +27,7 @@
       <a class="btn btn--primary btn--sm" href="/admin/customers/{{ customer.id }}/assign">Reassign…</a>
       <form method="post" action="/admin/customers/{{ customer.id }}/unassign" style="display:inline;"
             onsubmit="return confirm('Unassign this customer? The current stack will be re-rendered without this section.');">
+        {% include "partials/csrf.html" %}
         <button class="btn btn--ghost btn--sm" type="submit">Unassign</button>
       </form>
     {% else %}
@@ -35,6 +36,7 @@
     {% if customer.enabled %}
     <form method="post" action="/admin/customers/{{ customer.id }}/delete" style="display:inline;"
           onsubmit="return confirm('Soft-delete this customer? The on-server bot will stop trading it on the next render cycle.');">
+      {% include "partials/csrf.html" %}
       <button class="btn btn--danger btn--sm" type="submit">Delete</button>
     </form>
     {% endif %}

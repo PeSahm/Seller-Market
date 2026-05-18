@@ -24,6 +24,7 @@
     <a class="btn btn--ghost btn--sm" href="/agent/customers/{{ customer.id }}/duplicate">Duplicate with new ISIN</a>
     <form method="post" action="/agent/customers/{{ customer.id }}/delete"
           onsubmit="return confirm('Soft-delete this customer? Trading will stop on the next render cycle.');">
+      {% include "partials/csrf.html" %}
       <button class="btn btn--danger btn--sm" type="submit">Delete</button>
     </form>
   </div>

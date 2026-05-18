@@ -17,6 +17,7 @@
     </button>
     <form method="post" action="/admin/servers/{{ server.id }}/delete"
           onsubmit="return confirm('Permanently delete this server? Its SSH key file will be removed.');">
+      {% include "partials/csrf.html" %}
       <button class="btn btn--danger btn--sm" type="submit">Delete</button>
     </form>
   </div>

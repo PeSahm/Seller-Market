@@ -44,6 +44,7 @@
       method="post"
       action="/agent/customers/{{ source.id }}/duplicate"
       style="margin-top: 16px;">
+  {% include "partials/csrf.html" %}
 
   <div class="field">
     <label class="label" for="isin">New ISIN</label>

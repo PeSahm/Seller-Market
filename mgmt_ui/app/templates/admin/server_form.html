@@ -19,6 +19,7 @@
 {% set fv = form_values|default({}) %}
 
 <form class="server-form" method="post" action="/admin/servers">
+  {% include "partials/csrf.html" %}
   <div class="field">
     <label class="label" for="name">Friendly name</label>
     <input class="input" id="name" name="name" required dir="auto"

@@ -49,6 +49,7 @@
 {% set version_value = fv.version if fv.version is defined else (locust.version if locust else 0) %}
 
 <form class="server-form" method="post" action="{{ save_url }}">
+  {% include "partials/csrf.html" %}
   <div class="field-row">
     <div class="field field--grow">
       <label class="label" for="users">Concurrent users</label>

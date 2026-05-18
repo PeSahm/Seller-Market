@@ -1,0 +1,17 @@
+{#
+  Hidden CSRF token field for plain HTML form POSTs.
+
+  Include this as the FIRST child of every ``<form method="post">`` so
+  the double-submit guard in ``app.security.csrf.CSRFMiddleware`` finds
+  a ``csrf_token`` form field that matches the ``csrf_token`` cookie.
+
+  The HTMX path uses ``X-CSRF-Token`` from ``app.js`` instead -- you
+  do NOT need this partial in templates that only fire ``hx-post`` /
+  ``hx-put`` etc. without a ``<form method="post">`` shell.
+
+  ``csrf_token_value`` is exposed by ``app.routers.dashboard._ctx`` and
+  resolves to the current cookie value. The ``default('')`` is a belt-
+  and-braces no-crash guard for templates rendered outside the normal
+  request context (e.g. an error page rendered before middleware ran).
+#}
+<input type="hidden" name="csrf_token" value="{{ csrf_token_value | default('') }}">

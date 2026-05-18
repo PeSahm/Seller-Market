@@ -3,7 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="csrf-token" content="{{ csrf_token|default('') }}">
+  {# CSRF: this meta tag is read by /static/js/app.js and attached to every
+     HTMX request as the X-CSRF-Token header. ``csrf_token_value`` is set in
+     ``app/routers/dashboard.py::_ctx`` from the csrf_token cookie. #}
+  <meta name="csrf-token" content="{{ csrf_token_value|default('') }}">
   <title>{% block title %}{{ app_name|default("Seller-Market") }}{% endblock %}</title>
   <link rel="stylesheet" href="/static/css/app.css">
   <script src="/static/js/htmx.min.js" defer></script>

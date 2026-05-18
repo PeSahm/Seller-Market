@@ -26,6 +26,16 @@ class Settings(BaseSettings):
         default="/etc/sm/key.part2",
         alias="MGMT_FERNET_KEY_PART2_PATH",
     )
+    # CSRF protection (Phase 10). Used by ``app.security.csrf`` to HMAC-sign
+    # the double-submit token. MUST be overridden in production via the
+    # ``MGMT_CSRF_SECRET`` env var — the default below is a dev placeholder
+    # that is intentionally long enough to satisfy the min_length guard but
+    # publicly known, so a forgotten override fails closed on review.
+    csrf_secret: str = Field(
+        default="dev-csrf-secret-CHANGE-ME-min-32-bytes-xxxxxxxxxxxxxxxx",
+        alias="MGMT_CSRF_SECRET",
+        min_length=32,
+    )
 
     # JWT
     jwt_algorithm: str = "HS256"

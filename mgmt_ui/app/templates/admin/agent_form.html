@@ -19,6 +19,7 @@
 {% set fv = form_values|default({}) %}
 
 <form class="agent-form" method="post" action="/admin/agents">
+  {% include "partials/csrf.html" %}
   <div class="field">
     <label class="label" for="username">Username</label>
     <input class="input" id="username" name="username" required dir="auto"

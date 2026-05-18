@@ -16,6 +16,7 @@
 {% endif %}
 
 <form class="server-form" method="post" action="/admin/settings">
+  {% include "partials/csrf.html" %}
   <div class="field">
     <label class="label" for="ocr_service_url">OCR service URL</label>
     <input class="input" id="ocr_service_url" name="ocr_service_url"
