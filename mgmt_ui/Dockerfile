@@ -64,6 +64,11 @@ WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /build /app
 
+# Entrypoint runs `alembic upgrade head` before exec'ing the CMD. Copying it
+# OWNED by app:app so the non-root runtime user can execute it.
+COPY --chown=app:app docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
 RUN chown -R app:app /app /home/app
 
 USER app
@@ -74,4 +79,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8000/health || exit 1
 
 # `app` is the top-level package (flat layout); CWD = /app so `from app.xxx` resolves.
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
