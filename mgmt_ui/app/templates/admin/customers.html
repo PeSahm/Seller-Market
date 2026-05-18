@@ -36,7 +36,7 @@
   </select>
   <select name="broker" class="input">
     <option value="">Any broker</option>
-    {% for b in ['gs','bbi','shahr','ib','karamad','tejarat','ebb','hbc','rabin','ayandeh'] %}
+    {% for b in ['gs','bbi','shahr','ib','karamad','tejarat','ebb','hbc','rabin','ayandeh','farabi'] %}
       <option value="{{ b }}" {% if filter_broker == b %}selected{% endif %}>{{ b }}</option>
     {% endfor %}
   </select>

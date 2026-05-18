@@ -101,7 +101,7 @@
       {% else %}
         <option value="" disabled {% if not fv.broker %}selected{% endif %}>— pick a broker —</option>
       {% endif %}
-      {% for b in ['gs','bbi','shahr','ib','karamad','tejarat','ebb','hbc','rabin','ayandeh'] %}
+      {% for b in ['gs','bbi','shahr','ib','karamad','tejarat','ebb','hbc','rabin','ayandeh','farabi'] %}
         <option value="{{ b }}" {% if fv.broker == b and not is_edit %}selected{% endif %}>{{ b }}</option>
       {% endfor %}
     </select>

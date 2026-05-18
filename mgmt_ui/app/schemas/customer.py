@@ -24,7 +24,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-# The ten Iranian brokers supported by SellerMarket today. Kept in sync with
+# The Iranian brokers supported by SellerMarket today. Kept in sync with
 # :class:`SellerMarket.broker_enum.BrokerCode` — if a broker is added there
 # this tuple (and the ``Broker`` ``Literal``) must be widened too.
 BROKERS = (
@@ -38,6 +38,7 @@ BROKERS = (
     "hbc",
     "rabin",
     "ayandeh",
+    "farabi",
 )
 
 # Pydantic v2 uses the ``Literal`` directly for both validation and JSON-schema
@@ -55,6 +56,7 @@ Broker = Literal[
     "hbc",
     "rabin",
     "ayandeh",
+    "farabi",
 ]
 
 # Trade direction. The downstream bot encodes Buy=1 / Sell=2; the DB has a

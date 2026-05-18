@@ -19,6 +19,7 @@ class BrokerCode(Enum):
     HAMERZ = "hbc"  # Hamerz
     RABIN = "rabin"  # Rabin
     AYANDEH = "ayandeh"
+    FARABI = "farabi"  # Farabi (ephoenix.ir family)
     
     @classmethod
     def get_broker_name(cls, code: str) -> str:
@@ -33,7 +34,8 @@ class BrokerCode(Enum):
             "ib": "IbTrader",
             "hbc": "Hamerz",
             "rabin": "Rabin",
-            "ayandeh": "Ayandeh"
+            "ayandeh": "Ayandeh",
+            "farabi": "Farabi"
         }
         return names.get(code, code)
     
