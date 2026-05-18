@@ -183,21 +183,121 @@ class EphoenixAPIClient:
             
             response = requests.get(self.endpoints['trading_book'], headers=headers)
             response.raise_for_status()
-            
+
             data = response.json()
             buying_power = data.get('buyingPower', 0)
-            
+
+            # Surface "looks like success but value is 0" — common signal that
+            # the broker returned a malformed payload, an error envelope, or a
+            # response from the wrong account. Without this, the bot would
+            # silently ship a zero-volume order.
+            if buying_power == 0:
+                logger.warning(
+                    f"buyingPower is 0 for {self.username}@{self.broker_code} — "
+                    f"response keys: {list(data.keys())}"
+                )
+
             # Cache the buying power
             if self.cache:
                 self.cache.save_buying_power(self.username, self.broker_code, buying_power)
-            
+
             logger.info(f"Buying power for {self.username}: {buying_power:,.0f} Rials")
             return buying_power
-            
+
+        except requests.HTTPError as e:
+            body = getattr(e.response, 'text', '') or ''
+            logger.error(f"get_buying_power HTTP {e.response.status_code} "
+                        f"for {self.username}@{self.broker_code}: {body[:300]}")
+            raise
         except Exception as e:
             logger.error(f"Failed to get buying power: {e}")
             raise
     
+    def get_holdings(self, isin: str, use_cache: bool = True) -> int:
+        """
+        Fetch portfolio holdings for one ISIN from the broker's portfolio endpoint.
+
+        This is the SELL-side counterpart of get_buying_power: SELL volume must be
+        sourced from real holdings, not from cash buying power. The endpoint lives
+        on a different host family (backofficeexternal-* for ephoenix, api8 for ib)
+        than the regular trading endpoints — see broker_enum.get_endpoints() for
+        the URL construction.
+
+        Args:
+            isin: Stock ISIN code
+            use_cache: Whether to consult the 1-hour holdings cache first
+
+        Returns:
+            Whole-share count (always an int — broker returns floats like
+            445608.000; we truncate). 0 if the operator holds nothing for
+            this ISIN.
+
+        Raises:
+            requests.HTTPError: transport / auth / rate-limit failures.
+            Exception: broker-side error response (isError=true), with the
+                operator-readable Persian message surfaced verbatim.
+        """
+        # Try cache first
+        if use_cache and self.cache:
+            cached = self.cache.get_holdings(self.username, self.broker_code, isin)
+            if cached is not None:
+                logger.info(f"Holdings for {isin} ({self.username}@{self.broker_code}): "
+                           f"{cached:,} shares (cache=hit)")
+                return cached
+
+        try:
+            token = self.authenticate()
+            headers = {
+                'authorization': f'Bearer {token}',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            # The broker requires {"entity": true} as the request body.
+            response = requests.post(
+                self.endpoints['portfolio'],
+                headers=headers,
+                json={"entity": True},
+                timeout=10,
+            )
+            response.raise_for_status()
+
+            payload = response.json()
+
+            # Surface broker-side errors with the message verbatim — it's
+            # operator-facing Persian text and far more useful than a
+            # generic exception.
+            if payload.get('isError'):
+                msg = payload.get('message') or '<no message>'
+                raise Exception(f"portfolio endpoint returned isError=true: {msg}")
+
+            positions = payload.get('result') or []
+            for item in positions:
+                if item.get('isin') == isin:
+                    # remainVolume is a float like 445608.000 — truncate to whole
+                    # shares (the exchange only fills integer volumes).
+                    raw = item.get('remainVolume', 0) or 0
+                    volume = int(raw)
+                    logger.info(f"Holdings for {isin} ({self.username}@{self.broker_code}): "
+                               f"{volume:,} shares (cache=miss)")
+                    if self.cache:
+                        self.cache.save_holdings(self.username, self.broker_code,
+                                                 isin, volume, expiry_minutes=60)
+                    return volume
+
+            # ISIN not found in portfolio → operator owns 0 shares.
+            logger.warning(f"no holdings for {isin} ({self.username}@{self.broker_code}) "
+                          f"— portfolio has {len(positions)} position(s) but none match")
+            if self.cache:
+                self.cache.save_holdings(self.username, self.broker_code,
+                                         isin, 0, expiry_minutes=60)
+            return 0
+
+        except Exception as e:
+            logger.error(f"Failed to get holdings for {isin} "
+                        f"({self.username}@{self.broker_code}): {e}")
+            raise
+
     def get_instrument_info(self, isin: str, use_cache: bool = True) -> Dict[str, Any]:
         """
         Get instrument information including price limits and max volume.
@@ -287,18 +387,30 @@ class EphoenixAPIClient:
                 'price': price
             }
             
-            response = requests.post(self.endpoints['calculate_order'], 
-                                    headers=headers, json=data)
+            response = requests.post(
+                self.endpoints['calculate_order'],
+                headers=headers,
+                json=data,
+                timeout=10,
+            )
             response.raise_for_status()
-            
+
             result = response.json()
+            # DEBUG: full response so future schema drift or error-envelope-
+            # masquerading-as-success is visible at -v log level.
+            logger.debug(f"calculate_order full response for {isin}: {result}")
             volume = result.get('volume', 0)
-            
+
             logger.info(f"Calculated volume for {isin}: {volume:,} shares "
                        f"(BP: {buying_power:,.0f}, Price: {price})")
-            
+
             return volume
-            
+
+        except requests.HTTPError as e:
+            body = getattr(e.response, 'text', '') or ''
+            logger.error(f"calculate_order HTTP {e.response.status_code} "
+                        f"for {self.username}@{self.broker_code}/{isin}: {body[:300]}")
+            raise
         except Exception as e:
             logger.error(f"Failed to calculate order volume: {e}")
             raise

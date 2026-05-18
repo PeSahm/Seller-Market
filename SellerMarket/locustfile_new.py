@@ -180,23 +180,37 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
         price = instrument_info['min_price']
         logger.info(f"✓ Sell order - Using min price: {price:,}")
     
-    # Step 4: Calculate volume
+    # Step 4: Calculate volume — the formula differs by side.
+    # BUY:  volume sourced from buying power (how much cash we can spend ÷ price),
+    #       routed through the broker's CalculateOrderParam endpoint.
+    # SELL: volume sourced from real portfolio holdings — buying power is
+    #       meaningless for sells. See issue #59.
     logger.info("Step 4: Calculating order volume...")
-    calculated_volume = api_client.calculate_order_volume(
-        isin=isin,
-        side=side,
-        buying_power=buying_power,
-        price=price
-    )
-    
-    # Constrain by max allowed volume
     max_volume = instrument_info['max_volume']
-    volume = min(calculated_volume, max_volume)
-    
-    if volume != calculated_volume:
-        logger.warning(f"⚠ Volume constrained from {calculated_volume:,} to {volume:,} (max allowed)")
-    else:
-        logger.info(f"✓ Calculated volume: {volume:,} shares")
+
+    if side == 1:  # Buy
+        calculated_volume = api_client.calculate_order_volume(
+            isin=isin,
+            side=side,
+            buying_power=buying_power,
+            price=price
+        )
+        volume = min(calculated_volume, max_volume)
+        if volume != calculated_volume:
+            logger.warning(f"⚠ BUY volume constrained from {calculated_volume:,} to {volume:,} (max allowed per order)")
+        else:
+            logger.info(f"✓ BUY volume: {volume:,} shares")
+    else:  # Sell
+        holdings = api_client.get_holdings(isin)
+        if holdings <= 0:
+            # Fail-fast: shipping a zero-volume order would either be rejected
+            # by the broker or silently succeed as a no-op. Better to mark the
+            # task failed in Locust so the operator sees it in the run summary.
+            raise ValueError(f"no holdings for {isin} ({username}@{broker_code}); cannot sell")
+        volume = min(holdings, max_volume)
+        capped = " (capped by max_volume per order)" if volume < holdings else ""
+        logger.info(f"✓ SELL volume sourced from holdings={holdings:,}, "
+                   f"max_volume={max_volume:,} → {volume:,}{capped}")
     
     # Step 5: Prepare order payload
     logger.info("Step 5: Preparing order payload...")
@@ -259,16 +273,20 @@ class TradingUser(HttpUser):
     def place_order(self):
         """
         Place the prepared order with the broker API.
-        
+
         If the current local time is before 08:44:58.500, the task returns immediately without sending a request. Otherwise, it sends a POST request using the instance's order URL, JSON payload, and authorization token, and records the outcome to the configured logger. Exceptions raised during request submission are caught and logged.
+
+        Performance note: this is the hot path — runs 1000+ times per dispatch
+        in the head-of-queue race. Keep it lean. Diagnostic logging belongs in
+        cache_warmup or prepare_order_data, not here.
         """
 
         # Get logger with file handler for this task
         task_logger = logging.getLogger(__name__)
-        
+
         try:
             task_logger.info(f"Placing order for {self.username}@{self.broker_code}")
-            
+
             response = self.client.request(
                 method="POST",
                 url=self.order_url,
@@ -281,7 +299,7 @@ class TradingUser(HttpUser):
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 }
             )
-            
+
             if response.status_code == 200:
                 task_logger.info(f"✓ Order placed successfully for {self.username}@{self.broker_code}")
                 task_logger.debug(f"Response: {response.text}")
@@ -289,7 +307,7 @@ class TradingUser(HttpUser):
                 task_logger.error(f"✗ Order failed for {self.username}@{self.broker_code}: "
                            f"Status {response.status_code}")
                 task_logger.error(f"Response: {response.text}")
-                
+
         except Exception as e:
             task_logger.error(f"✗ Exception during order placement for {self.username}@{self.broker_code}: {e}")
 

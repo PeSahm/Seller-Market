@@ -20,6 +20,7 @@ class CacheType(Enum):
     MARKET_DATA = "market_data"
     BUYING_POWER = "buying_power"
     ORDER_PARAMS = "order_params"
+    HOLDINGS = "holdings"
 
 
 @dataclass
@@ -68,6 +69,22 @@ class CachedBuyingPower:
     
     def is_valid(self) -> bool:
         """Check if buying power is still valid."""
+        expiry = datetime.fromisoformat(self.expires_at)
+        return datetime.now() < expiry
+
+
+@dataclass
+class CachedHoldings:
+    """Cached portfolio holdings for one ISIN."""
+    username: str
+    broker_code: str
+    isin: str
+    volume: int
+    created_at: str
+    expires_at: str
+
+    def is_valid(self) -> bool:
+        """Check if holdings are still valid."""
         expiry = datetime.fromisoformat(self.expires_at)
         return datetime.now() < expiry
 
@@ -316,6 +333,58 @@ class TradingCache:
             logger.info(f"⚠ Cached buying power expired for {username}@{broker_code}")
             return None
     
+    # Holdings Cache (portfolio share count per ISIN)
+
+    def save_holdings(self, username: str, broker_code: str, isin: str,
+                      volume: int, expiry_minutes: int = 60):
+        """
+        Save portfolio holdings (share count) for one ISIN.
+
+        Args:
+            username: Account username
+            broker_code: Broker code
+            isin: Stock ISIN
+            volume: Whole-share count (already int-coerced from the broker's float)
+            expiry_minutes: Cache validity in minutes (default 60 = 1 hour;
+                holdings are fixed during a pre-market dispatch session)
+        """
+        now = datetime.now()
+        cached = CachedHoldings(
+            username=username,
+            broker_code=broker_code,
+            isin=isin,
+            volume=int(volume),
+            created_at=now.isoformat(),
+            expires_at=(now + timedelta(minutes=expiry_minutes)).isoformat(),
+        )
+        key = f"{username}_{broker_code}_{isin}"
+        self._save_cache(CacheType.HOLDINGS, key, asdict(cached))
+        logger.info(f"✓ Holdings cached for {username}@{broker_code}/{isin}: "
+                   f"{volume:,} shares (expires in {expiry_minutes}m)")
+
+    def get_holdings(self, username: str, broker_code: str,
+                     isin: str) -> Optional[int]:
+        """
+        Get cached holdings for one ISIN if still valid.
+
+        Returns:
+            Share count if valid, None if expired or not found.
+        """
+        key = f"{username}_{broker_code}_{isin}"
+        data = self._load_cache(CacheType.HOLDINGS, key)
+        if not data:
+            return None
+
+        cached = CachedHoldings(**data)
+        if cached.is_valid():
+            remaining = datetime.fromisoformat(cached.expires_at) - datetime.now()
+            logger.info(f"✓ Using cached holdings for {username}@{broker_code}/{isin}: "
+                       f"{cached.volume:,} shares (valid for {remaining.seconds // 60}m)")
+            return cached.volume
+
+        logger.info(f"⚠ Cached holdings expired for {username}@{broker_code}/{isin}")
+        return None
+
     # Order Parameters Cache
     
     def save_order_params(self, username: str, broker_code: str, isin: str, 
@@ -446,19 +515,20 @@ class TradingCache:
         tokens = 0
         market_data = 0
         buying_power = 0
+        holdings = 0
         order_params = 0
         valid_entries = 0
         expired_entries = 0
-        
+
         now = datetime.now()
-        
+
         # Count all cache files
         if self.cache_dir.exists():
             for file in self.cache_dir.glob('*.json'):
                 try:
                     with open(file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                    
+
                     # Determine type from filename
                     if file.name.startswith('token_'):
                         tokens += 1
@@ -466,9 +536,11 @@ class TradingCache:
                         market_data += 1
                     elif file.name.startswith('buying_power_'):
                         buying_power += 1
+                    elif file.name.startswith('holdings_'):
+                        holdings += 1
                     elif file.name.startswith('order_params_'):
                         order_params += 1
-                    
+
                     # Check if valid or expired
                     expires_at_str = data.get('expires_at')
                     if expires_at_str:
@@ -479,14 +551,15 @@ class TradingCache:
                             expired_entries += 1
                 except:
                     pass
-        
-        total_entries = tokens + market_data + buying_power + order_params
-        
+
+        total_entries = tokens + market_data + buying_power + holdings + order_params
+
         return {
             'total_entries': total_entries,
             'tokens': tokens,
             'market_data': market_data,
             'buying_power': buying_power,
+            'holdings': holdings,
             'order_params': order_params,
             'valid_entries': valid_entries,
             'expired_entries': expired_entries
