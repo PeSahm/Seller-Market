@@ -40,10 +40,12 @@ ENV_FILE="${INSTALL_DIR}/.env"
 # for offline / dev testing.
 COMPOSE_TEMPLATE_URL="${COMPOSE_TEMPLATE_URL:-https://raw.githubusercontent.com/PeSahm/Seller-Market/main/mgmt_ui/deploy/docker-compose.prod.yml}"
 
-# The non-root user uid inside the image (matches mgmt_ui/Dockerfile's
-# `useradd --system app` which gives uid 1000 on Debian-slim bases).
-APP_UID=1000
-APP_GID=1000
+# The non-root user uid inside the image. The Dockerfile's `useradd --system`
+# allocates dynamically — typically 1000 on Debian-slim, but not guaranteed.
+# Override via environment if your image was built with a different uid/gid:
+#   APP_UID=1001 APP_GID=1001 ./deploy.sh
+APP_UID="${APP_UID:-1000}"
+APP_GID="${APP_GID:-1000}"
 
 # ANSI colours (no-op if stdout isn't a TTY).
 if [ -t 1 ]; then
@@ -140,11 +142,38 @@ prompt_secret() {
   done
 }
 
+is_valid_port() {
+  # Numeric, 1-65535. Bash `[[ =~ ]]` and integer compare; no external deps.
+  local v="$1"
+  [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge 1 ] && [ "$v" -le 65535 ]
+}
+
+prompt_port() {
+  local prompt="$1" default="$2" v
+  while :; do
+    v="$(prompt_or_default "$prompt" "$default")"
+    if is_valid_port "$v"; then
+      printf '%s' "$v"
+      return
+    fi
+    warn "invalid port: '$v' (must be an integer in 1-65535)"
+  done
+}
+
 gather_inputs() {
   say "${C_BOLD}2/9 Configuration${C_RESET}"
 
   MGMT_UI_IMAGE_TAG="${MGMT_UI_IMAGE_TAG:-$(prompt_or_default 'mgmt UI image tag' 'ghcr.io/pesahm/seller-market-mgmt-ui:latest')}"
-  MGMT_HOST_PORT="${MGMT_HOST_PORT:-$(prompt_or_default 'host port for the UI' '8000')}"
+
+  # Validate MGMT_HOST_PORT — invalid free-form text would otherwise blow up
+  # later inside compose with a less actionable error.
+  if [ -n "${MGMT_HOST_PORT:-}" ]; then
+    if ! is_valid_port "$MGMT_HOST_PORT"; then
+      die "MGMT_HOST_PORT='$MGMT_HOST_PORT' is not a valid TCP port (1-65535)"
+    fi
+  else
+    MGMT_HOST_PORT="$(prompt_port 'host port for the UI' '8000')"
+  fi
 
   if [ "$EXISTING_INSTALL" -eq 0 ]; then
     INITIAL_ADMIN_USERNAME="$(prompt_or_default 'initial admin username' 'admin')"
@@ -160,7 +189,9 @@ generate_secrets() {
 
   # Only mint when not already in the env. ${VAR:-...} idiom is just a
   # shell-level guard; the actual secrets live in the .env file.
-  POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(openssl rand -base64 32 | tr -d '\n=' )}"
+  # POSTGRES_PASSWORD is interpolated into DATABASE_URL — use hex output so it
+  # contains no URL-reserved characters (base64 emits `+` and `/`).
+  POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(openssl rand -hex 24)}"
   MGMT_SECRET_KEY="${MGMT_SECRET_KEY:-$(openssl rand -base64 48 | tr -d '\n')}"
   MGMT_CSRF_SECRET="${MGMT_CSRF_SECRET:-$(openssl rand -base64 48 | tr -d '\n')}"
   MGMT_FERNET_KEY_PART1="${MGMT_FERNET_KEY_PART1:-$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')}"
