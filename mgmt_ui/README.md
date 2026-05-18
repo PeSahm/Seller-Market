@@ -45,6 +45,41 @@ uvicorn app.main:app --forwarded-allow-ips='*' --proxy-headers
 
 Without this the per-IP rate limiter buckets every request against the proxy IP.
 
+## Quick deploy to a single VPS
+
+For a fresh VPS (Ubuntu 22.04+ / Debian 12+) with Docker installed, the
+**`mgmt_ui/deploy/deploy.sh`** script handles everything end-to-end:
+
+```bash
+ssh root@<your-vps>
+apt-get update && apt-get install -y docker.io docker-compose-plugin openssl python3 curl
+curl -fsSL https://raw.githubusercontent.com/PeSahm/Seller-Market/main/mgmt_ui/deploy/deploy.sh -o deploy.sh
+chmod +x deploy.sh
+./deploy.sh
+```
+
+The script will:
+
+1. Verify dependencies and prompt for the host port, admin username,
+   admin password, and image tag (defaults to `:latest`).
+2. Generate Postgres / JWT / CSRF / Fernet secrets on first run.
+3. Write `/opt/seller-market-mgmt/.env` (`chmod 600`) and `docker-compose.yml`.
+4. Set up persistent data directories under `/var/lib/sm-mgmt/`.
+5. Pull `ghcr.io/pesahm/seller-market-mgmt-ui:latest`, run
+   `alembic upgrade head` automatically (via the image entrypoint), and
+   start the stack.
+6. Seed the initial admin user via `python -m scripts.seed_admin`.
+7. Print the URL — open `http://<vps-ip>:8000/` and log in.
+
+**Re-running is safe:** `./deploy.sh` is idempotent. Existing secrets are
+reused; only the admin-bootstrap step is skipped. To upgrade to a new
+image: `cd /opt/seller-market-mgmt && docker compose pull && docker compose up -d`
+(or just run `./deploy.sh` again).
+
+**Adding HTTPS later:** put Caddy / nginx in front, flip
+`COOKIE_SECURE=true` in `/opt/seller-market-mgmt/.env`, and add
+`--forwarded-allow-ips='*'` per the "Behind a reverse proxy" section above.
+
 ## Quickstart (Docker)
 
 1. Copy the env template and fill in secrets:
