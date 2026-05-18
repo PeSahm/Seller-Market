@@ -41,11 +41,14 @@ ENV_FILE="${INSTALL_DIR}/.env"
 COMPOSE_TEMPLATE_URL="${COMPOSE_TEMPLATE_URL:-https://raw.githubusercontent.com/PeSahm/Seller-Market/main/mgmt_ui/deploy/docker-compose.prod.yml}"
 
 # The non-root user uid inside the image. The Dockerfile's `useradd --system`
-# allocates dynamically — typically 1000 on Debian-slim, but not guaranteed.
-# Override via environment if your image was built with a different uid/gid:
+# allocates from the system-user range, which is <1000 on Debian-slim — in
+# practice 999 on the current python:3.11-slim base. `prepare_data_dirs`
+# probes the actual image to set these correctly; the fallback values below
+# only kick in when the image isn't pullable for some reason. Override the
+# fallback via environment if you know your image's uid/gid:
 #   APP_UID=1001 APP_GID=1001 ./deploy.sh
-APP_UID="${APP_UID:-1000}"
-APP_GID="${APP_GID:-1000}"
+APP_UID="${APP_UID:-999}"
+APP_GID="${APP_GID:-999}"
 
 # ANSI colours (no-op if stdout isn't a TTY).
 if [ -t 1 ]; then
@@ -293,9 +296,25 @@ prepare_data_dirs() {
   # itself on first boot; postgres's entrypoint fixes ownership.
   install -d -m 0700 "$DATA_DIR/postgres"
 
+  # Detect the actual app user uid/gid in the image. Hardcoding 1000 was the
+  # original assumption and it bit us on the first real deploy — the python:3.11-slim
+  # base allocates system uids (999 on current versions). Pull-if-needed +
+  # `id -u app` inside the image is the only reliable way to know. The
+  # APP_UID / APP_GID fallbacks at the top of the file (default 999) only
+  # apply when this probe can't run (e.g. no network).
+  say "  probing image for app uid/gid…"
+  if detected_uid="$(docker run --rm --entrypoint sh "$MGMT_UI_IMAGE_TAG" -c 'id -u app' 2>/dev/null)" \
+     && [ -n "$detected_uid" ]; then
+    APP_UID="$detected_uid"
+  fi
+  if detected_gid="$(docker run --rm --entrypoint sh "$MGMT_UI_IMAGE_TAG" -c 'id -g app' 2>/dev/null)" \
+     && [ -n "$detected_gid" ]; then
+    APP_GID="$detected_gid"
+  fi
+  say "  using uid=$APP_UID gid=$APP_GID for $DATA_DIR/{ssh_keys,run_logs}"
+
   # SSH keys + run logs — both owned by the app container's uid:gid so the
-  # non-root runtime user can read/write without sudo. The user is created
-  # in mgmt_ui/Dockerfile as system uid (typically 1000).
+  # non-root runtime user can read/write without sudo.
   install -d -m 0700 "$DATA_DIR/ssh_keys"
   install -d -m 0700 "$DATA_DIR/run_logs"
   chown -R "$APP_UID:$APP_GID" "$DATA_DIR/ssh_keys" "$DATA_DIR/run_logs"
