@@ -20,6 +20,11 @@ on:
       - '.github/workflows/docker-publish-mgmt-ui.yml'
   workflow_dispatch:
 
+# Default to least-privilege; build-and-push elevates to contents: write +
+# packages: write at the job level.
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}-mgmt-ui
@@ -118,14 +123,6 @@ jobs:
           echo "next=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
           echo "Next mgmt-ui version: $NEXT_VERSION"
 
-      - name: Create and push tag
-        if: github.ref == 'refs/heads/main'
-        run: |
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git tag "mgmt-ui-${{ steps.semver.outputs.next }}"
-          git push origin "mgmt-ui-${{ steps.semver.outputs.next }}"
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -160,3 +157,13 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=mgmt-ui
           cache-to: type=gha,mode=max,scope=mgmt-ui
+
+      # Tag creation runs AFTER the image is published so a failed build
+      # doesn't leave behind a tag pointing at a non-existent artifact.
+      - name: Create and push tag
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git tag "mgmt-ui-${{ steps.semver.outputs.next }}"
+          git push origin "mgmt-ui-${{ steps.semver.outputs.next }}"
