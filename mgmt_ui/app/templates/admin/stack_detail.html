@@ -25,6 +25,7 @@
     </button>
     <form method="post" action="/admin/stacks/{{ stack.id }}/deprovision"
           onsubmit="return confirm('Tear down this stack? Container will stop, files removed.');">
+      {% include "partials/csrf.html" %}
       <button class="btn btn--danger btn--sm" type="submit">Deprovision</button>
     </form>
   </div>

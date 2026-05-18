@@ -18,6 +18,7 @@ from app.routers import agent as agent_router
 from app.routers import auth as auth_router
 from app.routers import health as health_router
 from app.routers.ws import run_stream as ws_run_stream
+from app.security.csrf import CSRFMiddleware
 from app.security.deps import get_current_user
 from app.settings import get_settings
 from app.workers.health import run_health_worker
@@ -40,6 +41,17 @@ def _wants_html(request: Request) -> bool:
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name, version="0.1.0")
+
+    # CSRF protection (Phase 10). Registered BEFORE routers so the middleware
+    # wraps every mutating request. The /auth/login POST is whitelisted inside
+    # the middleware itself since the user has no session/cookie on first
+    # submit; everything else under /admin/* and /agent/* requires a matching
+    # double-submit token.
+    app.add_middleware(
+        CSRFMiddleware,
+        secret=settings.csrf_secret.encode("utf-8"),
+        cookie_secure=settings.cookie_secure,
+    )
 
     # Static files (agent #4 owns the directory contents).
     static_dir = Path(__file__).resolve().parent / "static"

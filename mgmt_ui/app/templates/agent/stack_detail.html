@@ -27,6 +27,7 @@
           hx-swap="innerHTML"
           onsubmit="return confirm('Redeploy this stack? Container will be force-recreated to pick up config changes. ~5s downtime.');"
           style="display: inline;">
+      {% include "partials/csrf.html" %}
       <button type="submit" class="btn btn--primary btn--sm">Redeploy</button>
     </form>
   </div>

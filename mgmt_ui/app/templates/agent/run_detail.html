@@ -76,14 +76,41 @@
     var pane = document.getElementById("log-pane");
     var statusEl = document.getElementById("ws-status");
     var scheme = (location.protocol === "https:") ? "wss:" : "ws:";
-    var url = scheme + "//" + location.host + "/ws/runs/" + runId;
-    var ws;
-    try {
-      ws = new WebSocket(url);
-    } catch (e) {
-      if (statusEl) { statusEl.textContent = "ws unavailable"; }
-      return;
-    }
+    var ws = null;
+
+    // Phase 10: fetch a short-lived ws-token (POST /auth/ws-token) and
+    // append it as ``?token=...`` on the WS URL. Cookie alone is no
+    // longer sufficient for WS auth.
+    var csrf = document.querySelector('meta[name="csrf-token"]')?.content || '';
+    fetch('/auth/ws-token', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'X-CSRF-Token': csrf },
+    })
+    .then(function (r) {
+      if (!r.ok) throw new Error('ws-token request failed: ' + r.status);
+      return r.json();
+    })
+    .then(function (body) {
+      var url = scheme + "//" + location.host + "/ws/runs/" + runId
+              + "?token=" + encodeURIComponent(body.token);
+      try {
+        ws = new WebSocket(url);
+      } catch (e) {
+        if (statusEl) { statusEl.textContent = "ws unavailable"; }
+        return;
+      }
+      wireWs(ws);
+    })
+    .catch(function (err) {
+      if (statusEl) {
+        statusEl.textContent = "auth failed";
+        statusEl.className = "badge badge--down text-small";
+      }
+      pane.textContent += "[ws-token request failed: " + err.message + "]\n";
+    });
+
+    function wireWs(ws) {
     ws.onopen = function () {
       if (statusEl) { statusEl.textContent = "live"; statusEl.className = "badge badge--up text-small"; }
     };
@@ -114,6 +141,7 @@
     ws.onerror = function () {
       if (statusEl) { statusEl.textContent = "error"; statusEl.className = "badge badge--down text-small"; }
     };
+    }  // end wireWs
   })();
 </script>
 {% endif %}

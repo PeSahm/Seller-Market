@@ -17,11 +17,13 @@
   <form method="post" action="/admin/stacks/{{ stack.id }}/run/cache_warmup"
         onsubmit="return confirm('Run cache_warmup now? The scheduler will be paused for the duration.');"
         style="display: inline;">
+    {% include "partials/csrf.html" %}
     <button type="submit" class="btn btn--primary btn--sm">Run cache_warmup</button>
   </form>
   <form method="post" action="/admin/stacks/{{ stack.id }}/run/run_trading"
         onsubmit="return confirm('Run trading now? This will place real orders. The scheduler will be paused for the duration.');"
         style="display: inline; margin-left: 8px;">
+    {% include "partials/csrf.html" %}
     <button type="submit" class="btn btn--danger btn--sm">Run trading</button>
   </form>
 </div>

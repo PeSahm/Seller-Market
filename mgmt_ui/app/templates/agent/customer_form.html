@@ -36,6 +36,7 @@
 <form class="customer-form"
       method="post"
       action="{% if is_edit %}/agent/customers/{{ customer.id }}/edit{% else %}/agent/customers{% endif %}">
+  {% include "partials/csrf.html" %}
 
   <div class="field">
     <label class="label" for="display_name">Display name</label>

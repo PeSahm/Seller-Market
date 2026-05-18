@@ -10,6 +10,7 @@
   <div class="header-actions">
     <form method="post" action="/admin/agents/{{ agent.id }}/delete"
           onsubmit="return confirm('Soft-delete this agent? Their customers and stacks stay until Phase 4 cleanup.');">
+      {% include "partials/csrf.html" %}
       <button class="btn btn--danger btn--sm" type="submit">Delete</button>
     </form>
   </div>

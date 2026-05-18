@@ -16,6 +16,8 @@ from app.models.users import User
 from app.schemas.auth import LoginRequest, TokenResponse, UserOut
 from app.security.auth import create_access_token, verify_password
 from app.security.deps import COOKIE_NAME, get_current_user
+from app.security.rate_limit import client_key, login_limiter, ws_token_limiter
+from app.security.ws_token import WS_TOKEN_TTL_SECONDS, issue_ws_token
 from app.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -90,7 +92,26 @@ async def login(
       - Always sets the ``access_token`` HttpOnly cookie.
       - For HTMX/form clients: returns 204 with ``HX-Redirect: /``.
       - For JSON clients: returns a ``TokenResponse`` body.
+
+    Phase 10 rate limit: 10 attempts per IP per minute via the
+    in-process token bucket. Eleventh attempt within the window
+    returns 429 with Retry-After: 60. Successful logins still count
+    against the bucket (so a wrong-password storm followed by a
+    correct one still counts toward the cap) — the alternative
+    (refund on success) leaks "this username/password was correct"
+    via timing.
     """
+    if not await login_limiter.check_and_consume(client_key(request)):
+        logger.info(
+            "login_rate_limited ip=%s username=%s",
+            client_key(request),
+            username,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Try again in a minute.",
+            headers={"Retry-After": "60"},
+        )
     settings = get_settings()
     htmx_or_form = _is_htmx_or_form(request)
 
@@ -182,3 +203,34 @@ async def logout(request: Request):
 async def me(user: User = Depends(get_current_user)) -> UserOut:
     """Return the currently-authenticated user."""
     return UserOut.model_validate(user)
+
+
+@router.post("/ws-token")
+async def issue_ws_token_endpoint(
+    request: Request,
+    user: User = Depends(get_current_user),
+):
+    """Mint a short-lived JWT for WebSocket auth (Phase 10).
+
+    Required by ``/ws/runs/{id}`` — the WS handler verifies this token
+    before accepting the connection. The cookie is no longer enough on
+    its own: a cross-origin page could trigger a WS upgrade and the
+    browser would attach the cookie, and CSRF middleware doesn't run
+    on WS upgrades.
+
+    Bound to the authenticated user's id; expires in 30 seconds. The
+    browser calls this immediately before opening the WS so the token
+    has its full lifetime ahead of it.
+
+    Rate-limited (60/min/IP) — the run-detail page calls this on every
+    WS reconnect, which can be frequent for an operator triaging a
+    flaky stack.
+    """
+    if not await ws_token_limiter.check_and_consume(client_key(request)):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many ws-token requests. Try again in a minute.",
+            headers={"Retry-After": "30"},
+        )
+    token = issue_ws_token(str(user.id))
+    return {"token": token, "expires_in": WS_TOKEN_TTL_SECONDS}
