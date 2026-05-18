@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ main, develop ]
 
+# Least-privilege default for the GITHUB_TOKEN: tests only need to read the
+# checked-out source.
+permissions:
+  contents: read
+
 jobs:
   test:
     # Trading bot (SellerMarket/) tests.
