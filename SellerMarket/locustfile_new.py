@@ -17,7 +17,6 @@ import logging
 from collections import namedtuple
 from typing import Dict, Any
 import os
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -276,21 +275,18 @@ class TradingUser(HttpUser):
         Place the prepared order with the broker API.
 
         If the current local time is before 08:44:58.500, the task returns immediately without sending a request. Otherwise, it sends a POST request using the instance's order URL, JSON payload, and authorization token, and records the outcome to the configured logger. Exceptions raised during request submission are caught and logged.
+
+        Performance note: this is the hot path — runs 1000+ times per dispatch
+        in the head-of-queue race. Keep it lean. Diagnostic logging belongs in
+        cache_warmup or prepare_order_data, not here.
         """
 
         # Get logger with file handler for this task
         task_logger = logging.getLogger(__name__)
 
-        # Token suffix only — full token never logged. Suffix lets us correlate
-        # which token was active when an order was rejected (e.g. token rotated
-        # mid-race and a stale one was still being used).
-        token_tail = (self.token or "")[-6:]
-
         try:
-            task_logger.info(f"Placing order for {self.username}@{self.broker_code} "
-                           f"(token …{token_tail})")
+            task_logger.info(f"Placing order for {self.username}@{self.broker_code}")
 
-            start_ts = time.monotonic()
             response = self.client.request(
                 method="POST",
                 url=self.order_url,
@@ -303,22 +299,17 @@ class TradingUser(HttpUser):
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 }
             )
-            elapsed_ms = int((time.monotonic() - start_ts) * 1000)
 
             if response.status_code == 200:
-                task_logger.info(f"✓ Order placed successfully for {self.username}@{self.broker_code} "
-                               f"in {elapsed_ms}ms")
+                task_logger.info(f"✓ Order placed successfully for {self.username}@{self.broker_code}")
                 task_logger.debug(f"Response: {response.text}")
             else:
-                # Non-2xx — keep the body (truncated) so the operator can see
-                # the broker's rejection reason without digging through pcap.
                 task_logger.error(f"✗ Order failed for {self.username}@{self.broker_code}: "
-                           f"Status {response.status_code} in {elapsed_ms}ms (token …{token_tail})")
-                task_logger.error(f"Response body: {response.text[:500]}")
+                           f"Status {response.status_code}")
+                task_logger.error(f"Response: {response.text}")
 
         except Exception as e:
-            task_logger.error(f"✗ Exception during order placement for {self.username}@{self.broker_code} "
-                            f"(token …{token_tail}): {e}")
+            task_logger.error(f"✗ Exception during order placement for {self.username}@{self.broker_code}: {e}")
 
 
 @events.init.add_listener
