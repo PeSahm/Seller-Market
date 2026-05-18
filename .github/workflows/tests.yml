@@ -8,6 +8,7 @@ on:
 
 jobs:
   test:
+    # Trading bot (SellerMarket/) tests.
     runs-on: [self-hosted, X64]
 
     steps:
@@ -39,3 +40,53 @@ jobs:
       env:
         TELEGRAM_BOT_TOKEN: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
         TELEGRAM_USER_ID: "123456789"
+
+  mgmt-ui-test:
+    # Management UI (mgmt_ui/) tests — added in the ghcr-deploy follow-up.
+    # Runs against a sidecar Postgres so anything that touches DB types
+    # (Alembic migration tests, settings parser) has a real backend
+    # available, without exposing it outside the job.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mgmt
+          POSTGRES_PASSWORD: testpwd
+          POSTGRES_DB: mgmt_ui
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'mgmt_ui/pyproject.toml'
+
+      - name: Install mgmt_ui (with dev deps)
+        run: |
+          cd mgmt_ui
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Run mgmt_ui unit tests
+        env:
+          # Pydantic Settings still parses these even though the autouse
+          # conftest fixture disables every background worker — keep them
+          # valid (32+ char secrets, parseable Fernet key) so import doesn't
+          # fail before the tests start.
+          DATABASE_URL: postgresql+asyncpg://mgmt:testpwd@localhost:5432/mgmt_ui
+          MGMT_SECRET_KEY: ci-test-secret-key-padded-to-32+-chars-long
+          MGMT_CSRF_SECRET: ci-test-csrf-secret-padded-to-32+-chars-long
+          MGMT_FERNET_KEY_PART1: O5zV2qGYoRzqQ7bGqz_HCsAhJ_-3W4XhE2_w-9OUSdM=
+        run: |
+          cd mgmt_ui
+          pytest tests/unit -q
