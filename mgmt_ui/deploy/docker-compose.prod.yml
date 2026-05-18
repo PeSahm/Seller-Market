@@ -1,0 +1,63 @@
+# Production docker-compose for the Seller-Market management UI.
+#
+# Generated/installed at /opt/seller-market-mgmt/docker-compose.yml by
+# deploy.sh. Differs from the repo's dev docker-compose.yml in three ways:
+#
+# 1. Pulls the api image from GHCR — does NOT build locally.
+# 2. Postgres has NO host port mapping (only the api container can reach it).
+# 3. Volumes are absolute paths under /var/lib/sm-mgmt (so a wipe of the
+#    install dir does NOT lose data).
+#
+# Secrets come from the side-car /opt/seller-market-mgmt/.env file (chmod 600).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mgmt_ui
+      POSTGRES_USER: mgmt
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - /var/lib/sm-mgmt/postgres:/var/lib/postgresql/data
+    # No ports stanza by design — DB is reachable only over the compose network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mgmt -d mgmt_ui"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    image: ${MGMT_UI_IMAGE_TAG:-ghcr.io/pesahm/seller-market-mgmt-ui:latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mgmt:${POSTGRES_PASSWORD}@postgres:5432/mgmt_ui
+      MGMT_SECRET_KEY: ${MGMT_SECRET_KEY}
+      MGMT_CSRF_SECRET: ${MGMT_CSRF_SECRET}
+      MGMT_FERNET_KEY_PART1: ${MGMT_FERNET_KEY_PART1}
+      # COOKIE_SECURE stays "false" by default because the documented
+      # quickstart accesses the UI over plain HTTP on the VPS's IP. When the
+      # operator puts Caddy/nginx in front with HTTPS, they should flip this
+      # to "true" (and run uvicorn with --forwarded-allow-ips='*' — see the
+      # mgmt_ui README "Behind a reverse proxy" section).
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ENVIRONMENT: production
+      RUN_LOGS_DIR: /var/lib/run_logs
+      DEFAULT_OCR_SERVICE_URL: ${DEFAULT_OCR_SERVICE_URL:-http://5.10.248.55:18080}
+    ports:
+      - "${MGMT_HOST_PORT:-8000}:8000"
+    volumes:
+      # SSH private keys for talking to trading servers.
+      # Mounted read-only — the api container only reads them, never writes.
+      - /var/lib/sm-mgmt/ssh_keys:/home/app/.ssh:ro
+      # Archived run logs (Phase 6). The janitor (Phase 8) cleans these up
+      # past JANITOR_RUN_LOG_RETENTION_DAYS.
+      - /var/lib/sm-mgmt/run_logs:/var/lib/run_logs
+
+networks:
+  default:
+    name: sm_mgmt_net
