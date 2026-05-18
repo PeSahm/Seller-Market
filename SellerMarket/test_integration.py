@@ -460,6 +460,160 @@ class TestBrokerIntegration(unittest.TestCase):
         print("✓ Multi-broker endpoint validation passed")
 
 
+class TestGetHoldings(unittest.TestCase):
+    """Tests for EphoenixAPIClient.get_holdings — the SELL-side counterpart of
+    get_buying_power. See issue #59."""
+
+    def setUp(self):
+        self.broker_code = "gs"
+        self.username = "4580090306"
+        self.password = "Mm@12345"
+        self.isin = "IRO1RVND0001"  # the ayandeh sample's first row
+        self.captcha_decoder = Mock(return_value="12345")
+        self.endpoints = BrokerCode.GANJINE.get_endpoints()
+
+        # Mock cache with no prior holdings cached.
+        self.mock_cache = Mock()
+        self.mock_cache.get_token.return_value = None
+        self.mock_cache.get_holdings.return_value = None
+        self.mock_cache.save_holdings.return_value = None
+        # save_token is exercised by authenticate() in the success path.
+        self.mock_cache.save_token.return_value = None
+
+    def _make_client(self):
+        client = EphoenixAPIClient(
+            broker_code=self.broker_code,
+            username=self.username,
+            password=self.password,
+            captcha_decoder=self.captcha_decoder,
+            endpoints=self.endpoints,
+            cache=self.mock_cache,
+        )
+        # Skip authenticate() — set a fake token directly.
+        client.token = "test_jwt_token"
+        client.token_expiry = datetime.now() + timedelta(hours=2)
+        return client
+
+    @patch('api_client.requests.post')
+    def test_get_holdings_success(self, mock_post):
+        """Matching ISIN returns its remainVolume as int."""
+        resp = Mock()
+        resp.json.return_value = {
+            "result": [
+                {"isin": "IRO1OTHER001", "remainVolume": 99.0, "symbol": "س"},
+                {"isin": self.isin, "remainVolume": 445608.000, "symbol": "اروند"},
+            ],
+            "message": "OK",
+            "isError": False,
+        }
+        resp.raise_for_status = Mock()
+        mock_post.return_value = resp
+
+        client = self._make_client()
+        holdings = client.get_holdings(self.isin, use_cache=False)
+
+        self.assertEqual(holdings, 445608)
+        self.assertIsInstance(holdings, int)
+        # The cache write should record the truncated int, not the float.
+        self.mock_cache.save_holdings.assert_called_once_with(
+            self.username, self.broker_code, self.isin, 445608, expiry_minutes=60
+        )
+        # Confirm the request body is the broker-required {"entity": true} envelope.
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs.get('json'), {"entity": True})
+
+    @patch('api_client.requests.post')
+    def test_get_holdings_isin_not_found(self, mock_post):
+        """ISIN not in result[] → returns 0 (operator owns nothing of this stock)."""
+        resp = Mock()
+        resp.json.return_value = {
+            "result": [
+                {"isin": "IRO1OTHER001", "remainVolume": 100.0, "symbol": "س"},
+            ],
+            "isError": False,
+        }
+        resp.raise_for_status = Mock()
+        mock_post.return_value = resp
+
+        client = self._make_client()
+        holdings = client.get_holdings(self.isin, use_cache=False)
+
+        self.assertEqual(holdings, 0)
+        # We still cache the 0 so the next dispatch within 1h doesn't re-POST.
+        self.mock_cache.save_holdings.assert_called_once_with(
+            self.username, self.broker_code, self.isin, 0, expiry_minutes=60
+        )
+
+    @patch('api_client.requests.post')
+    def test_get_holdings_truncates_float(self, mock_post):
+        """remainVolume=100.7 must coerce to 100 (never round up — exchange
+        fills whole shares only)."""
+        resp = Mock()
+        resp.json.return_value = {
+            "result": [
+                {"isin": self.isin, "remainVolume": 100.7, "symbol": "X"},
+            ],
+            "isError": False,
+        }
+        resp.raise_for_status = Mock()
+        mock_post.return_value = resp
+
+        client = self._make_client()
+        self.assertEqual(client.get_holdings(self.isin, use_cache=False), 100)
+
+    @patch('api_client.requests.post')
+    def test_get_holdings_cache_hit_skips_request(self, mock_post):
+        """When the cache returns a value, no HTTP call is made."""
+        self.mock_cache.get_holdings.return_value = 12345
+        client = self._make_client()
+
+        result = client.get_holdings(self.isin, use_cache=True)
+
+        self.assertEqual(result, 12345)
+        mock_post.assert_not_called()
+
+    @patch('api_client.requests.post')
+    def test_get_holdings_broker_error(self, mock_post):
+        """isError=true → raises with the Persian message verbatim."""
+        resp = Mock()
+        resp.json.return_value = {
+            "result": None,
+            "message": "نشست منقضی شده است.",
+            "isError": True,
+        }
+        resp.raise_for_status = Mock()
+        mock_post.return_value = resp
+
+        client = self._make_client()
+        with self.assertRaises(Exception) as ctx:
+            client.get_holdings(self.isin, use_cache=False)
+        # The broker's message should appear in the exception text — operator
+        # reads logs in Persian, surface it verbatim.
+        self.assertIn("نشست منقضی شده است.", str(ctx.exception))
+
+
+class TestPortfolioEndpoint(unittest.TestCase):
+    """Confirm the new 'portfolio' endpoint key resolves per broker."""
+
+    def test_ephoenix_pattern(self):
+        for broker_enum, code in [
+            (BrokerCode.GANJINE, "gs"),
+            (BrokerCode.AYANDEH, "ayandeh"),
+            (BrokerCode.BOURSE_BIME, "bbi"),
+        ]:
+            url = broker_enum.get_endpoints()['portfolio']
+            self.assertIn(f"backofficeexternal-{code}.ephoenix.ir", url)
+            self.assertIn("/api/portfolio/getrealsecuritypositionbydate", url)
+
+    def test_ibtrader_hardcoded(self):
+        url = BrokerCode.IBTRADER.get_endpoints()['portfolio']
+        # ib lives on the api8 shard, NOT api.ibtrader.ir.
+        self.assertEqual(
+            url,
+            "https://api8.ibtrader.ir/api/portfolio/getrealsecuritypositionbydate",
+        )
+
+
 if __name__ == '__main__':
     # Run with verbose output
     unittest.main(verbosity=2)
