@@ -94,11 +94,41 @@
 <script>
   (function() {
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    var url = proto + '//' + location.host + '/ws/runs/{{ run.id }}';
     var log = document.getElementById('run-log');
     var statusEl = document.getElementById('ws-status');
     var banner = document.getElementById('run-done-banner');
-    var ws = new WebSocket(url);
+    var ws = null;
+
+    // Phase 10: mint a short-lived ws-token via POST /auth/ws-token and
+    // append it as ``?token=...`` on the WS URL. Cookie alone is no
+    // longer sufficient — the WS handler requires this token.
+    var csrf = document.querySelector('meta[name="csrf-token"]')?.content || '';
+    fetch('/auth/ws-token', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'X-CSRF-Token': csrf },
+    })
+    .then(function(r) {
+      if (!r.ok) throw new Error('ws-token request failed: ' + r.status);
+      return r.json();
+    })
+    .then(function(body) {
+      var url = proto + '//' + location.host + '/ws/runs/{{ run.id }}'
+              + '?token=' + encodeURIComponent(body.token);
+      ws = new WebSocket(url);
+      wireWs(ws);
+    })
+    .catch(function(err) {
+      if (statusEl) {
+        statusEl.textContent = 'auth failed';
+        statusEl.className = 'badge badge--down text-small';
+      }
+      if (log) {
+        log.textContent += '\n[ws-token request failed: ' + err.message + ']';
+      }
+    });
+
+    function wireWs(ws) {
 
     function markFinished(label) {
       if (statusEl) {
@@ -141,6 +171,7 @@
       }
       log.textContent += '\n[stream error]\n';
     };
+    }  // end wireWs
   })();
 </script>
 {% endif %}

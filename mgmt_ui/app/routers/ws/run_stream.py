@@ -6,7 +6,7 @@ import logging
 import uuid
 from uuid import UUID
 
-from fastapi import APIRouter, Cookie, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Cookie, Query, WebSocket, WebSocketDisconnect
 from jose import JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.websockets import WebSocketState
@@ -14,6 +14,7 @@ from starlette.websockets import WebSocketState
 from app.db import AsyncSessionLocal
 from app.models.users import User
 from app.security.auth import decode_token
+from app.security.ws_token import verify_ws_token
 from app.services import run_executor
 from app.services import runs as services_runs
 from app.services.ssh.streaming import LineEvent, StreamingResult
@@ -60,10 +61,21 @@ async def run_stream(
     websocket: WebSocket,
     run_id: UUID,
     access_token: str | None = Cookie(default=None),
+    token: str | None = Query(default=None),
 ) -> None:
     """Live-stream the run's stdout/stderr to the browser.
 
-    Auth: JWT cookie (same one used by HTML routes).
+    Auth (Phase 10): cookie alone is no longer sufficient. The client
+    must also pass a short-lived JWT in the ``?token=...`` query
+    string (minted by ``POST /auth/ws-token``). This protects against
+    the "cross-origin page triggers a WS upgrade and the browser
+    attaches the cookie" attack — CSRF middleware doesn't run on
+    WS upgrades.
+
+    Both must agree on the user id; mismatched / missing / expired
+    ws-token → close 4401. The ws-token has a 30 s TTL so a leaked
+    URL is short-lived.
+
     Access: admin sees all; agent sees only their own runs.
     """
     await websocket.accept()
@@ -71,6 +83,17 @@ async def run_stream(
         async with AsyncSessionLocal() as db:
             user = await _resolve_user(access_token, db)
             if user is None:
+                # Cookie missing / invalid — close before doing anything else.
+                await websocket.close(code=4401)
+                return
+            # Phase 10: require the short-lived ws-token AND verify
+            # its sub matches the cookie-auth user.
+            ws_user_id = verify_ws_token(token or "")
+            if ws_user_id is None or ws_user_id != str(user.id):
+                logger.info(
+                    "ws_token_invalid run=%s cookie_user=%s",
+                    run_id, user.id,
+                )
                 await websocket.close(code=4401)
                 return
             run = await services_runs.get_run(db, run_id)
