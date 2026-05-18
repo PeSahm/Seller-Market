@@ -97,15 +97,17 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
         # Step 2: Fetch and cache buying power
         logger.info("Step 2: Fetching and caching buying power...")
         try:
+            logger.debug("  - forcing fresh buying-power fetch (cache bypass)")
             buying_power = api_client.get_buying_power(use_cache=False)  # Force fresh fetch
             logger.info(f"✓ Buying power cached: {buying_power:,.0f} Rials (expires in 2 hours)")
         except Exception as e:
             logger.error(f"❌ Failed to fetch buying power: {e}")
             return False
-        
+
         # Step 3: Fetch and cache instrument information
         logger.info("Step 3: Fetching and caching instrument information...")
         try:
+            logger.debug(f"  - forcing fresh instrument-info fetch for {isin} (cache bypass)")
             instrument_info = api_client.get_instrument_info(isin, use_cache=False)  # Force fresh fetch
             logger.info(f"✓ Instrument info cached: {instrument_info['title']} ({instrument_info['symbol']})")
             logger.info(f"  - Price range: [{instrument_info['min_price']:,} - {instrument_info['max_price']:,}]")
@@ -117,29 +119,41 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
         
         # Step 4: Determine price and pre-calculate order parameters
         logger.info("Step 4: Pre-calculating order parameters...")
+        max_volume = instrument_info['max_volume']
         if side == 1:  # Buy
             price = instrument_info['max_price']
             logger.info(f"  - Buy order - Using max price: {price:,}")
+            calculated_volume = api_client.calculate_order_volume(
+                isin=isin,
+                side=side,
+                buying_power=buying_power,
+                price=price,
+            )
+            volume = min(calculated_volume, max_volume)
+            if volume != calculated_volume:
+                logger.warning(f"  ⚠ BUY volume constrained from {calculated_volume:,} to {volume:,} (max allowed)")
+            else:
+                logger.info(f"  ✓ BUY volume: {volume:,} shares")
         else:  # Sell
             price = instrument_info['min_price']
             logger.info(f"  - Sell order - Using min price: {price:,}")
-        
-        # Calculate volume
-        calculated_volume = api_client.calculate_order_volume(
-            isin=isin,
-            side=side,
-            buying_power=buying_power,
-            price=price
-        )
-        
-        # Constrain by max allowed volume
-        max_volume = instrument_info['max_volume']
-        volume = min(calculated_volume, max_volume)
-        
-        if volume != calculated_volume:
-            logger.warning(f"  ⚠ Volume constrained from {calculated_volume:,} to {volume:,} (max allowed)")
-        else:
-            logger.info(f"  ✓ Calculated volume: {volume:,} shares")
+            # Source SELL volume from real portfolio holdings — buying power
+            # is meaningless for sells (issue #59). Also primes the 1h holdings
+            # cache so the actual dispatch hits the cache, not the network.
+            holdings = api_client.get_holdings(isin, use_cache=False)
+            if holdings <= 0:
+                logger.error(f"  ❌ No holdings for {isin} in {username}@{broker_code} — "
+                            "skipping SELL warmup (operator likely picked the wrong ISIN)")
+                return False
+            volume = min(holdings, max_volume)
+            capped = " (capped by max_volume per order)" if volume < holdings else ""
+            logger.info(f"  ✓ SELL volume sourced from holdings={holdings:,}, "
+                       f"max_volume={max_volume:,} → {volume:,}{capped}")
+            # Buying power isn't used as input for SELL but the cached order
+            # params row still wants a number for the column; record 0 to make
+            # it obvious in downstream logs that BP wasn't the source.
+            calculated_volume = volume
+            buying_power = 0
         
         # Cache order parameters
         cache.save_order_params(
