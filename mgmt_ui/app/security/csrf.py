@@ -172,12 +172,25 @@ def issue_token(secret: bytes) -> str:
 
 
 def get_csrf_token_from_request(request: Request) -> Optional[str]:
-    """Return the cookie-side CSRF token for use as a template variable.
+    """Return the CSRF token to embed in the template.
+
+    The middleware stashes the canonical token on ``request.state``
+    BEFORE the route handler runs — either the existing valid cookie
+    token, or a freshly minted one if the request had none. That value
+    is the one the browser will end up with after this response, so it
+    matches whatever ``X-CSRF-Token`` HTMX will send on the next click.
+
+    Falls back to the raw cookie if the middleware didn't run (e.g.
+    direct testing without the middleware stack), so unit tests that
+    bypass the middleware still work.
 
     The template context renders this into both a ``<meta>`` tag (so
     ``app.js`` can attach it to every HTMX request) and a hidden form
     field via the ``partials/csrf.html`` partial.
     """
+    token = getattr(request.state, "csrf_token", None) if hasattr(request, "state") else None
+    if token:
+        return token
     return request.cookies.get(CSRF_COOKIE)
 
 
@@ -217,6 +230,24 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         method = request.method.upper()
         is_mutation = method in {"POST", "PUT", "PATCH", "DELETE"}
 
+        # For GET requests on HTML routes, pre-compute the token that the
+        # template should embed in <meta name="csrf-token">. If the
+        # request already has a valid cookie, reuse it; otherwise mint a
+        # fresh one now so the meta tag and the Set-Cookie we'll write
+        # below carry the same value. Stored on ``request.state`` so
+        # ``get_csrf_token_from_request`` (which the ``_ctx`` helper uses)
+        # can pick it up.
+        if method == "GET" and not path.startswith(
+            ("/static/", "/openapi.json", "/docs", "/redoc")
+        ):
+            existing = request.cookies.get(CSRF_COOKIE)
+            if existing and _verify_token(self.secret, existing):
+                request.state.csrf_token = existing
+                request.state.csrf_token_minted = False
+            else:
+                request.state.csrf_token = _build_token(self.secret)
+                request.state.csrf_token_minted = True
+
         if is_mutation and not _is_exempt(path):
             cookie_token = request.cookies.get(CSRF_COOKIE)
             if not cookie_token or not _verify_token(self.secret, cookie_token):
@@ -249,27 +280,38 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
         response: Response = await call_next(request)
 
-        # Token rotation: every GET response gets a fresh token. This
-        # caps how long any single token is exposed in browser memory /
-        # devtools, and keeps the value alive for the user's session
-        # without ever having to invalidate the old one explicitly --
-        # the new Set-Cookie just supersedes it.
+        # Token issuance: only set a Set-Cookie if the request did NOT
+        # already carry a valid CSRF token. Earlier we rotated the token
+        # on EVERY GET response, but that created a stale-meta bug:
         #
-        # We skip the rotation on asset endpoints both to save bandwidth
-        # (Set-Cookie on every image / CSS request is wasted bytes) and
-        # to keep the OpenAPI / docs response bodies clean for clients
-        # that inspect them.
+        #   1. GET /page arrives with cookie=tokenA
+        #   2. Route reads request.cookies (still tokenA), renders
+        #      <meta name="csrf-token" content="tokenA"> into the HTML
+        #   3. Middleware (this code) writes Set-Cookie tokenB
+        #   4. Browser now stores tokenB but the meta still says tokenA
+        #   5. HTMX request -> Cookie: tokenB, X-CSRF-Token: tokenA
+        #   6. Middleware: mismatch -> 403
+        #
+        # By only issuing when the request lacked a valid token, we keep
+        # the same token alive across page loads until it expires (TTL
+        # 8h, matches access_token), and the meta tag is always in sync
+        # with the cookie. Asset endpoints are still skipped both for
+        # bandwidth and for clean OpenAPI / docs bodies.
         if method == "GET" and not path.startswith(
             ("/static/", "/openapi.json", "/docs", "/redoc")
         ):
-            new_token = _build_token(self.secret)
-            response.set_cookie(
-                key=CSRF_COOKIE,
-                value=new_token,
-                max_age=TOKEN_TTL_SECONDS,
-                httponly=False,  # JS reads this so HTMX can echo it
-                secure=self.cookie_secure,
-                samesite="lax",
-                path="/",
-            )
+            # We minted (or reused) the token at the top of dispatch
+            # and stashed it on request.state. Only write Set-Cookie if
+            # this was a freshly-minted one — reused tokens are already
+            # in the browser, no point burning a Set-Cookie header.
+            if getattr(request.state, "csrf_token_minted", False):
+                response.set_cookie(
+                    key=CSRF_COOKIE,
+                    value=request.state.csrf_token,
+                    max_age=TOKEN_TTL_SECONDS,
+                    httponly=False,  # JS reads this so HTMX can echo it
+                    secure=self.cookie_secure,
+                    samesite="lax",
+                    path="/",
+                )
         return response
