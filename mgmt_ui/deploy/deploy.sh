@@ -85,16 +85,25 @@ preflight() {
   fi
 
   # Verify cryptography is importable for Fernet key generation. python3 is
-  # mostly always there; cryptography may not be.
+  # mostly always there; cryptography may not be. On PEP-668 systems (Ubuntu
+  # 23.04+ / Debian 12+) bare `pip3 install` refuses with "externally-managed-
+  # environment" — so we try plain pip, then pip with --break-system-packages,
+  # then apt-get, and only `die` if all three fail.
   if ! python3 -c "from cryptography.fernet import Fernet" 2>/dev/null; then
-    say "  python3 'cryptography' module missing — installing via pip..."
+    say "  python3 'cryptography' module missing — attempting install..."
+    install_ok=0
     if command -v pip3 >/dev/null 2>&1; then
-      pip3 install --quiet cryptography || die "failed to install cryptography"
-    elif command -v apt-get >/dev/null 2>&1; then
-      apt-get install -y --no-install-recommends python3-cryptography \
-        || die "failed to install python3-cryptography (try apt-get update)"
-    else
-      die "need pip3 or apt-get to install the python3 cryptography module"
+      pip3 install --quiet cryptography 2>/dev/null \
+        || pip3 install --quiet --break-system-packages cryptography 2>/dev/null \
+        || true
+      python3 -c "from cryptography.fernet import Fernet" 2>/dev/null && install_ok=1
+    fi
+    if [ "$install_ok" -eq 0 ] && command -v apt-get >/dev/null 2>&1; then
+      apt-get install -y --no-install-recommends python3-cryptography 2>/dev/null || true
+      python3 -c "from cryptography.fernet import Fernet" 2>/dev/null && install_ok=1
+    fi
+    if [ "$install_ok" -eq 0 ]; then
+      die "could not install the python3 cryptography module via pip3 or apt-get (try \`apt-get update\` first)"
     fi
   fi
   ok "all dependencies present"
@@ -332,8 +341,12 @@ seed_admin() {
     return
   fi
   say "${C_BOLD}9/9 Seeding initial admin '${INITIAL_ADMIN_USERNAME}'${C_RESET}"
-  (cd "$INSTALL_DIR" && docker compose exec -T api \
-    python -m scripts.seed_admin "$INITIAL_ADMIN_USERNAME" "$INITIAL_ADMIN_PASSWORD") \
+  # Pipe the password into stdin so it never appears in `ps aux` on either
+  # the host or inside the container. seed_admin.py reads it via
+  # --password-stdin (introduced alongside this change).
+  (cd "$INSTALL_DIR" && printf '%s' "$INITIAL_ADMIN_PASSWORD" \
+    | docker compose exec -T api \
+        python -m scripts.seed_admin "$INITIAL_ADMIN_USERNAME" --password-stdin) \
     || die "admin seeding failed (run \`docker compose -f $COMPOSE_FILE logs api\` for details)"
   ok "admin user created"
 }
