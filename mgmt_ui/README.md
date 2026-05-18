@@ -185,7 +185,7 @@ Phase 10 introduced a versioned Fernet keyset, so rotation is online:
 
 * The host SSH private key for the mgmt VPS itself (separate concern; back up via your normal host-key policy).
 * Postgres role passwords (regenerate on restore via `ALTER USER`).
-* The CSRF secret (`MGMT_CSRF_SECRET`) — regenerable; only invalidates active sessions.
+* The CSRF secret (`MGMT_CSRF_SECRET`) — regenerable; only invalidates active CSRF tokens (users must reload any open page to fetch a fresh one — login cookies signed by `MGMT_SECRET_KEY` are unaffected).
 
 ## Tests
 
