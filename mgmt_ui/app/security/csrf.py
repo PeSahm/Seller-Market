@@ -267,9 +267,37 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                 if content_type.startswith(
                     ("application/x-www-form-urlencoded", "multipart/form-data")
                 ):
-                    # Reading the form here caches it on ``request._form``
-                    # so the downstream FastAPI ``Form(...)`` dependency
-                    # gets the same parsed object back -- no body re-read.
+                    # IMPORTANT: BaseHTTPMiddleware shares the ASGI receive
+                    # callable with the downstream app via ``request.receive``.
+                    # Calling ``await request.form()`` here drains the receive
+                    # stream, so the route handler's ``Form(...)`` dependency
+                    # ends up reading an empty body and FastAPI returns 422
+                    # ``Field required, input=null`` for every form field.
+                    #
+                    # Fix: buffer the raw body, then replace ``request._receive``
+                    # with a replay function that yields the buffered bytes.
+                    # That way both this middleware AND the downstream route
+                    # can parse the same body.
+                    body_bytes = await request.body()
+
+                    _replayed = False
+                    async def _replay_receive() -> dict:
+                        nonlocal _replayed
+                        if _replayed:
+                            return {"type": "http.disconnect"}
+                        _replayed = True
+                        return {
+                            "type": "http.request",
+                            "body": body_bytes,
+                            "more_body": False,
+                        }
+
+                    # The inner Starlette/FastAPI Request reads via
+                    # ``request.receive``, which is a property returning
+                    # ``_receive``. Patching the attribute redirects the
+                    # downstream body read to our buffer.
+                    request._receive = _replay_receive  # type: ignore[attr-defined]
+
                     form = await request.form()
                     submitted = form.get(CSRF_FORM_FIELD)
 
