@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -30,6 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
+from app.models.audit import AuditLog
 from app.models.customers import Customer
 from app.models.runs import StackRunLock
 from app.models.stacks import AgentStack
@@ -1419,6 +1421,52 @@ async def agent_run_detail(
     ctx["agent"] = agent_user
     ctx["archived_log"] = archived_log
     return templates.TemplateResponse("agent/run_detail.html", ctx)
+
+
+@router.post("/runs/{run_id}/terminate")
+async def agent_run_terminate(
+    run_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Agent cancels their own in-flight run (admin acting-as-agent allowed).
+
+    Tenant-guarded: a non-admin agent can only terminate runs whose
+    ``agent_id`` matches their user id — same 404-mask pattern as the
+    rest of this module so an agent guessing UUIDs can't enumerate other
+    tenants' runs.
+    """
+    _require_agent_or_admin(user)
+    run = await services_runs.get_run(db, run_id)
+    if run is None or not services_runs.can_user_see_run(user, run):
+        raise HTTPException(status_code=404, detail="run not found")
+
+    target = f"/agent/runs/{run_id}"
+    if run.status != "running":
+        if request.headers.get("HX-Request"):
+            return Response(status_code=204, headers={"HX-Redirect": target})
+        return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
+
+    db.add(AuditLog(
+        actor_user_id=user.id,
+        action="run.terminate",
+        target_type="run",
+        target_id=str(run.id),
+        before_json={"status": run.status},
+        after_json={"status": "killed_pending"},
+        ts=datetime.now(timezone.utc),
+    ))
+    await db.commit()
+
+    cancelled = run_executor.terminate_run(run_id)
+    logger.info(
+        "agent %s terminated run %s (cancelled=%s)", user.username, run_id, cancelled
+    )
+
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
 
 
 # ---------------------------------------------------------------------------

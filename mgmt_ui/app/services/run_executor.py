@@ -39,6 +39,14 @@ logger = logging.getLogger(__name__)
 # as soon as the WS handler's local reference to the queue is dropped.
 _subscribers: dict[UUID, "WeakSet[asyncio.Queue]"] = {}
 
+# Registry of in-flight executor tasks keyed by run_id. Populated in
+# start_manual_run, popped in _run_executor_loop's finally. The terminate
+# button looks up the task here and calls task.cancel() — the cancellation
+# propagates into stream_remote_command which closes the SSH channel,
+# killing the remote process. The executor's CancelledError handler then
+# finalises the run with status='killed'.
+_running_tasks: dict[UUID, asyncio.Task] = {}
+
 
 def _holder_for(actor_id: Optional[UUID]) -> str:
     return f"manual:{actor_id}" if actor_id else "manual:system"
@@ -253,11 +261,35 @@ async def start_manual_run(
 
     # Fire-and-forget background task. We DON'T await it — the HTTP request
     # returns immediately and the browser opens a WebSocket for live log.
-    asyncio.create_task(
+    # Track in the module-level registry so terminate_run() can find and
+    # cancel it later.
+    task = asyncio.create_task(
         _run_executor_loop(run.id, stack_id, agent_id, job_name, actor_id),
         name=f"run-{run.id}",
     )
+    _running_tasks[run.id] = task
     return run
+
+
+def terminate_run(run_id: UUID) -> bool:
+    """Request cancellation of the executor task for a running run.
+
+    Returns ``True`` if a live task was found and cancelled, ``False`` if
+    the run isn't currently tracked in this process (e.g. already finished
+    or never ran in this worker).
+
+    The actual finalization happens asynchronously inside the executor's
+    ``finally`` block: it catches the propagated CancelledError, sets the
+    final status to ``"killed"``, writes the audit row, releases the
+    stack lock, and publishes the stream-close sentinel to any WS clients.
+    The SSH channel is closed by the ``stream_remote_command`` generator's
+    own ``finally`` — that's what actually kills the remote process.
+    """
+    task = _running_tasks.get(run_id)
+    if task is None or task.done():
+        return False
+    task.cancel()
+    return True
 
 
 # How often the run-time heartbeat extends the stack lock's lease, in
@@ -388,6 +420,18 @@ async def _run_executor_loop(
         _publish(run_id, LineEvent("stderr", f"<run-executor> ssh: {exc}".encode()))
         captured.extend(f"<run-executor> ssh: {exc}\n".encode())
         final_status = "failed"
+    except asyncio.CancelledError:
+        # Terminated via the "Terminate" button (terminate_run() calls
+        # task.cancel()). The stream_remote_command generator's finally
+        # has already closed the SSH channel, which makes the remote
+        # docker exec exit and the in-container process die. We swallow
+        # the CancelledError so the finally block can run a clean
+        # finalize_run + release_lock — without that the run row would
+        # stay 'running' forever and the stack lock would leak.
+        logger.info("run %s cancelled by operator — finalising as killed", run_id)
+        _publish(run_id, LineEvent("stderr", b"<run-executor> terminated by operator"))
+        captured.extend(b"<run-executor> terminated by operator\n")
+        final_status = "killed"
     except Exception as exc:  # noqa: BLE001 — never let one run kill the worker
         logger.exception("run executor unexpected failure for run=%s", run_id)
         _publish(
@@ -443,6 +487,8 @@ async def _run_executor_loop(
         _publish(
             run_id, StreamingResult(exit_code=final_exit_code, captured=bytes(captured))
         )
+        # Drop ourselves from the terminate registry — this run is done.
+        _running_tasks.pop(run_id, None)
 
 
-__all__ = ["start_manual_run", "subscribe"]
+__all__ = ["start_manual_run", "subscribe", "terminate_run"]

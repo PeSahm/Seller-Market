@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -23,6 +24,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
+from app.models.audit import AuditLog
 from app.models.runs import StackRunLock
 from app.models.servers import ServerClockSkewSample
 from app.models.users import User
@@ -2265,6 +2267,62 @@ async def admin_run_detail(
     ctx["agent"] = agent
     ctx["archived_log"] = archived_log
     return templates.TemplateResponse("admin/run_detail.html", ctx)
+
+
+@router.post("/runs/{run_id}/terminate")
+async def admin_run_terminate(
+    run_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel an in-flight run.
+
+    Calls ``run_executor.terminate_run`` which task.cancel()s the
+    executor task. The cancellation propagates into stream_remote_command,
+    which closes the SSH channel; the remote ``docker exec`` sees EOF
+    and the in-container python dies. The executor's CancelledError
+    handler then finalises the run with ``status='killed'`` and releases
+    the stack lock.
+
+    No-op (with a flash) if the run is already finished or was never
+    tracked in this worker process. Redirects back to the run detail
+    page so the operator can see the final state on next refresh.
+    """
+    run = await services_runs.get_run(db, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if run.status != "running":
+        # Already done — surface a clear message and bail without touching state.
+        # Use HX-Redirect for HTMX, plain 303 for browser navigation.
+        target = f"/admin/runs/{run_id}"
+        if request.headers.get("HX-Request"):
+            return Response(status_code=204, headers={"HX-Redirect": target})
+        return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
+
+    # Audit the operator action BEFORE the executor's own finalize_run
+    # audit fires — that way the log shows both who clicked terminate
+    # AND the final system-side outcome.
+    db.add(AuditLog(
+        actor_user_id=user.id,
+        action="run.terminate",
+        target_type="run",
+        target_id=str(run.id),
+        before_json={"status": run.status},
+        after_json={"status": "killed_pending"},
+        ts=datetime.now(timezone.utc),
+    ))
+    await db.commit()
+
+    cancelled = run_executor.terminate_run(run_id)
+    logger.info(
+        "admin %s terminated run %s (cancelled=%s)", user.username, run_id, cancelled
+    )
+
+    target = f"/admin/runs/{run_id}"
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
 
 
 # ---------------------------------------------------------------------------

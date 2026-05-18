@@ -210,6 +210,17 @@ async def stream_remote_command(
                 return
             yield item  # LineEvent or StreamingResult
     finally:
+        # On generator close (including cancellation from a terminate-run
+        # button click upstream), explicitly close the paramiko channel so
+        # the SSH server sends CHANNEL_CLOSE → docker exec sees EOF → the
+        # in-container process is killed. Without this, the `_blocking`
+        # thread keeps reading from a still-open channel and the remote
+        # python (e.g. cache_warmup retry loop) outlives the asyncio task.
+        if chan_ref:
+            try:
+                chan_ref[0].close()
+            except Exception:  # noqa: BLE001
+                pass
         if not pump_task.done():
             pump_task.cancel()
 

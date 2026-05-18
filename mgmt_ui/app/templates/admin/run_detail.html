@@ -28,6 +28,13 @@
     </p>
   </div>
   <div class="header-actions">
+    {% if run.status == 'running' %}
+      <form method="post" action="/admin/runs/{{ run.id }}/terminate" style="display:inline;"
+            onsubmit="return confirm('Terminate this run? The remote process will be killed and the run marked as killed.');">
+        {% include "partials/csrf.html" %}
+        <button class="btn btn--danger btn--sm" type="submit">Terminate</button>
+      </form>
+    {% endif %}
     <a class="btn btn--ghost btn--sm" href="/admin/runs">&larr; all runs</a>
     {% if stack %}<a class="btn btn--ghost btn--sm" href="/admin/stacks/{{ stack.id }}">stack &rarr;</a>{% endif %}
   </div>
