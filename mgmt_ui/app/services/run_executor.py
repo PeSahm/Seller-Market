@@ -163,69 +163,88 @@ async def start_manual_run(
 
     advisory_key = hash_lock_key("stack_run_acquire", str(stack_id))
 
-    async with AsyncSessionLocal() as db:
-        # Layer 1: session-level advisory gate — non-blocking. Either we
-        # win the race instantly or another caller is already in flight
-        # acquiring this stack's lock; either way the user sees the same
-        # "busy" outcome.
-        gate = await db.execute(
+    # IMPORTANT: pg_try_advisory_lock is session-scoped — it lives on the raw
+    # Postgres CONNECTION, not on the SQLAlchemy session. The earlier shape
+    # acquired the lock and then called db.commit() in the work path, which
+    # returns the connection to the pool. The follow-up pg_advisory_unlock
+    # then ran on a DIFFERENT pooled connection (no-op success), and the
+    # original connection held the lock forever — every subsequent click
+    # that landed on that connection saw the gate as "busy" and got a 409.
+    #
+    # Fix: hold the lock on a DEDICATED session that we never commit. We
+    # open a transaction implicitly with the first .execute() and only
+    # rollback at the very end, so the underlying connection stays pinned
+    # for the whole critical section. All the work that mutates the runs /
+    # stack_run_locks tables runs in a SEPARATE session that can commit
+    # freely without disturbing the lock-bearing connection.
+    async with AsyncSessionLocal() as lock_db:
+        gate = await lock_db.execute(
             text("SELECT pg_try_advisory_lock(:k)"), {"k": advisory_key}
         )
         if not gate.scalar():
+            # Rollback rather than commit so we don't release our pinned
+            # connection on a non-error path — but we hold no useful state
+            # here, and we're about to raise, so rollback is the right end.
+            await lock_db.rollback()
             raise run_locks.StackRunLockBusyError(
                 stack_id,
                 holder="<concurrent acquire>",
                 expires_at=datetime.now(timezone.utc),
             )
         try:
-            # Layer 2: check the durable row — held by another in-flight
-            # run? Then bail BEFORE creating any Run row.
-            existing = await db.execute(
-                select(StackRunLock).where(StackRunLock.stack_id == stack_id)
-            )
-            row = existing.scalar_one_or_none()
-            now = datetime.now(timezone.utc)
-            if row is not None:
-                if row.lease_expires_at > now:
-                    raise run_locks.StackRunLockBusyError(
-                        stack_id, row.holder, row.lease_expires_at
+            async with AsyncSessionLocal() as db:
+                # Layer 2: check the durable row — held by another in-flight
+                # run? Then bail BEFORE creating any Run row.
+                existing = await db.execute(
+                    select(StackRunLock).where(StackRunLock.stack_id == stack_id)
+                )
+                row = existing.scalar_one_or_none()
+                now = datetime.now(timezone.utc)
+                if row is not None:
+                    if row.lease_expires_at > now:
+                        raise run_locks.StackRunLockBusyError(
+                            stack_id, row.holder, row.lease_expires_at
+                        )
+                    # Stale lock — reclaim it. Logged inside acquire_lock too,
+                    # but we delete here so the upcoming acquire_lock INSERT
+                    # doesn't trip the PK constraint.
+                    await db.execute(
+                        delete(StackRunLock).where(StackRunLock.stack_id == stack_id)
                     )
-                # Stale lock — reclaim it. Logged inside acquire_lock too,
-                # but we delete here so the upcoming acquire_lock INSERT
-                # doesn't trip the PK constraint.
-                await db.execute(
-                    delete(StackRunLock).where(StackRunLock.stack_id == stack_id)
+                    await db.commit()
+
+                # Now we know the stack is free. Create the Run row.
+                # ``start_run`` commits internally — that commits ``db``'s
+                # transaction but is FINE here because the advisory lock
+                # lives on ``lock_db``'s pinned connection, not ``db``'s.
+                run = await services_runs.start_run(
+                    db,
+                    stack_id=stack_id,
+                    agent_id=agent_id,
+                    job_name=job_name,
+                    trigger="manual",
+                    actor_id=actor_id,
+                )
+                # Insert the durable lock pointing at the Run we just made.
+                await run_locks.acquire_lock(
+                    db,
+                    stack_id=stack_id,
+                    run_id=run.id,
+                    kind="cache" if job_name == "cache_warmup" else "trade",
+                    holder=_holder_for(actor_id),
                 )
                 await db.commit()
-
-            # Now we know the stack is free. Create the Run row (this
-            # commits internally; advisory lock survives because it's
-            # session-level, not transaction-level).
-            run = await services_runs.start_run(
-                db,
-                stack_id=stack_id,
-                agent_id=agent_id,
-                job_name=job_name,
-                trigger="manual",
-                actor_id=actor_id,
-            )
-            # Insert the durable lock pointing at the Run we just made.
-            await run_locks.acquire_lock(
-                db,
-                stack_id=stack_id,
-                run_id=run.id,
-                kind="cache" if job_name == "cache_warmup" else "trade",
-                holder=_holder_for(actor_id),
-            )
-            await db.commit()
         finally:
-            # Release the advisory lock no matter what — including the
-            # busy-raise path, so the rejected caller doesn't strand it.
+            # Release the advisory lock on the SAME pinned connection that
+            # acquired it. ``lock_db``'s implicit transaction stayed open
+            # the whole time, so its connection has not been returned to
+            # the pool — pg_advisory_unlock here actually targets the right
+            # session and the lock truly drops.
             try:
-                await db.execute(
+                await lock_db.execute(
                     text("SELECT pg_advisory_unlock(:k)"), {"k": advisory_key}
                 )
-                await db.commit()
+                await lock_db.rollback()
             except Exception:
                 logger.exception(
                     "failed to release advisory lock key=%s for stack=%s",
