@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     trade_ingest_interval_seconds: int = Field(
         default=30, alias="TRADE_INGEST_INTERVAL_SECONDS"
     )
+    # Issue #62: ingestor for scheduled-run markers written by
+    # SellerMarket/scheduler.py after each cron-fire of cache_warmup /
+    # run_trading. Same shape as the trade ingestor, different remote
+    # directory (``run_results/`` instead of ``order_results/``).
+    enable_scheduled_run_ingestor: bool = Field(
+        default=True, alias="ENABLE_SCHEDULED_RUN_INGESTOR"
+    )
+    scheduled_run_ingest_interval_seconds: int = Field(
+        default=30, alias="SCHEDULED_RUN_INGEST_INTERVAL_SECONDS", ge=1
+    )
     # Phase 8 background workers. Intervals are validated at parse time
     # so a misconfigured env var can't turn the worker into a tight
     # retry loop; retention days are validated >= 0 so a negative value
