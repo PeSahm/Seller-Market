@@ -515,19 +515,20 @@ class TradingCache:
         tokens = 0
         market_data = 0
         buying_power = 0
+        holdings = 0
         order_params = 0
         valid_entries = 0
         expired_entries = 0
-        
+
         now = datetime.now()
-        
+
         # Count all cache files
         if self.cache_dir.exists():
             for file in self.cache_dir.glob('*.json'):
                 try:
                     with open(file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                    
+
                     # Determine type from filename
                     if file.name.startswith('token_'):
                         tokens += 1
@@ -535,9 +536,11 @@ class TradingCache:
                         market_data += 1
                     elif file.name.startswith('buying_power_'):
                         buying_power += 1
+                    elif file.name.startswith('holdings_'):
+                        holdings += 1
                     elif file.name.startswith('order_params_'):
                         order_params += 1
-                    
+
                     # Check if valid or expired
                     expires_at_str = data.get('expires_at')
                     if expires_at_str:
@@ -548,14 +551,15 @@ class TradingCache:
                             expired_entries += 1
                 except:
                     pass
-        
-        total_entries = tokens + market_data + buying_power + order_params
-        
+
+        total_entries = tokens + market_data + buying_power + holdings + order_params
+
         return {
             'total_entries': total_entries,
             'tokens': tokens,
             'market_data': market_data,
             'buying_power': buying_power,
+            'holdings': holdings,
             'order_params': order_params,
             'valid_entries': valid_entries,
             'expired_entries': expired_entries

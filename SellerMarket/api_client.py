@@ -254,8 +254,12 @@ class EphoenixAPIClient:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             # The broker requires {"entity": true} as the request body.
-            response = requests.post(self.endpoints['portfolio'],
-                                    headers=headers, json={"entity": True})
+            response = requests.post(
+                self.endpoints['portfolio'],
+                headers=headers,
+                json={"entity": True},
+                timeout=10,
+            )
             response.raise_for_status()
 
             payload = response.json()
@@ -383,8 +387,12 @@ class EphoenixAPIClient:
                 'price': price
             }
             
-            response = requests.post(self.endpoints['calculate_order'],
-                                    headers=headers, json=data)
+            response = requests.post(
+                self.endpoints['calculate_order'],
+                headers=headers,
+                json=data,
+                timeout=10,
+            )
             response.raise_for_status()
 
             result = response.json()
