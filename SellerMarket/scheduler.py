@@ -218,6 +218,7 @@ class JobScheduler:
             self.executed_today[job_key] = now
             
             # Execute command with current environment variables (shell=False for security)
+            start_ts = time.monotonic()
             result = subprocess.run(
                 parsed_command,
                 shell=False,
@@ -227,14 +228,23 @@ class JobScheduler:
                 timeout=600,  # 10 minutes max
                 env=os.environ.copy()  # Pass environment variables to subprocess
             )
-            
+            elapsed_s = time.monotonic() - start_ts
+
             if result.returncode == 0:
-                logger.info(f"✅ Job '{job_name}' completed successfully")
-                logger.debug(f"Output: {result.stdout[-500:]}")
+                logger.info(f"✅ Job '{job_name}' completed successfully in {elapsed_s:.1f}s")
+                # Log FULL stdout at DEBUG so an operator running with -v can see
+                # what the warmup / locust subprocess actually did. The previous
+                # 500-char tail hid early-step failures that "succeeded" overall.
+                logger.debug(f"Full stdout ({len(result.stdout)} chars):\n{result.stdout}")
+                if result.stderr:
+                    logger.debug(f"stderr ({len(result.stderr)} chars):\n{result.stderr}")
             else:
-                logger.error(f"❌ Job '{job_name}' failed with return code {result.returncode}")
-                logger.error(f"Error: {result.stderr[-500:]}")
-                
+                logger.error(f"❌ Job '{job_name}' failed with return code {result.returncode} "
+                            f"after {elapsed_s:.1f}s")
+                logger.error(f"stderr tail: {result.stderr[-500:]}")
+                logger.debug(f"Full stdout ({len(result.stdout)} chars):\n{result.stdout}")
+                logger.debug(f"Full stderr ({len(result.stderr)} chars):\n{result.stderr}")
+
         except subprocess.TimeoutExpired:
             logger.error(f"⏱️ Job '{job_name}' timed out after 10 minutes")
         except Exception as e:
