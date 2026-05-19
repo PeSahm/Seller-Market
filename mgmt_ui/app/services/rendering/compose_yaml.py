@@ -77,6 +77,7 @@ services:
       - ./logs:/app/logs
       - ./order_results:/app/order_results
       - ./.cache:/app/.cache
+      - ./run_results:/app/run_results
       - ./trading_bot.log:/app/trading_bot.log
       - ./cache_warmup.log:/app/cache_warmup.log
 """
