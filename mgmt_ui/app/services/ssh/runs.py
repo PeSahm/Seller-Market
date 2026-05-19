@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import shlex
-from typing import Optional
 
 from app.models.servers import Server
 from app.services.ssh.commands import run_command
@@ -39,77 +38,90 @@ async def remote_kill_run_processes(
             ``sm-agent-<stack_uuid>-bot``.
         patterns: Substring matches against the COMMAND column of
             ``docker top``. Default covers both cache_warmup and locust.
+            Must be non-empty — an empty tuple would build ``grep -E ''``
+            which matches EVERY process in the container and we'd kill
+            unrelated work. We fail closed with a log line and ``0``.
         timeout: SSH-side total timeout.
 
     Returns:
-        Number of PIDs we attempted to kill. ``0`` if the container
-        isn't running or nothing matched — both are normal outcomes
-        and not errors.
-
-    Never raises — every failure path is logged and converted to ``0``.
-    This is a recovery helper; an SSH problem here MUST NOT block the
-    higher-level DB cleanup.
+        Count of PIDs we attempted to ``kill -9``. ``0`` is the normal
+        outcome when the container isn't running, no matching process
+        exists, or the SSH-side hit any error (recovery helper — never
+        raises). Counts are exact — the function snapshots PIDs first,
+        kills them, and returns ``len(snapshot)``.
     """
-    # `docker top <container>` writes a ps-style table with PIDs in
-    # column 2 from the HOST's namespace. Pipe through grep/awk and
-    # SIGKILL anything matching `patterns`. The whole thing is wrapped
-    # in `|| true` so docker-top failing (container stopped) doesn't
-    # propagate as a non-zero exit.
+    if not patterns:
+        # `grep -E ''` matches every line, which would kill every process
+        # in the container — not what an empty patterns argument should
+        # mean. Refuse explicitly so a misconfigured caller can't blow
+        # up the bot.
+        logger.warning(
+            "remote_kill_run_processes: empty patterns for %s — refusing to "
+            "build an unfiltered kill pipeline",
+            container_name,
+        )
+        return 0
+
     pat = "|".join(shlex.quote(p) for p in patterns).replace("'", "")
-    # Avoid sh-injection of the container name: shlex.quote it.
     cn = shlex.quote(container_name)
-    # The double `2>/dev/null` keeps stderr clean — `docker top` shouts
-    # if the container isn't running, and grep is fine to be silent.
-    cmd = (
+
+    # First pipeline: print one matching PID per line — gives us the
+    # snapshot we'll feed to xargs AND lets us report an exact count.
+    # The wrapping ``|| true`` swallows the failure when ``docker top``
+    # errors (container stopped) so the shell exits 0 and we read an
+    # empty stdout.
+    list_cmd = (
         f"sh -c \"docker top {cn} 2>/dev/null "
+        f"| awk 'NR>1 {{print}}' "
         f"| grep -E {shlex.quote(pat)} "
         f"| awk '{{print \\$2}}' "
-        f"| xargs -r kill -9 2>/dev/null; "
-        f"docker top {cn} 2>/dev/null "
-        f"| grep -cE {shlex.quote(pat)} "
-        f"|| echo 0\""
+        f"|| true\""
     )
-
     try:
-        result = await run_command(server, cmd, timeout=timeout)
+        listed = await run_command(server, list_cmd, timeout=timeout)
     except Exception:  # noqa: BLE001 — recovery path, swallow everything
         logger.exception(
-            "remote_kill_run_processes: SSH failure for %s on server %s",
+            "remote_kill_run_processes: SSH failure listing PIDs for %s on %s",
             container_name, getattr(server, "name", "?"),
         )
         return 0
 
-    # The trailing `docker top | grep -c` reports survivors — useful
-    # signal for the operator, but not actionable. The KILLS happened
-    # in the first pipeline. Count of attempted kills isn't directly
-    # exposed, but we can grep before-kill if we want it precise. For
-    # v1 just return 1 if the remote shell ran at all and there's
-    # output, else 0.
-    survivors_text = (result.stdout or "").strip().splitlines()
-    survivors = 0
-    for line in reversed(survivors_text):
+    pids: list[str] = []
+    for line in (listed.stdout or "").splitlines():
         line = line.strip()
+        # docker top's PID column is purely digits on every supported
+        # platform — anything else is junk and we drop it.
         if line.isdigit():
-            survivors = int(line)
-            break
-    if result.exit_code != 0:
-        logger.warning(
-            "remote_kill_run_processes: shell exited %d on %s/%s — stderr=%r",
-            result.exit_code, getattr(server, "name", "?"),
-            container_name, (result.stderr or "")[:200],
-        )
-    if survivors:
-        logger.warning(
-            "remote_kill_run_processes: %d matching process(es) STILL alive in "
-            "%s after SIGKILL — container may be using a separate PID namespace",
-            survivors, container_name,
-        )
-    else:
+            pids.append(line)
+
+    if not pids:
         logger.info(
-            "remote_kill_run_processes: %s cleaned up (no matching survivors)",
+            "remote_kill_run_processes: %s has no matching processes",
             container_name,
         )
-    return 1  # best-effort indicator that the remote ran
+        return 0
+
+    # Second pipeline: SIGKILL the snapshot. Done as a separate command
+    # so the count we return is the actual number we attempted to kill,
+    # not a 0/1 sentinel.
+    kill_cmd = "sh -c " + shlex.quote(
+        "kill -9 " + " ".join(pids) + " 2>/dev/null || true"
+    )
+    try:
+        await run_command(server, kill_cmd, timeout=timeout)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "remote_kill_run_processes: SSH failure killing PIDs %s in %s",
+            pids, container_name,
+        )
+        # We still return the count we *attempted* — operator sees the
+        # intent in the audit log even if delivery failed.
+
+    logger.info(
+        "remote_kill_run_processes: %s — issued SIGKILL to %d PID(s): %s",
+        container_name, len(pids), ",".join(pids),
+    )
+    return len(pids)
 
 
 __all__ = ["remote_kill_run_processes"]

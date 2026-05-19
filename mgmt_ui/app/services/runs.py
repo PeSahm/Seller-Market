@@ -260,7 +260,15 @@ async def force_kill_run(
     """
     from app.models.runs import StackRunLock
 
-    run = await db.get(Run, run_id)
+    # SELECT ... FOR UPDATE so a parallel executor.finalize_run that's
+    # mid-flight blocks here (or vice versa). Without the row lock the
+    # read-then-mutate window between the .get() and the .commit() below
+    # would let a legitimate `success` row land first, after which our
+    # `status = "killed"` writes would clobber it. The route translates
+    # ValueError into HTTP 400, so a legitimately-finished run that wins
+    # the race correctly refuses the force-kill on the next pass.
+    stmt = select(Run).where(Run.id == run_id).with_for_update()
+    run = (await db.execute(stmt)).scalar_one_or_none()
     if run is None:
         raise LookupError(f"run {run_id} not found")
     if run.status != "running":
@@ -272,10 +280,11 @@ async def force_kill_run(
     before = _public_snapshot(run)
     run.status = "killed"
     run.finished_at = datetime.now(timezone.utc)
-    if run.exit_code is None:
-        # -1 conveys "we don't know what the remote exited with" — same
-        # convention the streamer uses for SIGHUP-via-channel-close.
-        run.exit_code = -1
+    # Always stamp -1 by contract — force-kill normalises terminal
+    # metadata. Keeping a prior `exit_code` from a half-finalised state
+    # would leave a `killed` row with a misleading success/failure
+    # exit status that doesn't match the audit trail.
+    run.exit_code = -1
 
     # Delete the lock atomically — compound key so we don't snipe a
     # successor lock if the row's executor task somehow finalised a
