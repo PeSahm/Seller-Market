@@ -778,8 +778,14 @@ async def _prepare_remote_dirs(
 
     # mkdir -p is idempotent — safe to run on re-provision too, but we
     # only do so from provision_stack itself; redeploy skips this.
+    # ``run_results`` holds the bot's scheduled-run markers (issue #62 —
+    # the bot's scheduler.py writes ``scheduled_run_<uuid>.json`` here
+    # per cron fire and the mgmt UI's scheduled_run_ingestor SFTPs them
+    # back). MUST exist on the host before compose-up, otherwise the
+    # bind mount lands on a Docker-created (root-owned) directory which
+    # the non-root SSH user can't read for ingestion.
     mkdir_cmd = (
-        f"mkdir -p {sd}/logs {sd}/order_results {sd}/.cache"
+        f"mkdir -p {sd}/logs {sd}/order_results {sd}/.cache {sd}/run_results"
     )
     await run_command(server, mkdir_cmd, timeout=30.0, check=True)
 
