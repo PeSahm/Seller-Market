@@ -43,17 +43,32 @@
       <span class="text-muted">—</span>
     {% else %}
       <span class="badge badge--down">denied ⚠</span>
+      {% set ssh_user_display = result.ssh_user or '<ssh-user>' %}
+      {% set base_dir_display = result.base_dir_probed %}
+      {# parent of base_dir for the optional ``chmod o+x`` traversal hint #}
+      {% set parent_dir = base_dir_display.rsplit('/', 1)[0] if '/' in base_dir_display else base_dir_display %}
       <p class="text-small text-muted" style="margin: 4px 0 0;">
-        The SSH user <code>{{ result.fingerprint and '' }}</code> can't write
-        under <code>{{ result.base_dir_probed }}</code>. Provisioning will fail
-        with <code>mkdir: Permission denied</code>. Fix options:
+        The SSH user <code>{{ ssh_user_display }}</code> can't write under
+        <code>{{ base_dir_display }}</code>. Provisioning will fail with
+        <code>mkdir: Permission denied</code>.
       </p>
+      <p class="text-small" style="margin: 8px 0 4px;"><strong>Quickest fix</strong> — copy &amp; paste this on the trading host (as a user with sudo):</p>
+      <pre class="log-viewer" style="margin: 0 0 8px; padding: var(--s2); max-height: none;">sudo install -d -m 0755 -o {{ ssh_user_display }} -g {{ ssh_user_display }} {{ base_dir_display }}{% if base_dir_display.startswith('/root') %} \
+  && sudo chmod o+x /root{% endif %}</pre>
+      <p class="text-small text-muted" style="margin: 4px 0 8px;">
+        Creates <code>{{ base_dir_display }}</code> owned by
+        <code>{{ ssh_user_display }}</code> with mode 0755.{% if base_dir_display.startswith('/root') %}
+        The <code>chmod o+x /root</code> grants traversal-into-/root for
+        non-root users (default on most distros is 0700, blocking
+        non-root from even <code>cd /root</code>); it doesn't expose
+        <code>/root</code>'s contents — they keep their own mode bits.
+        Skip this part if you're keeping a hardened <code>/root</code>.{% endif %}
+      </p>
+      <p class="text-small" style="margin: 8px 0 4px;"><strong>Other options:</strong></p>
       <ul class="text-small text-muted" style="margin: 4px 0 0 16px; padding: 0;">
-        <li>Edit this server and set <strong>SSH user</strong> to <code>root</code> (or another user that owns the directory).</li>
-        <li>Or change <strong>Base directory</strong> to a path the SSH user owns, e.g.
-            <code>/home/&lt;ssh-user&gt;/seller-market/agents</code>.</li>
-        <li>Or pre-create on the trading server once:
-            <code>sudo mkdir -p {{ result.base_dir_probed }} &amp;&amp; sudo chown -R &lt;ssh-user&gt;:&lt;ssh-user&gt; {{ result.base_dir_probed.rsplit('/', 1)[0] if '/' in result.base_dir_probed else result.base_dir_probed }}</code></li>
+        <li>Edit this server and set <strong>SSH user</strong> to <code>root</code> (no host-side change needed).</li>
+        <li>Or change <strong>Base directory</strong> to a path the SSH user already owns, e.g.
+            <code>/home/{{ ssh_user_display }}/seller-market/agents</code>.</li>
       </ul>
     {% endif %}
   </dd>

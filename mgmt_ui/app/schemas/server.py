@@ -158,7 +158,10 @@ class TestConnectionResult(BaseModel):
     # and the operator should either switch to a root SSH user, change
     # ``base_dir`` to a path the user owns, or pre-create the directory
     # off-band. ``base_dir_probed`` echoes the directory we tested so the
-    # template can name it in the error message.
+    # template can name it in the error message. ``ssh_user`` is echoed
+    # so the template can render a copy-paste-ready ``chmod``/``chown``
+    # fix line (the operator just pastes it on the trading host).
     base_dir_writable: Optional[bool] = None
     base_dir_probed: Optional[str] = None
+    ssh_user: Optional[str] = None
     message: str = ""

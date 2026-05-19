@@ -651,8 +651,10 @@ async def test_connection(
     result.docker_version = docker_version or None
 
     # Issue #67: surface "SSH user can't write under base_dir" before the
-    # operator hits Provision.
+    # operator hits Provision. ``ssh_user`` is echoed so the template can
+    # render a copy-pastable fix command naming the actual user.
     result.base_dir_probed = server.base_dir
+    result.ssh_user = server.ssh_user
     result.base_dir_writable = (
         getattr(base_dir_res, "exit_code", None) == 0
     )
