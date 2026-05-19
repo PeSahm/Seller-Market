@@ -34,6 +34,11 @@
         {% include "partials/csrf.html" %}
         <button class="btn btn--danger btn--sm" type="submit">Terminate</button>
       </form>
+      <form method="post" action="/admin/runs/{{ run.id }}/force-kill" style="display:inline;"
+            onsubmit="return confirm('Force-kill this row?\n\nUse this ONLY when normal Terminate has no effect (e.g. the api container restarted while the run was in flight). It updates the DB row directly to status=killed and releases the stack lock, bypassing the in-process executor task lookup. A best-effort SSH cleanup of any leftover python on the trading host runs in the background.');">
+        {% include "partials/csrf.html" %}
+        <button class="btn btn--warning btn--sm" type="submit" title="Recovery: update DB row directly when Terminate fails">Force kill</button>
+      </form>
     {% endif %}
     <a class="btn btn--ghost btn--sm" href="/admin/runs">&larr; all runs</a>
     {% if stack %}<a class="btn btn--ghost btn--sm" href="/admin/stacks/{{ stack.id }}">stack &rarr;</a>{% endif %}

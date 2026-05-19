@@ -162,6 +162,11 @@ button { font: inherit; }
 .btn--ghost:hover { background: var(--bg-alt); color: var(--fg); }
 .btn--danger { color: var(--danger); border-color: var(--border-strong); }
 .btn--danger:hover { background: var(--danger-bg-hover); }
+/* Recovery / secondary-destructive actions — yellow-orange so it visually
+   reads as "less urgent than danger but more than ghost". Used for the
+   Force-kill button next to Terminate on the run detail page. */
+.btn--warning { color: #8a6d00; border-color: #c79a00; background: #fff5d6; }
+.btn--warning:hover { background: #ffeaa6; color: #5c4900; }
 .btn--sm { padding: 2px var(--s2); font-size: 0.92em; }
 .btn--block { width: 100%; }
 
