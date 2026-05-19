@@ -68,6 +68,30 @@
     </div>
   </div>
 
+  <div class="field">
+    <label class="label" for="image_pull_policy">Image pull policy</label>
+    {% set pull_policy = fv.image_pull_policy|default('always') %}
+    <select class="input" id="image_pull_policy" name="image_pull_policy">
+      <option value="always" {{ 'selected' if pull_policy == 'always' else '' }}>
+        always — fetch latest image on every redeploy (default)
+      </option>
+      <option value="missing" {{ 'selected' if pull_policy == 'missing' else '' }}>
+        missing — pull only if image isn't already on the host
+      </option>
+      <option value="never" {{ 'selected' if pull_policy == 'never' else '' }}>
+        never — use whatever local image is tagged (for hosts that can't reach ghcr.io)
+      </option>
+    </select>
+    <p class="text-small text-muted">
+      Pick <strong>never</strong> for hosts in restricted-egress environments
+      (e.g. Iranian VPSes where <code>ghcr.io</code> is blocked). You'll need to
+      pre-pull the bot image via a mirror and retag it as
+      <code>ghcr.io/pesahm/seller-market:latest</code> on the trading host
+      yourself. See <a href="https://github.com/PeSahm/Seller-Market/issues/71" target="_blank" rel="noopener">issue #71</a>
+      for the full workaround.
+    </p>
+  </div>
+
   <fieldset class="field">
     <legend class="label">Authentication</legend>
 

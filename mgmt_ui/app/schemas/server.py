@@ -51,6 +51,9 @@ def _validate_base_dir(value: str) -> str:
     return value
 
 
+ImagePullPolicy = Literal["always", "missing", "never"]
+
+
 class ServerCreateBase(BaseModel):
     """Fields common to both auth flavours of server creation."""
 
@@ -63,6 +66,11 @@ class ServerCreateBase(BaseModel):
         min_length=1,
         max_length=512,
     )
+    # Issue #71 incremental. ``always`` matches the historical behaviour
+    # (every redeploy fetches the latest bot image from the registry).
+    # Operators with restricted egress to ghcr.io flip this to ``never``
+    # for their Iranian-VPS rows and pre-pull via a mirror manually.
+    image_pull_policy: ImagePullPolicy = "always"
 
     @field_validator("base_dir")
     @classmethod
@@ -102,6 +110,7 @@ class ServerUpdate(BaseModel):
 
     name: Optional[str] = Field(default=None, min_length=1, max_length=120)
     base_dir: Optional[str] = Field(default=None, min_length=1, max_length=512)
+    image_pull_policy: Optional[ImagePullPolicy] = None
 
     @field_validator("base_dir")
     @classmethod
@@ -131,6 +140,7 @@ class ServerOut(BaseModel):
     status: str
     last_seen_at: Optional[datetime]
     base_dir: str
+    image_pull_policy: str
     created_at: datetime
 
 

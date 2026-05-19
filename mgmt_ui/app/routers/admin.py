@@ -231,6 +231,7 @@ async def admin_server_create(
     ssh_port: int = Form(22),
     ssh_user: str = Form(...),
     base_dir: str = Form("/root/seller-market/agents"),
+    image_pull_policy: str = Form("always"),
     ssh_auth: str = Form(...),
     password: Optional[str] = Form(None),
     private_key: Optional[str] = Form(None),
@@ -253,6 +254,7 @@ async def admin_server_create(
         "ssh_port": ssh_port,
         "ssh_user": ssh_user,
         "base_dir": base_dir,
+        "image_pull_policy": image_pull_policy,
     }
 
     try:

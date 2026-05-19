@@ -42,6 +42,16 @@
       <dd><span class="badge badge--{{ 'pending' if server.ssh_auth == 'password' else 'up' }}">{{ server.ssh_auth }}</span></dd>
       <dt>Base dir</dt>
       <dd><code>{{ server.base_dir }}</code></dd>
+      <dt>Pull policy</dt>
+      <dd>
+        {% set _pp = server.image_pull_policy|default('always') %}
+        <code>{{ _pp }}</code>
+        {% if _pp == 'never' %}
+          <span class="text-small text-muted">— redeploys won't fetch from <code>ghcr.io</code>. Operator must pre-pull the image on the trading host.</span>
+        {% elif _pp == 'missing' %}
+          <span class="text-small text-muted">— redeploys pull only when the image isn't already present locally.</span>
+        {% endif %}
+      </dd>
       <dt>Host key pin</dt>
       <dd>
         {% if server.host_key_pin %}
