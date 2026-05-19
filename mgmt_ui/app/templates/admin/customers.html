@@ -40,8 +40,13 @@
       <option value="{{ b }}" {% if filter_broker == b %}selected{% endif %}>{{ b }}</option>
     {% endfor %}
   </select>
+  <label class="checkbox-row" style="display:inline-flex;align-items:center;gap:.4em">
+    <input type="checkbox" name="include_disabled" value="on"
+           {{ 'checked' if filter_include_disabled else '' }}>
+    Show disabled
+  </label>
   <button class="btn btn--ghost btn--sm" type="submit">Filter</button>
-  {% if filter_agent_id or filter_status or filter_broker %}
+  {% if filter_agent_id or filter_status or filter_broker or filter_include_disabled %}
     <a class="btn btn--ghost btn--sm" href="/admin/customers">Clear</a>
   {% endif %}
 </form>
@@ -49,10 +54,15 @@
 {% if not customers %}
 <div class="card">
   <p class="text-muted">No customers match these filters.</p>
-  {% if not (filter_agent_id or filter_status or filter_broker) %}
+  {% if not (filter_agent_id or filter_status or filter_broker or filter_include_disabled) %}
     <p class="text-small text-muted">
       Click <strong>+ Add customer</strong> to create the first one, or have an
       agent declare one from their dashboard.
+    </p>
+    <p class="text-small text-muted">
+      Tried to add one and got <em>"customer already exists for this agent /
+      account / broker / symbol / side"</em>? Tick <strong>Show disabled</strong>
+      above — soft-deleted rows still occupy the uniqueness slot.
     </p>
   {% endif %}
 </div>
