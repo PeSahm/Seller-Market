@@ -38,6 +38,7 @@ import base64
 import logging
 import os
 import re
+import shlex
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -552,6 +553,21 @@ async def test_connection(
         return result
 
     local_unix_before = int(time.time())
+    # Issue #67: detect "SSH user can't write under base_dir" BEFORE the
+    # operator clicks Provision and hits a confusing `mkdir: Permission
+    # denied`. If the dir exists, test -w it directly; if it doesn't
+    # exist yet (typical on a fresh box), test -w its parent — which is
+    # what `mkdir -p` would actually write into. We `cd` into / first so
+    # the test never resolves against the SSH user's home dir for relative
+    # paths.
+    base_dir_q = shlex.quote(server.base_dir)
+    base_dir_writable_cmd = (
+        f"if test -e {base_dir_q}; then "
+        f"test -w {base_dir_q}; "
+        f"else "
+        f"test -w \"$(dirname {base_dir_q})\"; "
+        f"fi"
+    )
     try:
         remote_now_res = await run_command(
             server, "date +%s", timeout=10, check=True
@@ -565,6 +581,12 @@ async def test_connection(
         docker_res = await run_command(
             server,
             "docker --version 2>/dev/null || true",
+            timeout=10,
+            check=False,
+        )
+        base_dir_res = await run_command(
+            server,
+            base_dir_writable_cmd,
             timeout=10,
             check=False,
         )
@@ -627,6 +649,13 @@ async def test_connection(
     docker_stdout = getattr(docker_res, "stdout", "") or ""
     docker_version = docker_stdout.strip()
     result.docker_version = docker_version or None
+
+    # Issue #67: surface "SSH user can't write under base_dir" before the
+    # operator hits Provision.
+    result.base_dir_probed = server.base_dir
+    result.base_dir_writable = (
+        getattr(base_dir_res, "exit_code", None) == 0
+    )
 
     # ---- 4) Persist sample + status update -------------------------------
 

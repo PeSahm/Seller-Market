@@ -30,6 +30,33 @@
   <dt>Docker</dt>
   <dd>{% if result.docker_version %}<code class="text-small">{{ result.docker_version }}</code>
        {% else %}<span class="badge badge--down">not installed</span>{% endif %}</dd>
+  <dt>Base directory writable</dt>
+  <dd>
+    {# Issue #67: surface "SSH user can't write under base_dir" before
+       the operator clicks Provision and hits `mkdir: Permission denied`. #}
+    {% if result.base_dir_writable %}
+      <span class="badge badge--up">yes</span>
+      {% if result.base_dir_probed %}
+      <span class="text-small text-muted">— <code>{{ result.base_dir_probed }}</code></span>
+      {% endif %}
+    {% elif result.base_dir_writable is none %}
+      <span class="text-muted">—</span>
+    {% else %}
+      <span class="badge badge--down">denied ⚠</span>
+      <p class="text-small text-muted" style="margin: 4px 0 0;">
+        The SSH user <code>{{ result.fingerprint and '' }}</code> can't write
+        under <code>{{ result.base_dir_probed }}</code>. Provisioning will fail
+        with <code>mkdir: Permission denied</code>. Fix options:
+      </p>
+      <ul class="text-small text-muted" style="margin: 4px 0 0 16px; padding: 0;">
+        <li>Edit this server and set <strong>SSH user</strong> to <code>root</code> (or another user that owns the directory).</li>
+        <li>Or change <strong>Base directory</strong> to a path the SSH user owns, e.g.
+            <code>/home/&lt;ssh-user&gt;/seller-market/agents</code>.</li>
+        <li>Or pre-create on the trading server once:
+            <code>sudo mkdir -p {{ result.base_dir_probed }} &amp;&amp; sudo chown -R &lt;ssh-user&gt;:&lt;ssh-user&gt; {{ result.base_dir_probed.rsplit('/', 1)[0] if '/' in result.base_dir_probed else result.base_dir_probed }}</code></li>
+      </ul>
+    {% endif %}
+  </dd>
 </dl>
 {% elif result.host_key_mismatch %}
 <div class="flash flash--error">

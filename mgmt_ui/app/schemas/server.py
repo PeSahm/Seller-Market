@@ -151,4 +151,14 @@ class TestConnectionResult(BaseModel):
     clock_skew_seconds: Optional[int] = None  # remote - local (positive = remote ahead)
     seller_market_present: Optional[bool] = None  # /root/seller-market/ exists
     docker_version: Optional[str] = None
+    # Issue #67: pre-flight check that the SSH user can actually write under
+    # the server's ``base_dir``. ``None`` means the probe didn't run (e.g.
+    # the SSH layer failed before we got here); ``False`` means write would
+    # be denied — provisioning will fail with ``mkdir: Permission denied``
+    # and the operator should either switch to a root SSH user, change
+    # ``base_dir`` to a path the user owns, or pre-create the directory
+    # off-band. ``base_dir_probed`` echoes the directory we tested so the
+    # template can name it in the error message.
+    base_dir_writable: Optional[bool] = None
+    base_dir_probed: Optional[str] = None
     message: str = ""
