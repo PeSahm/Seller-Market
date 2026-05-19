@@ -94,6 +94,37 @@ def _render(request: Request, user: User, template_name: str, current_tab: str):
     )
 
 
+async def _push_customer_stack_config(
+    db: AsyncSession,
+    customer_id: UUID,
+    *,
+    actor_id: UUID,
+) -> None:
+    """Re-push the assigned stack's config.ini after a customer mutation.
+
+    ``services_customers.update_customer`` only commits the DB row — it
+    does NOT touch the trading bot's on-disk ``config.ini``. Without this
+    follow-up call, a "save then run" sequence reads the OLD field values
+    on the bot side (e.g. edit password → click Run → bot still uses the
+    previous password). Best-effort: SSH errors are logged but never
+    re-raised — the DB row has already committed.
+    """
+    customer = await services_customers.get_customer(db, customer_id)
+    if customer is None or customer.stack_id is None:
+        return
+    try:
+        await services_stacks.push_config_ini_for_stack(
+            db, stack_id=customer.stack_id, actor_id=actor_id
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "config.ini push failed after customer update %s "
+            "(row committed; operator can retry from stack page)",
+            customer_id,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Dashboard
 # ---------------------------------------------------------------------------
@@ -593,6 +624,12 @@ async def agent_customer_update(
         # Race: row vanished between the access check and the update. Treat
         # as 404 for consistency with cross-tenant isolation.
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # Push the updated config.ini so the next bot run reads the new field
+    # values. Without this, the DB row is updated but the trading bot keeps
+    # using its on-disk copy of config.ini. Same semantics as the admin
+    # /customers/{id}/edit route.
+    await _push_customer_stack_config(db, customer_id, actor_id=user.id)
 
     redirect_to = f"/agent/customers/{customer_id}"
     if request.headers.get("HX-Request"):

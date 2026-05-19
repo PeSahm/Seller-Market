@@ -567,6 +567,41 @@ def _flash_redirect(request: Request, location: str) -> Response:
     )
 
 
+async def _push_customer_stack_config(
+    db: AsyncSession,
+    customer_id: UUID,
+    *,
+    actor_id: UUID,
+) -> None:
+    """Re-push the assigned stack's config.ini after a customer mutation.
+
+    ``services_customers.update_customer`` only commits the DB row — it
+    does NOT touch the trading bot's on-disk ``config.ini`` because the
+    customers service is deliberately I/O-bound only on the DB. Without
+    this follow-up call, a "save then run" sequence reads the OLD field
+    values on the bot side (you edit the password, click Run, the bot
+    authenticates with the previous password).
+
+    Best-effort: SSH errors are logged but never re-raised — the
+    customer change has already committed and the operator can
+    re-trigger the push from the stack page if SSH is having a moment.
+    """
+    customer = await services_customers.get_customer(db, customer_id)
+    if customer is None or customer.stack_id is None:
+        return
+    try:
+        await services_stacks.push_config_ini_for_stack(
+            db, stack_id=customer.stack_id, actor_id=actor_id
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001 — config push is post-commit best-effort
+        logger.exception(
+            "config.ini push failed after customer update %s "
+            "(row committed; operator can retry from stack page)",
+            customer_id,
+        )
+
+
 @router.get("/customers")
 async def admin_customers(
     request: Request,
@@ -909,6 +944,15 @@ async def admin_customer_update(
         )
     except ValueError as exc:
         return _render_with_error(str(exc), status.HTTP_400_BAD_REQUEST)
+
+    # Push the updated config.ini so the next bot run reads the new field
+    # values. Without this, the DB row is updated but the trading bot keeps
+    # using its on-disk copy of config.ini until the next assign / unassign
+    # / move mutation triggers a push. Best-effort: SSH errors are logged
+    # but don't fail the redirect — the customer change has already
+    # committed and an operator can re-trigger the push from the stack
+    # page if the SSH layer is having a moment.
+    await _push_customer_stack_config(db, customer_id, actor_id=user.id)
 
     return _flash_redirect(request, f"/admin/customers/{customer_id}")
 
