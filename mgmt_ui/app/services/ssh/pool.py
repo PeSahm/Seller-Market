@@ -229,22 +229,30 @@ class SSHPool:
     # -- public API ----------------------------------------------------------
 
     async def acquire(self, server: Server) -> paramiko.SSHClient:
-        """Acquire (and hold the per-connection lock for) an ``SSHClient``.
+        """Return an ``SSHClient`` for ``server`` (reused if alive, else fresh).
 
-        The caller MUST eventually call :meth:`release` (or use
-        :meth:`session`, which does it automatically). Concurrent acquires
-        for the same ``(user, host, port)`` serialize on the per-connection
-        lock so they share the underlying transport.
+        Concurrent acquires for the same ``(user, host, port)`` serialize on
+        the per-connection lock JUST LONG ENOUGH to decide reuse-vs-reconnect
+        and to mutate the ``_clients`` dict. **The lock is released before
+        the client is returned** — multiple concurrent callers then share the
+        same SSHClient and open independent paramiko Channels on it (which
+        is what SSH multiplexing is for).
+
+        Holding the lock for the lifetime of a session (as the previous
+        implementation did) serialised entire `docker exec` / `docker logs`
+        operations across stacks that happened to point at the same host —
+        observable as agent B's run row sitting at ``status='running'`` while
+        agent A's run held the lock for the whole 120 s locust race. See
+        issue #66.
 
         If the cached transport's stored ``secret_fingerprint`` no longer
-        matches the current ``server`` row (i.e. an admin rotated the
-        password or pinned a new host key without changing host/port/user),
-        the cached client is closed and a fresh connection is established.
+        matches the current ``server`` row (admin rotated the password or
+        pinned a new host key without changing host/port/user), the cached
+        client is closed and a fresh connection is established.
         """
         conn_key = _conn_key(server)
         lock = await self._lock_for_conn(conn_key)
-        await lock.acquire()
-        try:
+        async with lock:
             current_fp = _secret_fingerprint(server)
             existing = self._clients.get(conn_key)
             if existing is not None:
@@ -275,23 +283,31 @@ class SSHPool:
                 observed_pin=observed,
             )
             return client
-        except BaseException:
-            # If anything went wrong, release the lock so we don't deadlock
-            # future callers.
-            lock.release()
-            raise
 
     async def release(self, server: Server) -> None:
-        """Release the per-connection lock held by :meth:`acquire`."""
-        lock = self._conn_locks.get(_conn_key(server))
-        if lock is not None and lock.locked():
-            lock.release()
+        """Backwards-compatibility shim — releases nothing.
+
+        The pool no longer holds a per-connection lock across the session
+        lifetime; the lock is dropped inside :meth:`acquire` once the
+        connect-or-reuse decision is committed. Existing call sites that
+        invoke ``release`` (via :meth:`session`'s ``finally`` or directly)
+        still work — this is just a no-op now. Kept rather than removed so
+        third-party code calling the documented :meth:`acquire` /
+        :meth:`release` pair doesn't break.
+        """
+        return None
 
     @asynccontextmanager
     async def session(
         self, server: Server
     ) -> AsyncIterator[paramiko.SSHClient]:
-        """Async context manager: acquire on enter, release on exit."""
+        """Async context manager: acquire on enter, release on exit.
+
+        Note: after the fix for issue #66, "release on exit" is a no-op.
+        The pool's locking is now only around the connect-or-reuse decision
+        inside :meth:`acquire`; concurrent sessions on the same SSHClient
+        are explicitly supported and open independent paramiko Channels.
+        """
         client = await self.acquire(server)
         try:
             yield client
