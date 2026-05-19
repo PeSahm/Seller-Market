@@ -612,20 +612,27 @@ async def admin_customers(
     agent_id: Optional[str] = None,
     status: Optional[str] = None,
     broker: Optional[str] = None,
+    include_disabled: Optional[str] = None,
 ):
     """List all customers with optional filter chips.
 
-    The filter chips (agent / status / broker) round-trip through query
-    parameters so a filtered view is bookmarkable and link-shareable. We
-    include soft-deleted agents in the lookup dict because a customer can
-    outlive its agent (Phase 9 cleanup); we still want to render *which*
-    deleted agent owned them.
+    The filter chips (agent / status / broker / include-disabled) round-trip
+    through query parameters so a filtered view is bookmarkable and
+    link-shareable. We include soft-deleted agents in the lookup dict because
+    a customer can outlive its agent (Phase 9 cleanup); we still want to
+    render *which* deleted agent owned them.
 
-    All three filter args accept the empty string (sent by an unselected
+    All filter args accept the empty string (sent by an unselected
     ``<select><option value="">…</option>`` from the filter bar) and treat
     it as "no filter". ``agent_id`` is typed as ``str`` rather than ``UUID``
     here so an empty value doesn't fail pydantic parsing and 422 the page
     into JSON; we parse it manually below.
+
+    ``include_disabled`` is a checkbox (HTML sends ``"on"`` when ticked,
+    omits the param when not). Disabled (soft-deleted) rows still occupy
+    the composite UNIQUE slot, so without this toggle an operator who
+    soft-deleted a customer has no UI path to discover what's blocking
+    a fresh create with the same tuple (see issue #75).
     """
     agent_uuid: Optional[UUID] = None
     if agent_id:
@@ -637,12 +644,13 @@ async def admin_customers(
             agent_uuid = None
     status = status or None
     broker = broker or None
+    show_disabled = include_disabled == "on"
     customers = await services_customers.list_customers(
         db,
         agent_id=agent_uuid,
         status=status,
         broker=broker,
-        include_disabled=False,
+        include_disabled=show_disabled,
     )
     agents = {
         a.id: a
@@ -656,6 +664,7 @@ async def admin_customers(
     ctx["filter_agent_id"] = agent_id
     ctx["filter_status"] = status
     ctx["filter_broker"] = broker
+    ctx["filter_include_disabled"] = show_disabled
     ctx["all_agents"] = list(agents.values())
     return templates.TemplateResponse("admin/customers.html", ctx)
 
