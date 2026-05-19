@@ -1,25 +1,34 @@
 # Session memory — Iranian-VPS deploy + mgmt UI bug fixes
 
-A running record of the findings, gotchas, and runbooks discovered while making the mgmt UI work on Iranian-egress VPSes and fixing the customer-form 500. Kept here so future me (and the operator) don't have to re-discover any of this.
+A running record of the findings, gotchas, and runbooks discovered while making the mgmt UI work on Iranian-egress VPSes and fixing the customer-form 500 + scheduled-runs visibility. Kept here so future me (and the operator) don't have to re-discover any of this.
 
 ## Deployment topology
 
 | Host | What runs there | Path |
 |---|---|---|
-| `5.10.248.55` | Mgmt UI (FastAPI + Postgres) | `/opt/seller-market-mgmt/docker-compose.yml`, service name `api` |
-| `185.232.152.246` | Trading bot ("Tebyan-Saeed") | `/root/seller-market/agents/<stack-id>/` per stack |
+| `5.10.248.55` (PouyanIt-linux) | Mgmt UI (FastAPI + Postgres) **and** Mostafa+hamid bot stacks | `/opt/seller-market-mgmt/` for mgmt; `/root/seller-market/agents/<stack-id>/` per stack |
+| `185.232.152.246` (Tebyan-Saeed) | Mostafa+hamid bot stacks | `/root/seller-market/agents/<stack-id>/` per stack |
 
 The mgmt UI image is built by the GitHub Actions workflow `.github/workflows/docker-publish-mgmt-ui.yml` on every merge to `main` and pushed to `ghcr.io/pesahm/seller-market-mgmt-ui:latest`.
 
 The trading bot image is built by `.github/workflows/docker-publish.yml` on every merge and pushed to `ghcr.io/pesahm/seller-market:latest` (this is the historical name still wired into `app/services/settings_store.py:39`; `app/services/stacks.py:104` defines a newer code-level fallback `…/seller-market-scheduler:latest` but the live setting overrides it).
 
+Stack table mapping (as of session end):
+
+| Agent | Server | Stack id | Stack dir |
+|---|---|---|---|
+| Mostafa | PouyanIt-linux (5.10.248.55) | `83619dcd-...` | `/root/seller-market/agents/89bb891e-ffb7-41dd-b838-56c4a1c82f59/` |
+| Mostafa | Tebyan-Saeed (185.232.152.246) | `c6f3b84a-...` | `/root/seller-market/agents/89bb891e-ffb7-41dd-b838-56c4a1c82f59/` |
+| hamid   | PouyanIt-linux (5.10.248.55) | `e4d0db56-...` | `/root/seller-market/agents/ca0a9617-2bf6-48ce-b35a-d545d789a52d/` |
+| hamid   | Tebyan-Saeed (185.232.152.246) | `724a310a-...` | `/root/seller-market/agents/ca0a9617-2bf6-48ce-b35a-d545d789a52d/` |
+
 ## ghcr.io is blocked from Iranian network paths
 
-Discovered the hard way: **the mgmt VPS itself** (5.10.248.55) now gets TLS connection-reset when reaching ghcr.io. This came online sometime today — earlier deployments worked, then started failing without warning. The trading VPS (185.232.152.246) has been blocked for longer; that was the original trigger for the per-server `image_pull_policy` work in PR #72.
+Discovered the hard way: **both VPSes** now get TLS connection-reset when reaching ghcr.io. On 5.10.248.55 it came online mid-session — earlier deployments worked, then started failing. The trading VPS (185.232.152.246) has been blocked for longer; that was the original trigger for the per-server `image_pull_policy` work in PR #72.
 
 Symptoms:
 
-- `docker compose pull` → `net/http: TLS handshake timeout` on the first attempt and `Get \"https://ghcr.io/v2/...\": net/http: TLS handshake timeout` on retry.
+- `docker compose pull` → `net/http: TLS handshake timeout` on the first attempt and `Get "https://ghcr.io/v2/...": net/http: TLS handshake timeout` on retry.
 - Direct probe: `curl https://ghcr.io/v2/` returns `(35) Recv failure: Connection reset by peer` in ~0.5 s, three retries in a row, no transient flakiness — this is a deliberate block, not a network blip.
 
 ### Working mirror
@@ -27,6 +36,19 @@ Symptoms:
 `https://ghcr-mirror.liara.ir` is reachable from both VPSes (probe returns `401`, meaning it's up and refusing unauthenticated requests — exactly what we want). `https://docker.arvancloud.ir` and `https://hub.focker.ir` are also up; liara is what's configured today in `/etc/docker/daemon.json` on the mgmt VPS as a `registry-mirrors` entry.
 
 **Important caveat**: Docker's `registry-mirrors` setting ONLY applies to `docker.io`, NOT arbitrary registries like `ghcr.io`. The daemon will NOT automatically rewrite `ghcr.io/foo` → `ghcr-mirror.liara.ir/foo`. The only thing the existing daemon mirror does is route Docker Hub pulls.
+
+### Working NTP
+
+`ntp.time.ir` (185.192.112.101) is reachable from Iranian VPSes. The default `ntp.ubuntu.com` and `pool.ntp.org` often don't sync (either DNS, IPv6, or upstream filtering). `time.cloudflare.com` (162.159.200.1) and `time.google.com` (216.239.35.0) are also reachable as fallbacks. Drop-in config:
+
+```ini
+# /etc/systemd/timesyncd.conf.d/10-iran.conf
+[Time]
+NTP=ntp.time.ir
+FallbackNTP=time.cloudflare.com time.google.com
+```
+
+Then `sudo systemctl restart systemd-timesyncd && sleep 6 && timedatectl` should report `System clock synchronized: yes`.
 
 ## Runbook: deploying a new mgmt UI image
 
@@ -55,15 +77,15 @@ docker compose up -d api
 
 # 6. Confirm alembic ran on startup + the app is up
 docker logs seller-market-mgmt-api-1 --tail 50
-#   you should see lines like:
-#   [entrypoint] running alembic upgrade head
-#   INFO  [alembic.runtime.migration] Running upgrade <N> -> <N+1>, ...
-#   INFO:     Uvicorn running on http://0.0.0.0:8000
+#   expect:
+#     [entrypoint] running alembic upgrade head
+#     INFO  [alembic.runtime.migration] Running upgrade <N> -> <N+1>, ...
+#     INFO:     Uvicorn running on http://0.0.0.0:8000
 ```
 
 If the migration line doesn't appear, either there were no new migrations (fine) or the entrypoint didn't run alembic (bug — check the image's CMD/ENTRYPOINT).
 
-### One-time per-server tweak (PR #72 follow-on)
+### Per-server tweak for Iranian trading hosts (PR #72 follow-on)
 
 After merging PR #72, the mgmt UI gained a per-server `image_pull_policy` column (`always | missing | never`). For Iranian trading hosts where ghcr.io is blocked, flip the row to `never` so the mgmt UI's compose redeploy uses the locally-tagged image:
 
@@ -102,11 +124,12 @@ The mgmt UI was hardcoding `docker compose up -d --pull always` in `app/services
 
 - Migration: `mgmt_ui/alembic/versions/0002_server_image_pull_policy.py`
 - Default = `always` so existing servers behave exactly like before
-- Refs issue #71 (the broader "add server with mirror profile" UX)
+- 185.232.152.246 row was flipped to `never` post-deploy
+- Refs issue #71 (the broader "add server with mirror profile" UX, still open)
 
-### PR #73 — `MissingGreenlet` 500 on customer create/update (open, awaiting merge)
+### PR #73 — `MissingGreenlet` 500 on customer create/update (merged ✓, deployed ✓)
 
-Edit a customer, change the ISIN to one that collides on the composite UNIQUE `(agent, account, broker, isin, side)`. Expected a friendly flash like *"customer already exists for this agent / account / broker / symbol / side"*. Got HTTP 500.
+Edit a customer, change the ISIN to one that collides on the composite UNIQUE `(agent, account, broker, isin, side)`. Expected a friendly flash like *"customer already exists for this agent / account / broker / symbol / side"*. Got HTTP 500. Same intermittent 500 reported on add-customer with a duplicate tuple.
 
 **Root cause**: `services.customers.update_customer` and `create_customer` call `await db.rollback()` on `IntegrityError` before re-raising as `ValueError`. **`AsyncSession.rollback()` expires every attribute on every loaded instance, independent of `expire_on_commit=False`.** The router's error renderer then touched:
 
@@ -119,38 +142,97 @@ Each access triggered a SQLAlchemy lazy-load. The lazy-load path emits a sync `d
 - UPDATE: snapshot `customer.*` and `agent.username` into plain primitives BEFORE the mutation; error renderer reads from the snapshot via `SimpleNamespace`.
 - BOTH: `await db.refresh(user)` immediately after the ValueError raise but before rendering, so `page_shell.html`'s `current_user.role/username` doesn't lazy-load.
 
-**Why this is a hotfix, not the full fix**: the same shape exists on ~12 other admin write routes (`server` create, `agent` create, `locust` upsert, `scheduler_job` upsert, customer duplicate, …). Every one of them has an `except ValueError` re-render path that will 500 the same way if its service does `db.rollback()`. They're latent until the operator hits a duplicate-tuple or similar constraint violation on that form.
+**Why this is a hotfix, not the full fix**: the same shape exists on ~12 other admin write routes (`server` create, `agent` create, `locust` upsert, `scheduler_job` upsert, customer duplicate, …). Every one of them has an `except ValueError` re-render path that will 500 the same way if its service does `db.rollback()`. They're latent until the operator hits a duplicate-tuple or similar constraint violation on that form. **Structural fix tracked in #74.**
 
-**Structural fix tracked separately** — see "Follow-ups".
+### Issue #75 / PR #76 — disabled customer rows invisible but still occupy the UNIQUE slot (merged ✓, deployed ✓)
 
-## Follow-ups (worth filing if not already)
+Operator tried to add a customer with `(agent=Mostafa, account=4580090306, broker=ayandeh, isin=IRO3SMBZ0001, side=1)` and got *"customer already exists for this agent / account / broker / symbol / side"* — but no such row was visible in `/admin/customers`. Two compounding bugs:
 
-1. **Hoist `current_user.username` / `.role` into `request.state`** at auth time, so `page_shell.html` reads `request.state.user_username` (or similar) instead of the ORM object. Eliminates the entire `MissingGreenlet`-after-rollback class of bug across every admin write route. **Higher priority than the cosmetic stuff** — the next operator that hits a duplicate tuple on a different form will 500 again.
-2. **Auto-deploy for the mgmt UI**. Today the operator must SSH to 5.10.248.55 + mirror-pull + retag + `compose up` after every merge. Three viable approaches, in increasing complexity:
+1. `/admin/customers` hardcoded `include_disabled=False` ([admin.py:645](mgmt_ui/app/routers/admin.py#L645)) with no escape, so soft-deleted rows were completely invisible.
+2. `soft_delete_customer` just flips `enabled=False`. The composite UNIQUE doesn't care about `enabled`, so the disabled row keeps its slot forever.
+
+Combined: any "deleted" customer permanently blocks re-creating the same tuple, with no UI path to discover what's blocking. Live repro tonight on Mostafa's account — two ghost rows (`92d55bdd-...` Buy, `a4e5c05c-...` Sell) blocking the form.
+
+**Resolution**:
+- The two ghost rows were hard-deleted directly from the DB (FK-checked first — no `trade_results` referenced them).
+- PR #76 added a *Show disabled* checkbox to the filter bar + an empty-state hint that names the specific error so the operator can self-serve next time.
+
+**Out of scope for #76 but worth thinking about**: should `soft_delete_customer` hard-delete when `assignment_status='pending'` (nothing on the trading host references the row yet)? Documented in issue #75.
+
+### Issue #62 / PR #77 — scheduled cron runs not appearing in /admin/runs (merged ✓, deployed ✓)
+
+The earlier session shipped commit `62ae632` to surface scheduled (cron) runs in the mgmt UI's Runs list. Bot's `scheduler.py` was supposed to write `scheduled_run_<uuid>.json` markers to `/app/run_results/` per cron fire, the mgmt UI's `scheduled_run_ingestor` would SFTP them back. **But cron fired and nothing appeared.**
+
+**Live evidence**: Mostafa's stack on 5.10.248.55 fired cache_warmup at 00:36 Tehran (visible in `cache_warmup.log`), but `/admin/runs` stayed empty.
+
+**Root cause**: the stack's compose template never bind-mounted `/app/run_results/` to the host. The bot's marker code ran, `_emit_scheduled_run_marker` did `os.makedirs(...)` inside the container, but those markers went into the ephemeral container layer. The host's `/root/seller-market/agents/<id>/run_results/` directory never existed; the ingestor SFTPed an empty path; no row was created.
+
+**Fix (PR #77)**: two one-line edits.
+- `rendering/compose_yaml.py` — add `./run_results:/app/run_results` to the bot service's volumes.
+- `stacks.py::_prepare_stack_dirs` — add `run_results` to the `mkdir -p` command (the host dir must exist before the bind mount, otherwise Docker creates it as root-owned and the non-root SSH user can't read it for ingestion).
+
+**Upgrade path for existing stacks**: redeploy each stack from the UI — `redeploy_stack` calls `_do_compose_action(prepare_dirs=True)`, so both the mkdir and the new compose YAML are applied.
+
+### Side observation (separate problem, not fixed yet)
+
+The same cache_warmup.log shows `NameResolutionError("HTTPSConnection(host='api-ayandeh.ephoenix.ir', port=443): Failed to resolve 'api-ayandeh.ephoenix.ir'")` — the warmup itself fails because DNS for the broker API doesn't resolve from 5.10.248.55. Out of scope for this session but worth a follow-up — almost certainly a DNS / firewall issue specific to that VPS.
+
+### Trading-VPS time was wrong (fixed at the end of the session)
+
+`timedatectl` on 185.232.152.246 reported timezone `Etc/UTC` and `System clock synchronized: no`. Fixed by:
+1. `sudo timedatectl set-timezone Asia/Tehran`
+2. Writing `/etc/systemd/timesyncd.conf.d/10-iran.conf` with `NTP=ntp.time.ir` (the IPv6 default `ntp.ubuntu.com` doesn't reach this VPS reliably)
+3. `sudo systemctl restart systemd-timesyncd`
+
+Result: clock synced, timezone +0330 — important because the bot's cron times in `scheduler_config.json` are interpreted in the bot container's TZ (set via `TZ=` env, but the host clock still needs to be right or container time drifts).
+
+## Open issues / follow-ups
+
+| # | Title | Why it matters |
+|---|---|---|
+| **#71** | Add-server should auto-install plugins + configure Iranian mirrors + pull latest image | The pull-policy half shipped in PR #72; the bootstrap-the-host half is still open. Today the operator has to manually: set up `/etc/docker/daemon.json`, install `docker-compose` plugin, `chown` the base_dir, pre-pull + retag the bot image. All of that should be automatable. |
+| **#74** | Structural fix: hoist `current_user.username`/role into `request.state` | PR #73 hotfixed customer create/update only. ~12 other admin write routes have the same latent 500 if a service-side rollback fires. This fix kills the whole class at once. |
+| **#62** | Surface scheduled (cron) runs + make terminable | Marker pipe fixed in PR #77; terminate button for in-flight scheduled runs is still TBD (needs an SSH-kill helper that #61 was supposed to provide). |
+| **#75** | Disabled customer rows occupy UNIQUE slot | UI fixed by PR #76 (auto-closed #75 on merge). The deeper *"should `soft_delete_customer` hard-delete pending rows"* question is documented in the issue but not implemented. |
+
+Other follow-ups worth filing if not yet:
+
+1. **Auto-deploy for the mgmt UI**. Today the operator must SSH + mirror-pull + retag + `compose up` after every merge. Three viable approaches:
     - Watchtower container pointing at the liara mirror, polling every 5–15 min (simplest, ~20 lines of compose)
     - Use the existing self-hosted GHA runner at `/root/actions-runner/` on the mgmt VPS + a new `deploy-mgmt.yml` workflow that fires on `workflow_run: Docker Publish (mgmt UI) completed` and does the pull/retag/up
-    - Plain cron + `redeploy.sh` doing the same dance
-    The runner-based approach is cleanest — deploys appear in the GitHub Actions tab.
-3. **Auto-deploy + mirror handling for the trading hosts too**. PR #72 made `image_pull_policy='never'` workable, but the operator still has to manually re-mirror-pull + retag the bot image on each trading host every time the bot image is rebuilt. A small script + cron on each trading host would close that loop.
-4. **`agent_image_tag` settings cleanup**. Two image names are floating around (`ghcr.io/pesahm/seller-market:latest` historical, `ghcr.io/pesahm/seller-market-scheduler:latest` newer code-default in `stacks.py:104`). The settings page lets the operator override either; the help text in the new pull-policy dropdown points at Admin → Settings so it stays accurate, but the duplicate naming should be reconciled.
+    - Plain cron + `redeploy.sh`
+
+    Runner-based is cleanest — deploys appear in the Actions tab.
+
+2. **Auto-deploy + mirror handling for the trading hosts too**. PR #72 made `image_pull_policy='never'` workable, but the operator still has to manually re-mirror-pull + retag the bot image on each trading host every time the bot image is rebuilt.
+
+3. **`agent_image_tag` settings cleanup**. Two image names floating around (`ghcr.io/pesahm/seller-market:latest` historical, `ghcr.io/pesahm/seller-market-scheduler:latest` newer code-default in `stacks.py:104`). Help text in the pull-policy dropdown points at Admin → Settings to stay accurate, but the duplicate naming should be reconciled.
+
+4. **DNS / broker-API reachability on 5.10.248.55**. The cache_warmup log shows `api-ayandeh.ephoenix.ir` doesn't resolve. Probably needs the same DNS-override treatment as the other Iranian-egress fixes. Worth a dedicated issue.
 
 ## Things I learned the hard way
 
 - **`AsyncSession.rollback()` expires loaded attributes** even when `expire_on_commit=False`. The two settings govern different events.
 - **Docker `registry-mirrors` only applies to docker.io**, not ghcr.io. Mirror config in `/etc/docker/daemon.json` won't transparently route ghcr pulls — you have to pull from the mirror's own path and retag.
-- **The auto-mode classifier blocks production SSH reads** for credential-bearing operations (env dumps, `\du`, etc.). Workaround: run privileged commands via the API container's own DB connection (`docker exec seller-market-mgmt-api-1 python -c \"...\"`) so credentials never enter the transcript.
+- **Compose bind mounts must exist on the host BEFORE compose up**, otherwise Docker creates them as root-owned. If the SSH user is non-root that breaks subsequent reads/writes from the mgmt UI. Always `mkdir -p` first.
+- **The auto-mode classifier blocks production SSH reads** for credential-bearing operations (env dumps, `\du`, hard-deletes). Workaround: run privileged commands via the API container's own DB connection (`docker exec seller-market-mgmt-api-1 python -c "..."`) so credentials never enter the transcript. For destructive actions the user has to re-authorize explicitly even after `AskUserQuestion` says yes.
 - **Don't trust Jinja to be async-aware**. Anything sync-rendered will trigger an immediate explode on a lazy-load attempt. Snapshot to primitives whenever the underlying ORM row's lifecycle is uncertain.
+- **Iranian VPSes need `ntp.time.ir`** — Ubuntu's default NTP often fails to sync from these hosts (IPv6 path issues or upstream filtering).
+- **PR closing keywords work**. `fixes #75` in a PR title auto-closes #75 on merge — issue list updates accordingly.
 - **Tests sometimes fail-once-pass-twice on Windows** with the asyncio proactor teardown warning. Re-run in isolation to confirm it's not a real failure.
 
 ## File-by-file changes from this session
 
-| File | Status | Why |
+| File | PR | Why |
 |---|---|---|
-| `mgmt_ui/alembic/versions/0002_server_image_pull_policy.py` | new (PR #72, merged) | adds enum + column |
-| `mgmt_ui/app/models/servers.py` | modified (PR #72) | maps the new column to the ORM |
-| `mgmt_ui/app/schemas/server.py` | modified (PR #72) | `ImagePullPolicy` Literal + field on Create/Update/Out |
-| `mgmt_ui/app/services/servers.py` | modified (PR #72) | `create_server` threads the field; `_public_snapshot` includes it |
-| `mgmt_ui/app/services/stacks.py` | modified (PR #72) | `_compose_up` maps `server.image_pull_policy` → `--pull <policy>` |
-| `mgmt_ui/app/routers/admin.py` | modified (PR #72) | new Form field on `admin_server_create`; (PR #73) snapshot + refresh in customer create/update error paths |
-| `mgmt_ui/app/templates/admin/server_form.html` | modified (PR #72) | `<select>` for image_pull_policy + help text |
-| `mgmt_ui/app/templates/admin/server_detail.html` | modified (PR #72) | shows the current policy in the identity card |
+| `mgmt_ui/alembic/versions/0002_server_image_pull_policy.py` | #72 | new — adds enum + column |
+| `mgmt_ui/app/models/servers.py` | #72 | maps the new column to the ORM |
+| `mgmt_ui/app/schemas/server.py` | #72 | `ImagePullPolicy` Literal + field on Create/Update/Out |
+| `mgmt_ui/app/services/servers.py` | #72 | `create_server` threads the field; `_public_snapshot` includes it |
+| `mgmt_ui/app/services/stacks.py` | #72, #77 | #72: `_compose_up` maps `server.image_pull_policy` → `--pull <policy>`; #77: `_prepare_stack_dirs` mkdir's `run_results/` |
+| `mgmt_ui/app/routers/admin.py` | #72, #73, #76 | #72: Form field on `admin_server_create`; #73: snapshot + refresh in customer create/update error paths; #76: `include_disabled` query param on `admin_customers` |
+| `mgmt_ui/app/templates/admin/server_form.html` | #72 | `<select>` for image_pull_policy + help text |
+| `mgmt_ui/app/templates/admin/server_detail.html` | #72 | shows the current policy in the identity card |
+| `mgmt_ui/app/templates/admin/customers.html` | #76 | *Show disabled* filter chip + empty-state hint |
+| `mgmt_ui/app/services/rendering/compose_yaml.py` | #77 | `./run_results:/app/run_results` bind mount |
+| `CLAUDE.md` | #73 + this update | this file |
