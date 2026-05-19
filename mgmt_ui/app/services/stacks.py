@@ -685,6 +685,14 @@ async def _compose_up(
     * Generally useful as a "reset this stack" knob for the admin — if a
       container is in a weird state, redeploy now reliably fixes it.
 
+    The ``--pull`` flag is derived from ``server.image_pull_policy``
+    (added in #71-incremental). ``always`` reproduces the historical
+    behaviour; ``never`` is the escape hatch for hosts where the registry
+    is unreachable (Iranian VPSes where ghcr.io is blocked) — the operator
+    pre-pulls + retags from a mirror manually and the redeploy then uses
+    the local image without contacting the registry. ``missing`` is the
+    docker-compose default (pull only if the image isn't local).
+
     The compose project name is shell-quoted defensively even though
     ``find_or_create_stack`` only ever produces ``sm-agent-<uuid>``-shaped
     values: UUIDs are ``[0-9a-f-]`` and present no quoting hazard, but a
@@ -692,9 +700,23 @@ async def _compose_up(
     hole. Same reasoning for ``stack_dir``.
     """
     run_command = _import_ssh_commands()
-    flags = " up -d"
+    # Map the per-server policy to docker-compose's --pull flag. We pass
+    # an explicit value even for ``always`` so the behaviour doesn't drift
+    # if compose's default ever changes.
+    pull_policy = getattr(server, "image_pull_policy", "always") or "always"
+    if pull_policy not in ("always", "missing", "never"):
+        # Defensive: a bad DB value (which shouldn't be possible — the
+        # column is an enum) shouldn't crash a redeploy. Fall back to
+        # the historical default.
+        logger.warning(
+            "server %s has unknown image_pull_policy=%r — defaulting to 'always'",
+            server.id, pull_policy,
+        )
+        pull_policy = "always"
+    pull_flag = f" --pull {pull_policy}"
+    flags = " up -d" + pull_flag
     if force_recreate:
-        flags = " up -d --force-recreate --pull always"
+        flags = " up -d --force-recreate" + pull_flag
     cmd = (
         f"docker compose -p {_shell_quote(stack.compose_project)} "
         f"-f {_shell_quote(stack.stack_dir + '/docker-compose.yml')}{flags}"

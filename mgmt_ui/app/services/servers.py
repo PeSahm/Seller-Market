@@ -253,6 +253,7 @@ def _public_snapshot(server: Server) -> dict:
         "host_key_pin": server.host_key_pin,
         "status": server.status,
         "base_dir": server.base_dir,
+        "image_pull_policy": getattr(server, "image_pull_policy", "always"),
     }
 
 
@@ -318,6 +319,7 @@ async def create_server(
         status="unknown",
         last_seen_at=None,
         base_dir=data.base_dir,
+        image_pull_policy=data.image_pull_policy,
     )
     db.add(server)
     # Flush so the DB-side default (gen_random_uuid) populates server.id.

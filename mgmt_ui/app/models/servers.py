@@ -27,6 +27,26 @@ server_status_enum = SAEnum(
     create_type=False,
 )
 
+# Issue #71-incremental: per-server image-pull policy.
+#
+# ``always`` (default) — current behaviour. ``docker compose up -d`` is
+# invoked with ``--pull always`` on redeploy so the trading host fetches
+# the latest tag from the registry every time.
+#
+# ``missing`` — pull only when the image isn't already present locally.
+# Mostly useful for staging.
+#
+# ``never`` — never pull. Designed for hosts where ``ghcr.io`` is blocked
+# (Iranian VPSes etc): the operator pre-pulls + retags via a mirror, and
+# the mgmt UI's redeploy uses the local image as-is.
+image_pull_policy_enum = SAEnum(
+    "always",
+    "missing",
+    "never",
+    name="server_image_pull_policy",
+    create_type=False,
+)
+
 
 class Server(Base):
     __tablename__ = "servers"
@@ -56,6 +76,13 @@ class Server(Base):
         String(512),
         nullable=False,
         server_default=text("'/root/seller-market/agents'"),
+    )
+    # See ``image_pull_policy_enum`` above. ``always`` matches the
+    # pre-#71 behaviour so existing servers are bytewise unchanged.
+    image_pull_policy: Mapped[str] = mapped_column(
+        image_pull_policy_enum,
+        nullable=False,
+        server_default=text("'always'"),
     )
     created_at: Mapped[datetime] = mapped_column(
         sa.TIMESTAMP(timezone=True),
