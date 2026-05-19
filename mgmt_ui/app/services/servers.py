@@ -677,12 +677,16 @@ async def test_connection(
             f"sudo install -d -m 0755 -o {ssh_user_safe} -g {ssh_user_safe} "
             f"{base_dir_safe}"
         )
-        # If the base path is under /root, append `chmod o+x /root` —
+        # If the base path is under root's home, append `chmod o+x /root` —
         # default /root mode 0700 blocks even traversal for a non-root
         # user, so without this the install would still fail. The mode
         # change is traversal-only ("o+x"): contents of /root keep their
         # own modes and aren't exposed.
-        if server.base_dir.startswith("/root"):
+        #
+        # Use a path-component test (== "/root" OR startswith("/root/"))
+        # rather than a bare prefix check — ``"/rooting".startswith("/root")``
+        # is True even though /rooting is unrelated to the root home dir.
+        if server.base_dir == "/root" or server.base_dir.startswith("/root/"):
             fix += " \\\n  && sudo chmod o+x /root"
         result.base_dir_fix_command = fix
 

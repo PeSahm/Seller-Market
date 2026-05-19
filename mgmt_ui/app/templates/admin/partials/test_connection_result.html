@@ -60,7 +60,7 @@
       <pre class="log-viewer" style="margin: 0 0 8px; padding: var(--s2); max-height: none;">{{ result.base_dir_fix_command }}</pre>
       <p class="text-small text-muted" style="margin: 4px 0 8px;">
         Creates <code>{{ base_dir_display }}</code> owned by
-        <code>{{ ssh_user_display }}</code> with mode 0755.{% if base_dir_display.startswith('/root') %}
+        <code>{{ ssh_user_display }}</code> with mode 0755.{% if (base_dir_display == '/root' or base_dir_display.startswith('/root/')) %}
         The <code>chmod o+x /root</code> grants traversal-into-/root for
         non-root users (default on most distros is 0700, blocking
         non-root from even <code>cd /root</code>); it doesn't expose
