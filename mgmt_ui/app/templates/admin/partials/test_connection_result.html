@@ -30,6 +30,52 @@
   <dt>Docker</dt>
   <dd>{% if result.docker_version %}<code class="text-small">{{ result.docker_version }}</code>
        {% else %}<span class="badge badge--down">not installed</span>{% endif %}</dd>
+  <dt>Base directory writable</dt>
+  <dd>
+    {# Issue #67: surface "SSH user can't write under base_dir" before
+       the operator clicks Provision and hits `mkdir: Permission denied`. #}
+    {% if result.base_dir_writable %}
+      <span class="badge badge--up">yes</span>
+      {% if result.base_dir_probed %}
+      <span class="text-small text-muted">— <code>{{ result.base_dir_probed }}</code></span>
+      {% endif %}
+    {% elif result.base_dir_writable is none %}
+      <span class="text-muted">—</span>
+    {% else %}
+      <span class="badge badge--down">denied ⚠</span>
+      {# Default placeholder is plain text (no angle brackets) so HTML
+         lint tools don't mistake it for an unclosed tag. #}
+      {% set ssh_user_display = result.ssh_user or 'ssh-user' %}
+      {% set base_dir_display = result.base_dir_probed %}
+      <p class="text-small text-muted" style="margin: 4px 0 0;">
+        The SSH user <code>{{ ssh_user_display }}</code> can't write under
+        <code>{{ base_dir_display }}</code>. Provisioning will fail with
+        <code>mkdir: Permission denied</code>.
+      </p>
+      {% if result.base_dir_fix_command %}
+      <p class="text-small" style="margin: 8px 0 4px;"><strong>Quickest fix</strong> — copy &amp; paste this on the trading host (as a user with sudo):</p>
+      {# Pre-rendered server-side using shlex.quote on every interpolated
+         token so spaces or metacharacters in ssh_user / base_dir can't
+         produce a broken or dangerous pasted command. #}
+      <pre class="log-viewer" style="margin: 0 0 8px; padding: var(--s2); max-height: none;">{{ result.base_dir_fix_command }}</pre>
+      <p class="text-small text-muted" style="margin: 4px 0 8px;">
+        Creates <code>{{ base_dir_display }}</code> owned by
+        <code>{{ ssh_user_display }}</code> with mode 0755.{% if (base_dir_display == '/root' or base_dir_display.startswith('/root/')) %}
+        The <code>chmod o+x /root</code> grants traversal-into-/root for
+        non-root users (default on most distros is 0700, blocking
+        non-root from even <code>cd /root</code>); it doesn't expose
+        <code>/root</code>'s contents — they keep their own mode bits.
+        Skip this part if you're keeping a hardened <code>/root</code>.{% endif %}
+      </p>
+      {% endif %}
+      <p class="text-small" style="margin: 8px 0 4px;"><strong>Other options:</strong></p>
+      <ul class="text-small text-muted" style="margin: 4px 0 0 16px; padding: 0;">
+        <li>Edit this server and set <strong>SSH user</strong> to <code>root</code> (no host-side change needed).</li>
+        <li>Or change <strong>Base directory</strong> to a path the SSH user already owns, e.g.
+            <code>/home/{{ ssh_user_display }}/seller-market/agents</code>.</li>
+      </ul>
+    {% endif %}
+  </dd>
 </dl>
 {% elif result.host_key_mismatch %}
 <div class="flash flash--error">

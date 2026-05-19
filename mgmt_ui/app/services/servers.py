@@ -38,6 +38,7 @@ import base64
 import logging
 import os
 import re
+import shlex
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -552,6 +553,27 @@ async def test_connection(
         return result
 
     local_unix_before = int(time.time())
+    # Issue #67: detect "SSH user can't write under base_dir" BEFORE the
+    # operator clicks Provision and hits a confusing `mkdir: Permission
+    # denied`. If the dir exists, require it to be both a directory AND
+    # writable; if it doesn't exist yet (typical on a fresh box), walk up
+    # the ancestor tree to the nearest existing path and check that — that
+    # mirrors what `mkdir -p` actually does (it walks up from the leaf and
+    # creates every intermediate dir). The single-`dirname` shape would
+    # report "denied" when only the leaf's parent is missing but the
+    # grandparent is writable — exactly when mkdir -p would succeed.
+    base_dir_q = shlex.quote(server.base_dir)
+    base_dir_writable_cmd = (
+        f"if test -e {base_dir_q}; then "
+        f"test -d {base_dir_q} && test -w {base_dir_q}; "
+        f"else "
+        f"p=\"$(dirname {base_dir_q})\"; "
+        f"while test ! -e \"$p\" && test \"$p\" != /; do "
+        f"p=\"$(dirname \"$p\")\"; "
+        f"done; "
+        f"test -w \"$p\"; "
+        f"fi"
+    )
     try:
         remote_now_res = await run_command(
             server, "date +%s", timeout=10, check=True
@@ -565,6 +587,12 @@ async def test_connection(
         docker_res = await run_command(
             server,
             "docker --version 2>/dev/null || true",
+            timeout=10,
+            check=False,
+        )
+        base_dir_res = await run_command(
+            server,
+            base_dir_writable_cmd,
             timeout=10,
             check=False,
         )
@@ -627,6 +655,40 @@ async def test_connection(
     docker_stdout = getattr(docker_res, "stdout", "") or ""
     docker_version = docker_stdout.strip()
     result.docker_version = docker_version or None
+
+    # Issue #67: surface "SSH user can't write under base_dir" before the
+    # operator hits Provision. ``ssh_user`` is echoed so the template can
+    # render a copy-pastable fix command naming the actual user.
+    result.base_dir_probed = server.base_dir
+    result.ssh_user = server.ssh_user
+    result.base_dir_writable = (
+        getattr(base_dir_res, "exit_code", None) == 0
+    )
+    # When the probe says "denied", pre-render the fix line server-side
+    # using shlex.quote on every interpolated value. Building this in the
+    # template would force the template to do shell-quoting (Jinja's
+    # ``|escape`` is HTML-only) — values like ``ssh_user="some user"`` or
+    # ``base_dir`` with spaces could otherwise produce a broken or
+    # injection-hazard pasted command.
+    if result.base_dir_writable is False:
+        ssh_user_safe = shlex.quote(server.ssh_user)
+        base_dir_safe = shlex.quote(server.base_dir)
+        fix = (
+            f"sudo install -d -m 0755 -o {ssh_user_safe} -g {ssh_user_safe} "
+            f"{base_dir_safe}"
+        )
+        # If the base path is under root's home, append `chmod o+x /root` —
+        # default /root mode 0700 blocks even traversal for a non-root
+        # user, so without this the install would still fail. The mode
+        # change is traversal-only ("o+x"): contents of /root keep their
+        # own modes and aren't exposed.
+        #
+        # Use a path-component test (== "/root" OR startswith("/root/"))
+        # rather than a bare prefix check — ``"/rooting".startswith("/root")``
+        # is True even though /rooting is unrelated to the root home dir.
+        if server.base_dir == "/root" or server.base_dir.startswith("/root/"):
+            fix += " \\\n  && sudo chmod o+x /root"
+        result.base_dir_fix_command = fix
 
     # ---- 4) Persist sample + status update -------------------------------
 

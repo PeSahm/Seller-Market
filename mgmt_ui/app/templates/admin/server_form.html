@@ -47,6 +47,11 @@
       <input class="input" id="ssh_user" name="ssh_user" required
              value="{{ fv.ssh_user|default('') }}"
              placeholder="root or a non-root user with sudo" maxlength="64">
+      <p class="text-small text-muted">
+        Must have <strong>write access</strong> to <em>Base directory</em>
+        (or its parent) on the trading server. The default base
+        <code>/root/seller-market/agents</code> requires <code>root</code>.
+      </p>
     </div>
     <div class="field field--grow">
       <label class="label" for="base_dir">Base directory</label>
@@ -54,7 +59,11 @@
              value="{{ fv.base_dir|default('/root/seller-market/agents') }}" maxlength="512">
       <p class="text-small text-muted">
         Mgmt UI will only create files under this path. The existing
-        <code>/root/seller-market/</code> is left untouched.
+        <code>/root/seller-market/</code> is left untouched. If your
+        SSH user isn't <code>root</code>, pick a path it owns —
+        <code>/home/&lt;ssh-user&gt;/seller-market/agents</code> is the
+        usual choice. The next "Test connection" run will verify the
+        SSH user can actually write here.
       </p>
     </div>
   </div>
