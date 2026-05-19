@@ -9,11 +9,73 @@ import time
 import subprocess
 import logging
 import shlex
-from datetime import datetime, timedelta
+import uuid
+from datetime import datetime, timedelta, timezone
 from threading import Thread, Event
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Issue #62: scheduled-run marker emission for the mgmt UI ingestor.
+#
+# We write a `scheduled_run_<id>.running.json` BEFORE the subprocess starts
+# and replace it with a final `scheduled_run_<id>.json` once the subprocess
+# returns (or times out). The mgmt UI's scheduled_run_ingestor polls the
+# `run_results/` directory of every stack via SFTP, UPSERTs `runs` rows on
+# the scheduled_run_id, and archives the captured tails into the local log
+# blob store — exactly the same shape a manually-triggered run produces.
+# ---------------------------------------------------------------------------
+
+def _infer_mgmt_job_name(parsed_command) -> Optional[str]:
+    """Map a scheduler.py job command to the mgmt UI's ``runs.job_name`` enum.
+
+    The enum (see ``mgmt_ui/app/models/runs.py::run_job_name_enum``) is a
+    closed set: ``cache_warmup`` and ``run_trading``. If the command is
+    something else (test scripts, ad-hoc python, custom locust invocations)
+    we return ``None`` and silently skip marker emission so unrelated jobs
+    don't surface as broken rows in the mgmt UI.
+    """
+    if not parsed_command:
+        return None
+    executable = parsed_command[0]
+    if executable == "python":
+        for arg in parsed_command[1:]:
+            if arg.endswith("cache_warmup.py"):
+                return "cache_warmup"
+    if executable == "locust":
+        return "run_trading"
+    return None
+
+
+def _emit_scheduled_run_marker(path: str, payload: Dict[str, Any]) -> bool:
+    """Atomic-ish write of a scheduled-run marker JSON.
+
+    Writes to a temp file in the same directory and ``os.replace``s it
+    over the target — that's atomic on the same filesystem and avoids
+    the ingestor ever reading a half-written file. Marker emission is
+    best-effort: if we can't create the directory or write the file we
+    log and continue, never propagate. The scheduled job MUST run even
+    if the mgmt UI plumbing is broken.
+
+    Returns ``True`` on success, ``False`` on any failure. Callers that
+    delete the running marker after writing the final one MUST gate the
+    delete on this return — otherwise a failed final-write leaves the
+    mgmt UI's row stuck at status='running' forever.
+    """
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+            f.flush()
+        os.replace(tmp, path)
+        return True
+    except Exception:  # noqa: BLE001 — never let marker I/O block the job
+        logger.exception("failed to emit scheduled-run marker at %s", path)
+        return False
+
 
 def load_locust_config() -> Dict[str, Any]:
     """
@@ -216,7 +278,35 @@ class JobScheduler:
             job_time_str = job.get('time', '')
             job_key = f"{job_name}_{now.date().isoformat()}_{job_time_str}"
             self.executed_today[job_key] = now
-            
+
+            # Issue #62: emit a marker file the mgmt UI's scheduled_run_ingestor
+            # picks up so this scheduled fire shows in the Runs list. We pick a
+            # UUID4 here that becomes the mgmt-side `runs.id` (UPSERTed by the
+            # ingestor) so the running → terminal transition is idempotent.
+            # The "mgmt_job_name" maps the local job spec to the enum the mgmt
+            # UI's runs table expects (cache_warmup / run_trading). Jobs that
+            # don't match either get None and are silently NOT tracked — the
+            # ingestor only knows those two kinds today.
+            scheduled_run_id = str(uuid.uuid4())
+            mgmt_job_name = _infer_mgmt_job_name(parsed_command)
+            started_at_iso = datetime.now(timezone.utc).isoformat()
+            run_results_dir = os.path.join(os.path.dirname(__file__), "run_results")
+            running_marker = os.path.join(run_results_dir, f"scheduled_run_{scheduled_run_id}.running.json")
+            final_marker = os.path.join(run_results_dir, f"scheduled_run_{scheduled_run_id}.json")
+            if mgmt_job_name is not None:
+                _emit_scheduled_run_marker(
+                    running_marker,
+                    {
+                        "schema_version": 1,
+                        "scheduled_run_id": scheduled_run_id,
+                        "job_name": mgmt_job_name,
+                        "trigger": "scheduled",
+                        "started_at": started_at_iso,
+                        "command": command_for_logging,
+                        "status": "running",
+                    },
+                )
+
             # Execute command with current environment variables (shell=False for security)
             start_ts = time.monotonic()
             result = subprocess.run(
@@ -229,6 +319,7 @@ class JobScheduler:
                 env=os.environ.copy()  # Pass environment variables to subprocess
             )
             elapsed_s = time.monotonic() - start_ts
+            finished_at_iso = datetime.now(timezone.utc).isoformat()
 
             if result.returncode == 0:
                 logger.info(f"✅ Job '{job_name}' completed successfully in {elapsed_s:.1f}s")
@@ -245,8 +336,77 @@ class JobScheduler:
                 logger.debug(f"Full stdout ({len(result.stdout)} chars):\n{result.stdout}")
                 logger.debug(f"Full stderr ({len(result.stderr)} chars):\n{result.stderr}")
 
+            # Final marker for the mgmt UI ingestor — includes terminal status
+            # and trimmed stdout/stderr tails so the ingestor can archive the
+            # log without us writing 100s of MB. The 4 KB cap mirrors what
+            # finalize_run keeps for an actually-streamed manual run.
+            if mgmt_job_name is not None:
+                final_written = _emit_scheduled_run_marker(
+                    final_marker,
+                    {
+                        "schema_version": 1,
+                        "scheduled_run_id": scheduled_run_id,
+                        "job_name": mgmt_job_name,
+                        "trigger": "scheduled",
+                        "started_at": started_at_iso,
+                        "finished_at": finished_at_iso,
+                        "elapsed_seconds": round(elapsed_s, 3),
+                        "exit_code": int(result.returncode),
+                        "status": "success" if result.returncode == 0 else "failed",
+                        "stdout_tail": (result.stdout or "")[-4096:],
+                        "stderr_tail": (result.stderr or "")[-4096:],
+                        "command": command_for_logging,
+                    },
+                )
+                # Only delete the running marker if the final marker
+                # actually persisted. Otherwise a transient disk-full /
+                # permission glitch would leave the mgmt UI's row stuck
+                # at status='running' AND no terminal marker for the
+                # ingestor to ever pick up.
+                if final_written:
+                    try:
+                        os.remove(running_marker)
+                    except OSError:
+                        pass
+                else:
+                    logger.warning(
+                        "final marker write failed for scheduled_run_id=%s — "
+                        "leaving running marker in place so a future tick can retry",
+                        scheduled_run_id,
+                    )
+
         except subprocess.TimeoutExpired:
             logger.error(f"⏱️ Job '{job_name}' timed out after 10 minutes")
+            # If we already wrote a running marker, replace it with a
+            # timeout-final marker so the mgmt UI doesn't show this run as
+            # stuck-running forever.
+            try:
+                if 'mgmt_job_name' in locals() and mgmt_job_name is not None:
+                    final_written = _emit_scheduled_run_marker(
+                        final_marker,
+                        {
+                            "schema_version": 1,
+                            "scheduled_run_id": scheduled_run_id,
+                            "job_name": mgmt_job_name,
+                            "trigger": "scheduled",
+                            "started_at": started_at_iso,
+                            "finished_at": datetime.now(timezone.utc).isoformat(),
+                            "exit_code": -1,
+                            "status": "failed",
+                            "stdout_tail": "",
+                            "stderr_tail": "subprocess timed out after 10 minutes",
+                            "command": command_for_logging,
+                        },
+                    )
+                    # Same gate as the happy path — never strand the running
+                    # marker if the final write didn't land.
+                    if final_written:
+                        try:
+                            os.remove(running_marker)
+                        except OSError:
+                            pass
+            except Exception:
+                logger.exception("failed to emit timeout marker for scheduled_run")
         except Exception as e:
             logger.error(f"❌ Error executing job '{job_name}': {e}")
     
