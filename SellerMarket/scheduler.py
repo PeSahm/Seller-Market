@@ -49,7 +49,7 @@ def _infer_mgmt_job_name(parsed_command) -> Optional[str]:
     return None
 
 
-def _emit_scheduled_run_marker(path: str, payload: Dict[str, Any]) -> None:
+def _emit_scheduled_run_marker(path: str, payload: Dict[str, Any]) -> bool:
     """Atomic-ish write of a scheduled-run marker JSON.
 
     Writes to a temp file in the same directory and ``os.replace``s it
@@ -58,6 +58,11 @@ def _emit_scheduled_run_marker(path: str, payload: Dict[str, Any]) -> None:
     best-effort: if we can't create the directory or write the file we
     log and continue, never propagate. The scheduled job MUST run even
     if the mgmt UI plumbing is broken.
+
+    Returns ``True`` on success, ``False`` on any failure. Callers that
+    delete the running marker after writing the final one MUST gate the
+    delete on this return — otherwise a failed final-write leaves the
+    mgmt UI's row stuck at status='running' forever.
     """
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -66,8 +71,10 @@ def _emit_scheduled_run_marker(path: str, payload: Dict[str, Any]) -> None:
             json.dump(payload, f, ensure_ascii=False)
             f.flush()
         os.replace(tmp, path)
+        return True
     except Exception:  # noqa: BLE001 — never let marker I/O block the job
         logger.exception("failed to emit scheduled-run marker at %s", path)
+        return False
 
 
 def load_locust_config() -> Dict[str, Any]:
@@ -334,7 +341,7 @@ class JobScheduler:
             # log without us writing 100s of MB. The 4 KB cap mirrors what
             # finalize_run keeps for an actually-streamed manual run.
             if mgmt_job_name is not None:
-                _emit_scheduled_run_marker(
+                final_written = _emit_scheduled_run_marker(
                     final_marker,
                     {
                         "schema_version": 1,
@@ -351,15 +358,22 @@ class JobScheduler:
                         "command": command_for_logging,
                     },
                 )
-                # The running marker is what the ingestor uses to know "a row
-                # already exists in `runs` for this scheduled_run_id". The
-                # final marker carries the same id so the ingestor can UPDATE
-                # the existing row — we delete the running marker so we don't
-                # keep re-emitting "running" status forever.
-                try:
-                    os.remove(running_marker)
-                except OSError:
-                    pass
+                # Only delete the running marker if the final marker
+                # actually persisted. Otherwise a transient disk-full /
+                # permission glitch would leave the mgmt UI's row stuck
+                # at status='running' AND no terminal marker for the
+                # ingestor to ever pick up.
+                if final_written:
+                    try:
+                        os.remove(running_marker)
+                    except OSError:
+                        pass
+                else:
+                    logger.warning(
+                        "final marker write failed for scheduled_run_id=%s — "
+                        "leaving running marker in place so a future tick can retry",
+                        scheduled_run_id,
+                    )
 
         except subprocess.TimeoutExpired:
             logger.error(f"⏱️ Job '{job_name}' timed out after 10 minutes")
@@ -368,7 +382,7 @@ class JobScheduler:
             # stuck-running forever.
             try:
                 if 'mgmt_job_name' in locals() and mgmt_job_name is not None:
-                    _emit_scheduled_run_marker(
+                    final_written = _emit_scheduled_run_marker(
                         final_marker,
                         {
                             "schema_version": 1,
@@ -384,10 +398,13 @@ class JobScheduler:
                             "command": command_for_logging,
                         },
                     )
-                    try:
-                        os.remove(running_marker)
-                    except OSError:
-                        pass
+                    # Same gate as the happy path — never strand the running
+                    # marker if the final write didn't land.
+                    if final_written:
+                        try:
+                            os.remove(running_marker)
+                        except OSError:
+                            pass
             except Exception:
                 logger.exception("failed to emit timeout marker for scheduled_run")
         except Exception as e:

@@ -223,21 +223,45 @@ async def _upsert_run_from_marker(
         db.add(run)
         await db.flush()
         await _archive_log_if_final(run, payload)
+        run_snapshot = {
+            "id": str(run.id), "stack_id": str(run.stack_id),
+            "agent_id": str(run.agent_id), "job_name": run.job_name,
+            "trigger": run.trigger, "status": run.status,
+            "exit_code": run.exit_code,
+        }
+        # Always emit a ``run.start`` audit row so the run-detail audit
+        # trail records the start event even when we only ever observe
+        # the final marker (common case with 30s polling against short
+        # cache_warmup runs). The ``after_json`` snapshots the row at
+        # logical start (running, no exit_code, no finished_at) so the
+        # diff against the terminal audit below reads cleanly.
+        start_snapshot = {
+            **run_snapshot,
+            "status": "running",
+            "exit_code": None,
+        }
         db.add(AuditLog(
             actor_user_id=None,
-            action="run.start" if raw_status == "running" else "run.complete"
-            if raw_status == "success" else "run.fail",
+            action="run.start",
             target_type="run",
             target_id=str(run.id),
             before_json=None,
-            after_json={
-                "id": str(run.id), "stack_id": str(run.stack_id),
-                "agent_id": str(run.agent_id), "job_name": run.job_name,
-                "trigger": run.trigger, "status": run.status,
-                "exit_code": run.exit_code,
-            },
+            after_json=start_snapshot,
             ts=datetime.now(timezone.utc),
         ))
+        # If this insert ALSO carries a terminal state (one-tick case),
+        # emit the matching run.complete / run.fail right after so the
+        # audit reflects the actual landing state, not just the start.
+        if raw_status != "running":
+            db.add(AuditLog(
+                actor_user_id=None,
+                action="run.complete" if raw_status == "success" else "run.fail",
+                target_type="run",
+                target_id=str(run.id),
+                before_json=start_snapshot,
+                after_json=run_snapshot,
+                ts=datetime.now(timezone.utc),
+            ))
         return "inserted", raw_status
 
     # Existing row — only meaningful transition is running → terminal.
@@ -322,21 +346,29 @@ async def ingest_stack_once(
             text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": lock_key}
         )
         if not gate.scalar():
+            # rollback() releases the advisory lock (it's transaction-
+            # scoped) and the connection back to the pool. Without this
+            # the lock sits with us until the caller's `async with` exits,
+            # which on a busy fleet can be many seconds longer than needed.
+            await db.rollback()
             result.errors.append("another tick is in flight for this stack")
             return result
 
         stack = await db.get(AgentStack, stack_id)
         if stack is None:
+            await db.rollback()
             result.errors.append(f"stack {stack_id} not found")
             return result
         server = await db.get(Server, stack.server_id)
         if server is None:
+            await db.rollback()
             result.errors.append(f"server {stack.server_id} not found")
             return result
 
         try:
             markers = await _list_markers(server, stack)
         except SSHError as exc:
+            await db.rollback()
             result.errors.append(f"ssh list failed: {exc}")
             return result
         result.files_seen = len(markers)
@@ -345,12 +377,24 @@ async def ingest_stack_once(
         for m in markers:
             payload = await _fetch_marker(server, m.full_path)
             if payload is None:
+                # Couldn't even read the file — leave it for the next
+                # tick rather than risk losing a marker that might be
+                # parseable on retry.
                 result.rows_skipped += 1
                 continue
+            # Wrap each UPSERT in a savepoint. If `_archive_log_if_final`
+            # (file I/O — disk full, perm denied) raises mid-marker,
+            # SQLAlchemy rolls back to BEFORE the dirty Run/AuditLog
+            # additions for THIS marker only. Without the savepoint,
+            # the eventual `await db.commit()` below would persist a
+            # Run row without its log archive / matching audit, leaving
+            # an inconsistent partial in the database.
+            action: str = "skipped"
             try:
-                action, _ = await _upsert_run_from_marker(
-                    db, stack=stack, payload=payload
-                )
+                async with db.begin_nested():
+                    action, _ = await _upsert_run_from_marker(
+                        db, stack=stack, payload=payload
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("upsert failed for %s", m.name)
                 result.errors.append(f"{m.name}: {exc}")
@@ -361,9 +405,15 @@ async def ingest_stack_once(
                 result.rows_updated += 1
             else:
                 result.rows_skipped += 1
-            # Schedule the remote delete; we do them after the DB commit
-            # so a rollback doesn't leave the file gone on the bot side.
-            deletes.append(m.full_path)
+            # Only schedule the remote delete when the marker actually
+            # persisted into a row. Skipped markers — schema-version
+            # mismatch, unknown job_name, malformed UUID, terminal-row
+            # collision — get LEFT IN PLACE so a future ingestor that
+            # understands the new schema (or a fixed bot) can still
+            # process them. Deleting on skip would turn a temporary
+            # version skew into permanent data loss.
+            if action in ("inserted", "updated"):
+                deletes.append(m.full_path)
 
         await db.commit()
         for path in deletes:
