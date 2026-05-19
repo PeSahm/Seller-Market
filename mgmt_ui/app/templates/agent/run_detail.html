@@ -118,16 +118,40 @@
     });
 
     function wireWs(ws) {
+    // Issue #65: ``pane.textContent += line + "\n"`` was O(n²) — each
+    // append copies the entire growing string. A 44-customer warmup makes
+    // a few hundred lines; a 120 s locust race tens of thousands. Keep
+    // lines in an array, cap at MAX_LINES, and let requestAnimationFrame
+    // batch DOM updates at ≤60 Hz so a burst of incoming frames doesn't
+    // queue thousands of layout passes.
+    var MAX_LINES = 5000;
+    var lines = pane.textContent ? pane.textContent.split("\n") : [];
+    if (lines.length && lines[lines.length - 1] === "") lines.pop();
+    var rafPending = false;
+
+    function scheduleFlush() {
+      if (rafPending) return;
+      rafPending = true;
+      requestAnimationFrame(flush);
+    }
+    function flush() {
+      rafPending = false;
+      var nearBottom = (pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 40);
+      pane.textContent = lines.join("\n");
+      if (nearBottom) { pane.scrollTop = pane.scrollHeight; }
+    }
+
     ws.onopen = function () {
       if (statusEl) { statusEl.textContent = "live"; statusEl.className = "badge badge--up text-small"; }
     };
     ws.onmessage = function (ev) {
-      // Append chunk + newline (each WS message is one bot log line; the
-      // server doesn't include the trailing \n). Keep the view pinned to
-      // the bottom unless the user has scrolled up to read history.
-      var nearBottom = (pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 40);
-      pane.textContent += ev.data + "\n";
-      if (nearBottom) { pane.scrollTop = pane.scrollHeight; }
+      // Each WS message is one bot log line (server doesn't include the
+      // trailing \n). Stash into the array; rAF will flush.
+      lines.push(ev.data);
+      if (lines.length > MAX_LINES * 2) {
+        lines.splice(0, lines.length - MAX_LINES);
+      }
+      scheduleFlush();
       // Explicit done-sentinel sent by the executor when the underlying
       // docker exec finishes. Flip the badge to "finished" immediately
       // instead of waiting for the WS close, which can lag.
