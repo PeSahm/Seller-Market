@@ -84,10 +84,12 @@
     </select>
     <p class="text-small text-muted">
       Pick <strong>never</strong> for hosts in restricted-egress environments
-      (e.g. Iranian VPSes where <code>ghcr.io</code> is blocked). You'll need to
-      pre-pull the bot image via a mirror and retag it as
-      <code>ghcr.io/pesahm/seller-market:latest</code> on the trading host
-      yourself. See <a href="https://github.com/PeSahm/Seller-Market/issues/71" target="_blank" rel="noopener">issue #71</a>
+      (e.g. Iranian VPSes where <code>ghcr.io</code> is blocked). You'll need
+      to pre-pull the bot image via a mirror and retag it on the trading host
+      as whatever's configured under <a href="/admin/settings">Admin → Settings →
+      Agent image tag</a> (so the local image satisfies the compose file
+      without needing a registry round-trip). See
+      <a href="https://github.com/PeSahm/Seller-Market/issues/71" target="_blank" rel="noopener">issue #71</a>
       for the full workaround.
     </p>
   </div>
