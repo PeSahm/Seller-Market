@@ -150,6 +150,32 @@
       if (banner) { banner.style.display = 'block'; }
     }
 
+    // Issue #65: ``log.textContent += line + '\n'`` was O(n²) — each
+    // append copies the entire growing string. A 44-customer cache_warmup
+    // round produces a few hundred lines; a 120 s locust race tens of
+    // thousands. We instead keep lines in an array, cap at MAX_LINES,
+    // and let requestAnimationFrame batch DOM updates at ≤60 Hz so a
+    // burst of incoming frames doesn't queue thousands of layout passes.
+    var MAX_LINES = 5000;
+    // Seed from any pre-rendered archived log (empty for a brand-new
+    // running run; on a refresh of a finished run the server pre-renders
+    // the whole log into the <pre>).
+    var lines = log.textContent ? log.textContent.split('\n') : [];
+    if (lines.length && lines[lines.length - 1] === '') lines.pop();
+    var rafPending = false;
+
+    function scheduleFlush() {
+      if (rafPending) return;
+      rafPending = true;
+      requestAnimationFrame(flush);
+    }
+    function flush() {
+      rafPending = false;
+      var nearBottom = (log.scrollTop + log.clientHeight >= log.scrollHeight - 40);
+      log.textContent = lines.join('\n');
+      if (nearBottom) { log.scrollTop = log.scrollHeight; }
+    }
+
     ws.onopen = function() {
       if (statusEl) {
         statusEl.textContent = 'live';
@@ -164,8 +190,13 @@
       if (e.data && e.data.indexOf('<run-stream> done') === 0) {
         markFinished('finished');
       }
-      log.textContent += e.data + '\n';
-      log.scrollTop = log.scrollHeight;
+      lines.push(e.data);
+      // Trim opportunistically — only when we've grown past 2x the cap,
+      // so the slice is amortised O(1) per push.
+      if (lines.length > MAX_LINES * 2) {
+        lines.splice(0, lines.length - MAX_LINES);
+      }
+      scheduleFlush();
     };
     ws.onclose = function() {
       // If we didn't already see the explicit "done" sentinel, this
