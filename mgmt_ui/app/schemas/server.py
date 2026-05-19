@@ -164,4 +164,10 @@ class TestConnectionResult(BaseModel):
     base_dir_writable: Optional[bool] = None
     base_dir_probed: Optional[str] = None
     ssh_user: Optional[str] = None
+    # Pre-rendered copy/paste fix command, built server-side using
+    # ``shlex.quote`` for every interpolated token so values containing
+    # spaces or shell metacharacters can't produce a broken or dangerous
+    # pasted command. ``None`` when ``base_dir_writable`` is not False
+    # (success / probe didn't run).
+    base_dir_fix_command: Optional[str] = None
     message: str = ""
