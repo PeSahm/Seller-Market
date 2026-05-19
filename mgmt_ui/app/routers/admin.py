@@ -764,6 +764,14 @@ async def admin_customer_create(
             db, agent_id, payload, actor_id=user.id
         )
     except ValueError as exc:
+        # ``create_customer`` does ``db.rollback()`` on duplicate-tuple
+        # IntegrityError before re-raising as ValueError. The rollback
+        # expires every loaded attribute on the session, including the
+        # ``user`` object — and ``page_shell.html`` then touches
+        # ``current_user.role`` / ``current_user.username``. Refresh it
+        # here so the (sync) Jinja render doesn't trigger a lazy-load
+        # via ``do_ping_w_event`` and explode with ``MissingGreenlet``.
+        await db.refresh(user)
         agents = await services_agents.list_agents(db)
         ctx = _ctx(request, user, current_tab="/admin/customers")
         ctx["agents"] = agents
@@ -902,21 +910,45 @@ async def admin_customer_update(
         raise HTTPException(status_code=404, detail="customer not found")
     agent = await services_agents.get_agent(db, customer.agent_id)
 
+    # Snapshot every customer/agent attribute the error renderer needs into
+    # plain primitives BEFORE we hand the row off to ``update_customer``. The
+    # service does ``db.rollback()`` on a duplicate-tuple IntegrityError before
+    # raising ``ValueError`` — that expires every loaded attribute on the
+    # session, so anything the renderer touches on the ORM object afterwards
+    # triggers a sync lazy-load and explodes with ``MissingGreenlet`` (the
+    # renderer is a plain closure, not an async coroutine).
+    _customer_snap = {
+        "id": str(customer.id),
+        "agent_id": str(customer.agent_id),
+        "display_name": customer.display_name,
+        "broker": customer.broker,
+        "isin": customer.isin,
+        "side": customer.side,
+        "username": customer.username,
+        "comment": customer.comment,
+        "version": customer.version,
+    }
+    _agent_username_snap = agent.username if agent is not None else None
+
     def _render_with_error(message: str, code: int):
         form_values = {
-            "agent_id": str(customer.agent_id),
-            "display_name": display_name if display_name is not None else customer.display_name,
-            "broker": broker if broker is not None and broker != "" else customer.broker,
-            "isin": isin if isin is not None and isin != "" else customer.isin,
-            "side": str(side if side is not None else customer.side),
-            "username": username if username is not None and username != "" else customer.username,
-            "comment": comment if comment is not None else (customer.comment or ""),
+            "agent_id": _customer_snap["agent_id"],
+            "display_name": display_name if display_name is not None else _customer_snap["display_name"],
+            "broker": broker if broker is not None and broker != "" else _customer_snap["broker"],
+            "isin": isin if isin is not None and isin != "" else _customer_snap["isin"],
+            "side": str(side if side is not None else _customer_snap["side"]),
+            "username": username if username is not None and username != "" else _customer_snap["username"],
+            "comment": comment if comment is not None else (_customer_snap["comment"] or ""),
             "enabled": enabled == "on",
-            "version": customer.version,
+            "version": _customer_snap["version"],
         }
+        # Pass the same primitives to the template via lightweight stand-ins
+        # so any ``customer.id`` / ``agent.username`` reference in the
+        # template doesn't try to lazy-load off the expired ORM row.
+        from types import SimpleNamespace
         ctx = _ctx(request, user, current_tab="/admin/customers")
-        ctx["customer"] = customer
-        ctx["agent"] = agent
+        ctx["customer"] = SimpleNamespace(**_customer_snap)
+        ctx["agent"] = SimpleNamespace(username=_agent_username_snap) if agent is not None else None
         ctx["form_error"] = message
         ctx["form_values"] = form_values
         ctx["mode"] = "edit"
@@ -939,12 +971,20 @@ async def admin_customer_update(
             db, customer_id, payload, actor_id=user.id
         )
     except OptimisticLockError:
+        # ``update_customer`` raises this BEFORE attempting any flush, so
+        # nothing was rolled back; user attrs are still live and no
+        # refresh is needed.
         return _render_with_error(
             "This customer was changed by someone else while you were "
             "editing. Reload the page and re-apply your changes.",
             status.HTTP_409_CONFLICT,
         )
     except ValueError as exc:
+        # See the matching comment in ``admin_customer_create``: after a
+        # rollback, ``current_user``'s attrs are expired and the shared
+        # ``page_shell.html`` will trigger a sync lazy-load that explodes.
+        # Refresh proactively so the renderer never reaches for the wire.
+        await db.refresh(user)
         return _render_with_error(str(exc), status.HTTP_400_BAD_REQUEST)
 
     # Push the updated config.ini so the next bot run reads the new field
