@@ -6,9 +6,10 @@
   <div>
     <h1 class="h1">Customers</h1>
     <p class="text-muted text-small">
-      Agent-owned trading accounts. Each row generates a <code>[section]</code>
-      block in the on-server <code>config.ini</code> once it has been assigned
-      to a server.
+      Agent-owned brokerage accounts. Each customer can have many trade
+      instructions; the renderer crosses Customer × TradeInstruction
+      to produce one <code>[section]</code> per trade in the on-server
+      <code>config.ini</code>.
     </p>
   </div>
   <div class="header-actions">
@@ -17,9 +18,10 @@
   </div>
 </div>
 
-{# Filter chips — agent / status / broker round-trip via query string so the
-   filtered view is bookmarkable. #}
+{# Filter chips + search. All round-trip via query string. #}
 <form method="get" action="/admin/customers" class="filter-bar">
+  <input type="search" name="q" class="input" placeholder="Search by name or username…"
+         value="{{ filter_q|default('') }}" style="min-width: 220px;">
   <select name="agent_id" class="input">
     <option value="">All agents</option>
     {% for a in all_agents %}
@@ -46,7 +48,7 @@
     Show disabled
   </label>
   <button class="btn btn--ghost btn--sm" type="submit">Filter</button>
-  {% if filter_agent_id or filter_status or filter_broker or filter_include_disabled %}
+  {% if filter_q or filter_agent_id or filter_status or filter_broker or filter_include_disabled %}
     <a class="btn btn--ghost btn--sm" href="/admin/customers">Clear</a>
   {% endif %}
 </form>
@@ -54,15 +56,11 @@
 {% if not customers %}
 <div class="card">
   <p class="text-muted">No customers match these filters.</p>
-  {% if not (filter_agent_id or filter_status or filter_broker or filter_include_disabled) %}
+  {% if not (filter_q or filter_agent_id or filter_status or filter_broker or filter_include_disabled) %}
     <p class="text-small text-muted">
-      Click <strong>+ Add customer</strong> to create the first one, or have an
-      agent declare one from their dashboard.
-    </p>
-    <p class="text-small text-muted">
-      Tried to add one and got <em>"customer already exists for this agent /
-      account / broker / symbol / side"</em>? Tick <strong>Show disabled</strong>
-      above — soft-deleted rows still occupy the uniqueness slot.
+      Click <strong>+ Add customer</strong> to create the first account, or
+      have an agent declare one from their dashboard. Trade instructions
+      are added from the customer detail page.
     </p>
   {% endif %}
 </div>
@@ -73,11 +71,10 @@
       <th>Display name</th>
       <th>Agent</th>
       <th>Broker</th>
-      <th>ISIN</th>
-      <th>Side</th>
+      <th>Username</th>
+      <th>Trades</th>
       <th>Server</th>
       <th>Status</th>
-      <th>Section</th>
       <th></th>
     </tr>
   </thead>

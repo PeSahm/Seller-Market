@@ -26,8 +26,7 @@
     <h1 class="h1">Assign customer</h1>
     <p class="text-muted text-small" dir="auto">
       <a href="/admin/customers/{{ customer.id }}">{{ customer.display_name }}</a>
-      · <code>{{ customer.broker }}</code> · <code>{{ customer.isin }}</code>
-      · {% if customer.side == 1 %}Buy{% else %}Sell{% endif %}
+      · <code>{{ customer.broker }}</code> · <code dir="ltr">{{ customer.username }}</code>
     </p>
   </div>
   <a class="btn btn--ghost btn--sm" href="/admin/customers/{{ customer.id }}">← back</a>

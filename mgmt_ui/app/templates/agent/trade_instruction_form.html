@@ -1,0 +1,93 @@
+{#
+  Agent-side add/edit form for a TradeInstruction.
+
+  Mirrors the admin version. ISIN + side + comment + (edit-only) enabled.
+  Verify-ISIN button lives here — requires the operator to retype the
+  broker password so the customer-service can mint a Bearer token.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}{% if mode == 'edit' %}Edit trade{% else %}Add trade{% endif %}{% endblock %}
+
+{% block page_body %}
+{% set fv = form_values|default({}) %}
+{% set is_edit = (mode == 'edit') %}
+
+<div class="page-header">
+  <div>
+    <h1 class="h1">
+      {% if is_edit %}Edit trade{% else %}Add trade for {{ customer.display_name }}{% endif %}
+    </h1>
+    <p class="text-muted text-small">
+      Account: <code>{{ customer.broker }}</code>
+      · <code dir="ltr">{{ customer.username }}</code>
+    </p>
+  </div>
+  <a class="btn btn--ghost btn--sm" href="/agent/customers/{{ customer.id }}">← back</a>
+</div>
+
+{% if form_error %}
+<div class="flash flash--error">
+  <strong>✗ {% if is_edit %}Could not save{% else %}Invalid input{% endif %}</strong>
+  <p class="text-small">{{ form_error }}</p>
+</div>
+{% endif %}
+
+<form class="customer-form" method="post"
+      action="{% if is_edit %}/agent/customers/{{ customer.id }}/trade-instructions/{{ trade_instruction.id }}/edit{% else %}/agent/customers/{{ customer.id }}/trade-instructions{% endif %}">
+  {% include "partials/csrf.html" %}
+
+  <div class="field-row">
+    <div class="field field--grow">
+      <label class="label" for="isin">ISIN</label>
+      <input class="input" id="isin" name="isin"
+             {% if not is_edit %}required{% endif %}
+             value="{{ fv.isin|default('') }}"
+             placeholder="e.g. IRO3SAIPA0001"
+             maxlength="32"
+             onblur="this.value = this.value.trim().toUpperCase();">
+      <p class="text-small text-muted">
+        ASCII alphanumeric only. Auto-uppercased on blur.
+      </p>
+    </div>
+    <div class="field field--narrow">
+      <label class="label">Side</label>
+      <label class="radio-row">
+        <input type="radio" name="side" value="1"
+               {% if fv.side|string == '1' or (not is_edit and not fv.side) %}checked{% endif %}>
+        Buy (1)
+      </label>
+      <label class="radio-row">
+        <input type="radio" name="side" value="2"
+               {% if fv.side|string == '2' %}checked{% endif %}>
+        Sell (2)
+      </label>
+    </div>
+  </div>
+
+  <div class="field">
+    <label class="label" for="comment">Comment (optional)</label>
+    <textarea class="input" id="comment" name="comment" rows="2" maxlength="1024" dir="auto">{{ fv.comment|default('') }}</textarea>
+  </div>
+
+  {% if is_edit %}
+  <div class="field">
+    <label class="radio-row">
+      <input type="checkbox" name="enabled" {% if fv.enabled %}checked{% endif %}>
+      Enabled
+    </label>
+    <p class="text-small text-muted">
+      Unticking disables just this trade. The customer's other trades
+      keep working.
+    </p>
+  </div>
+  <input type="hidden" name="version" value="{{ fv.version }}">
+  {% endif %}
+
+  <div class="form-actions">
+    <a class="btn btn--ghost" href="/agent/customers/{{ customer.id }}">Cancel</a>
+    <button class="btn btn--primary" type="submit">
+      {% if is_edit %}Save changes{% else %}Add trade{% endif %}
+    </button>
+  </div>
+</form>
+{% endblock %}

@@ -8,20 +8,35 @@
 </div>
 
 <p class="text-muted text-small">
-  Customers are your individual trading accounts. Each row maps to one
-  <code>[section]</code> in the bot's <code>config.ini</code> on the trading
-  server. The mgmt UI generates the section name automatically and encrypts
-  your broker password at rest. Server assignment is decided by your admin —
-  newly-added customers stay in <strong>Pending</strong> until an admin
-  routes them to a server.
+  Each customer is one brokerage account. After creating it, open the
+  customer to add trade instructions (one ISIN+side each). The bot
+  generates one <code>config.ini</code> section per enabled trade.
 </p>
+
+<form method="get" action="/agent/customers" class="filter-bar">
+  <input type="search" name="q" class="input"
+         placeholder="Search by name or username…"
+         value="{{ filter_q|default('') }}" style="min-width: 220px;">
+  <select name="status" class="input">
+    <option value="">Any status</option>
+    {% for s in ['pending','assigned','active'] %}
+      <option value="{{ s }}" {% if filter_status == s %}selected{% endif %}>{{ s }}</option>
+    {% endfor %}
+  </select>
+  <button class="btn btn--ghost btn--sm" type="submit">Filter</button>
+  {% if filter_q or filter_status %}
+    <a class="btn btn--ghost btn--sm" href="/agent/customers">Clear</a>
+  {% endif %}
+</form>
 
 {% if not customers %}
 <div class="card">
-  <p class="text-muted">No customers yet.</p>
+  <p class="text-muted">No customers match.</p>
+  {% if not (filter_q or filter_status) %}
   <p class="text-small text-muted">
     Click <strong>+ Add customer</strong> to declare your first one.
   </p>
+  {% endif %}
 </div>
 {% else %}
 <table class="table">
@@ -29,8 +44,8 @@
     <tr>
       <th>Display name</th>
       <th>Broker</th>
-      <th>ISIN</th>
-      <th>Side</th>
+      <th>Username</th>
+      <th>Trades</th>
       <th>Server</th>
       <th>Status</th>
       <th></th>
@@ -39,13 +54,20 @@
   <tbody>
     {% for c in customers %}
     {% set srv = servers_by_id.get(c.server_id) if c.server_id else None %}
+    {% set _counts = trade_counts.get(c.id) if trade_counts else None %}
     <tr>
       <td>
         <a href="/agent/customers/{{ c.id }}" dir="auto">{{ c.display_name }}</a>
       </td>
       <td><span class="badge">{{ c.broker }}</span></td>
-      <td><code class="text-small">{{ c.isin }}</code></td>
-      <td>{{ "Buy" if c.side == 1 else "Sell" }}</td>
+      <td><code class="text-small" dir="ltr">{{ c.username }}</code></td>
+      <td>
+        {% if _counts %}
+          {{ _counts[0] }} <span class="text-small text-muted">({{ _counts[1] }} active)</span>
+        {% else %}
+          <span class="text-muted">0</span>
+        {% endif %}
+      </td>
       <td>
         {% if srv %}
           <span class="badge badge--up" dir="auto">{{ srv.name }}</span>

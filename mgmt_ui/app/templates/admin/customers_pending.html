@@ -39,8 +39,7 @@
       <th>Display name</th>
       <th>Agent</th>
       <th>Broker</th>
-      <th>ISIN</th>
-      <th>Side</th>
+      <th>Username</th>
       <th></th>
     </tr>
   </thead>
@@ -60,11 +59,7 @@
         {% endif %}
       </td>
       <td><code class="text-small">{{ c.broker }}</code></td>
-      <td><code class="text-small">{{ c.isin }}</code></td>
-      <td>
-        {% if c.side == 1 %}<span class="badge badge--up">Buy</span>
-        {% else %}<span class="badge badge--down">Sell</span>{% endif %}
-      </td>
+      <td><code class="text-small" dir="ltr">{{ c.username }}</code></td>
       <td>
         {# Phase 4 requires the diff-preview flow before any push. The
            inbox routes through /admin/customers/{id}/assign which shows

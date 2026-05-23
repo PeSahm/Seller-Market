@@ -1,20 +1,23 @@
 {#
-  Combined create/edit form for a customer row.
+  Combined create/edit form for a customer (account) row.
+
+  Post-migration 0003, this form is account-shaped: agent, display_name,
+  broker, username, password. Trade instructions (isin/side/comment) are
+  added from the customer detail page.
 
   Mode dispatch:
-    mode == "create"  → POST /admin/customers
-                        agent_id is a <select>, all fields required.
-    mode == "edit"    → POST /admin/customers/<id>/edit
-                        agent_id is read-only display,
-                        every field optional ("leave blank to keep"),
-                        password placeholder explains it stays unchanged,
-                        ``version`` rides a hidden input for the optimistic
-                        lock.
+    mode == "create" → POST /admin/customers
+                       agent_id is a <select>, all fields required.
+    mode == "edit"   → POST /admin/customers/<id>/edit
+                       agent_id is read-only display, every field
+                       optional ("leave blank to keep"), password
+                       placeholder explains it stays unchanged, ``version``
+                       rides a hidden input for the optimistic lock.
 
   Sticky-form contract: on a validation error the router re-renders this
-  template with the same ``form_values`` dict so the admin doesn't have to
-  retype everything. The ``password`` field is INTENTIONALLY excluded from
-  ``form_values`` — secrets must NEVER round-trip through the HTML.
+  template with the same ``form_values`` dict. The ``password`` field is
+  INTENTIONALLY excluded from ``form_values`` — secrets must NEVER
+  round-trip through the HTML.
 #}
 {% extends "partials/page_shell.html" %}
 {% block page_title %}{% if mode == 'edit' %}Edit customer{% else %}Add customer{% endif %}{% endblock %}
@@ -30,13 +33,13 @@
     </h1>
     <p class="text-muted text-small">
       {% if is_edit %}
-        Changes are versioned. If another admin (or the owning agent) edits
-        this row in parallel, your save will be rejected with a 409 so you
-        can reload and re-apply.
+        Account-level fields. Changes are versioned (optimistic lock).
+        Trade instructions (ISIN + side) are managed from the customer
+        detail page after save.
       {% else %}
-        Pick the owning agent, then enter broker credentials. The
-        <code>section_name</code> is generated automatically; the password is
-        Fernet-encrypted at rest and never echoed back to this form.
+        Pick the owning agent, then enter broker credentials. Trade
+        instructions are added from the customer detail page after save —
+        you can attach as many ISINs as you need to one account.
       {% endif %}
     </p>
   </div>
@@ -62,9 +65,6 @@
   <div class="field">
     <label class="label" for="agent_id">Agent</label>
     {% if is_edit %}
-      {# Read-only: re-assignment to a different agent is intentionally NOT
-         supported — it would orphan the password ciphertext under the
-         original agent's section_name. Create a fresh customer instead. #}
       <input class="input" id="agent_id" type="text" readonly dir="auto"
              value="{{ agent.username if agent else fv.agent_id }}">
       <p class="text-small text-muted">
@@ -89,7 +89,7 @@
     <input class="input" id="display_name" name="display_name" dir="auto"
            {% if not is_edit %}required{% endif %}
            value="{{ fv.display_name|default('') }}"
-           placeholder="e.g. Ali — IRO3SAIPA — Buy" maxlength="255">
+           placeholder="e.g. Ali — ayandeh — 4580090306" maxlength="255">
   </div>
 
   {# --- Broker --- #}
@@ -105,71 +105,6 @@
         <option value="{{ b }}" {% if fv.broker == b and not is_edit %}selected{% endif %}>{{ b }}</option>
       {% endfor %}
     </select>
-  </div>
-
-  {# --- ISIN + side --- #}
-  <div class="field-row">
-    <div class="field field--grow">
-      <label class="label" for="isin">ISIN</label>
-      <input class="input" id="isin" name="isin"
-             {% if not is_edit %}required{% endif %}
-             value="{{ fv.isin|default('') }}"
-             placeholder="e.g. IRO3SAIPA0001"
-             maxlength="32"
-             onblur="this.value = this.value.trim().toUpperCase();">
-      <p class="text-small text-muted">
-        ASCII alphanumeric only. Auto-uppercased on blur.
-      </p>
-    </div>
-    <div class="field field--narrow">
-      <label class="label">Side</label>
-      <label class="radio-row">
-        <input type="radio" name="side" value="1"
-               {% if fv.side|string == '1' or (not is_edit and not fv.side) %}checked{% endif %}>
-        Buy (1)
-      </label>
-      <label class="radio-row">
-        <input type="radio" name="side" value="2"
-               {% if fv.side|string == '2' %}checked{% endif %}>
-        Sell (2)
-      </label>
-    </div>
-  </div>
-
-  {# --- Verify ISIN button ---
-       Logs in to the broker (same captcha+OCR+login flow as the
-       Verify credentials button) and looks the typed ISIN up against
-       the broker's market_data endpoint. Shows the broker-side symbol
-       + title + price bounds so the operator can confirm the ISIN
-       points at the instrument they expect.
-
-       Like verify-credentials, in edit mode the row's ISIN ships as
-       ``isin_fallback`` (defensive — the ISIN input IS pre-filled in
-       edit mode, but staying parallel with broker/username keeps the
-       template predictable). #}
-  <div class="field">
-    {% if is_edit and customer %}
-      <input type="hidden" name="isin_fallback" value="{{ fv.isin|default('') }}">
-    {% endif %}
-    <button type="button" class="btn btn--ghost btn--sm"
-            hx-post="/admin/customers/verify-isin"
-            hx-include="[name=broker],[name=username],[name=password],[name=isin],[name=broker_fallback],[name=username_fallback],[name=isin_fallback]"
-            hx-target="#verify-isin-result"
-            hx-swap="innerHTML"
-            hx-indicator="#verify-isin-spinner">
-      Verify ISIN
-    </button>
-    <span id="verify-isin-spinner" class="htmx-indicator text-small text-muted" style="margin-left: 8px;">
-      Looking up the instrument at the broker… (this hits market_data;
-      can take a few seconds while we solve their captcha)
-    </span>
-    {% if is_edit %}
-    <p class="text-small text-muted" style="margin: 4px 0 0;">
-      Re-type the broker password above to verify — same as Verify
-      credentials, we can't reuse the stored one.
-    </p>
-    {% endif %}
-    <div id="verify-isin-result"></div>
   </div>
 
   {# --- Broker credentials --- #}
@@ -195,16 +130,10 @@
   </div>
 
   {# --- Verify credentials button ---
-       Sends the broker, username, password (and an optional fallback
-       broker/username for edit mode) to the verify endpoint and swaps in
-       a result partial. The button is type="button" so it does NOT
-       submit the form. The result swap is local to #verify-result; the
-       password input is included via hx-include but never echoed back.
-
-       Edit-mode quirk: in edit mode the broker <select> defaults to
-       value="" ("keep current"), so we ship the row's actual broker as
-       ``broker_fallback`` for the route to fall back on. Same for
-       username (which IS pre-filled, but defensive doesn't hurt). #}
+       Sends broker / username / password (+ fallbacks for edit mode where
+       the dropdown defaults to "keep current") to the verify endpoint
+       and swaps in a result partial. The button is type="button" so it
+       doesn't submit the form. #}
   <div class="field">
     {% if is_edit and customer %}
       <input type="hidden" name="broker_fallback" value="{{ fv.broker|default('') }}">
@@ -231,12 +160,6 @@
     <div id="verify-result"></div>
   </div>
 
-  {# --- Comment --- #}
-  <div class="field">
-    <label class="label" for="comment">Comment (optional)</label>
-    <textarea class="input" id="comment" name="comment" rows="2" maxlength="1024" dir="auto">{{ fv.comment|default('') }}</textarea>
-  </div>
-
   {# --- Enabled toggle (edit only) --- #}
   {% if is_edit %}
   <div class="field">
@@ -245,8 +168,9 @@
       Enabled
     </label>
     <p class="text-small text-muted">
-      Unticking is a soft delete — the row stays for audit but is dropped from
-      the next <code>config.ini</code> render.
+      Unticking is a soft delete — the customer (and all its trade
+      instructions) stop appearing in the next <code>config.ini</code>
+      render. The row stays for audit.
     </p>
   </div>
   <input type="hidden" name="version" value="{{ fv.version }}">

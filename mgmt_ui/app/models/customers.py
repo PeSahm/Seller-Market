@@ -7,13 +7,11 @@ from typing import Optional
 import sqlalchemy as sa
 from sqlalchemy import (
     Boolean,
-    CheckConstraint,
     Enum as SAEnum,
     ForeignKey,
     Integer,
     LargeBinary,
     String,
-    Text,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -48,16 +46,25 @@ distribution_policy_enum = SAEnum(
 
 
 class Customer(Base):
+    """A brokerage account: one credential set per (agent, broker, username).
+
+    Post-migration 0003, Customer carries ONLY the account fields. The
+    per-instrument fields (isin, side, section_name, comment) moved to
+    :class:`TradeInstruction` — one customer can have many.
+
+    The composite UNIQUE ``(agent_id, broker, username)`` enforces "one
+    account per agent+broker"; trying to add a second customer with the
+    same trio raises an IntegrityError that the service layer translates
+    to a friendly ValueError.
+    """
+
     __tablename__ = "customers"
     __table_args__ = (
-        CheckConstraint("side IN (1, 2)", name="ck_customers_side"),
         sa.UniqueConstraint(
             "agent_id",
-            "username",
             "broker",
-            "isin",
-            "side",
-            name="uq_customers_agent_account_broker_isin_side",
+            "username",
+            name="uq_customers_agent_broker_username",
         ),
     )
 
@@ -89,14 +96,10 @@ class Customer(Base):
         server_default=text("'pending'"),
     )
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    section_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     username: Mapped[str] = mapped_column(String(255), nullable=False)
     password_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     broker: Mapped[str] = mapped_column(String(255), nullable=False)
-    isin: Mapped[str] = mapped_column(String(64), nullable=False)
-    side: Mapped[int] = mapped_column(Integer, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(
         sa.TIMESTAMP(timezone=True),

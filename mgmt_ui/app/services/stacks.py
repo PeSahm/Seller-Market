@@ -397,24 +397,31 @@ async def _build_render_context(
 async def _load_stack_customers(
     db: AsyncSession, stack_id: UUID
 ) -> tuple[CustomerRow, ...]:
-    """Load enabled customers assigned to ``stack_id`` and project them into
-    render rows.
+    """Load enabled Customer × TradeInstruction rows for ``stack_id``.
 
-    The customer-service ``list_customers`` helper in this revision of the
-    codebase doesn't expose a ``stack_id=`` filter (its kwargs are
-    ``agent_id`` / ``status`` / ``server_id`` / ``broker`` /
-    ``include_disabled``), so we fall back to a direct ``select(Customer)``
-    scoped on ``stack_id`` and ``enabled``. We still route password decrypt
-    through :func:`app.services.customers.decrypt_password` so the
-    ``secret_decrypt`` audit log entry is emitted for every plaintext we
-    materialise. The import is lazy because the customer service may grow
-    a dependency on the distribution service that closes a cycle back into
-    this module.
+    Post-migration 0003, a Customer's per-trade fields (isin, side,
+    section_name) live on a separate ``trade_instructions`` table. The
+    renderer's contract is still "one section per tradeable position",
+    so we cross-join enabled customers with their enabled trade
+    instructions here. Each ``CustomerRow`` carries the credentials
+    pulled from Customer plus the (isin, side, section_name) from the
+    TradeInstruction.
+
+    Password decrypt goes through
+    :func:`app.services.customers.decrypt_password` so the
+    ``secret_decrypt`` audit-log entry fires once per customer (NOT
+    once per trade). We decrypt before iterating the trades so the
+    plaintext is reused across all that customer's instructions.
+
+    The import is lazy because the customer service may grow a
+    dependency on the distribution service that closes a cycle back
+    into this module.
     """
     # Lazy import — keeps module-load free of any indirect cycle through the
     # distribution service (Phase 4 owners noted customers may import stacks
     # transitively).
     from app.services import customers as services_customers  # noqa: WPS433
+    from app.models.trade_instructions import TradeInstruction  # noqa: WPS433
 
     stmt = select(Customer).where(
         Customer.stack_id == stack_id,
@@ -431,17 +438,36 @@ async def _load_stack_customers(
         # disabled.
         if not c.enabled:
             continue
-        password_plain = await services_customers.decrypt_password(c)
-        rendered.append(
-            CustomerRow(
-                section_name=c.section_name,
-                username=c.username,
-                password_plain=password_plain,
-                broker=c.broker,
-                isin=c.isin,
-                side=c.side,
-            )
+
+        # Load this customer's enabled trade instructions in one query
+        # (rather than relying on lazy-loading from the ORM, which would
+        # need an awaited refresh). Skipped customers (no instructions)
+        # contribute nothing to the rendered file — matches the
+        # pre-migration behaviour where a Customer without an isin/side
+        # would have been impossible.
+        ti_stmt = select(TradeInstruction).where(
+            TradeInstruction.customer_id == c.id,
+            TradeInstruction.enabled.is_(True),
         )
+        ti_rows = list((await db.execute(ti_stmt)).scalars().all())
+        if not ti_rows:
+            continue
+
+        # Decrypt once per customer; reuse the plaintext across all its
+        # trade instructions. One audit-log entry per customer per
+        # render — matches the pre-migration cost.
+        password_plain = await services_customers.decrypt_password(c)
+        for ti in ti_rows:
+            rendered.append(
+                CustomerRow(
+                    section_name=ti.section_name,
+                    username=c.username,
+                    password_plain=password_plain,
+                    broker=c.broker,
+                    isin=ti.isin,
+                    side=ti.side,
+                )
+            )
     return tuple(rendered)
 
 

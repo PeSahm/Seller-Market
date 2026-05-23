@@ -60,6 +60,7 @@ from app.models.customers import Customer
 from app.models.runs import IngestCursor, Run
 from app.models.servers import Server
 from app.models.stacks import AgentStack
+from app.models.trade_instructions import TradeInstruction
 from app.models.trades import TradeResult
 from app.schemas.trade import IngestTickResult
 from app.services.ssh.exceptions import SSHError
@@ -220,25 +221,57 @@ async def _resolve_customer(
     isin: str,
     side: int,
 ) -> Optional[Customer]:
-    """Match an order to a :class:`Customer` row via the Phase 1 composite UNIQUE.
+    """Match an order's (account + instrument) to a Customer row.
 
-    Returns ``None`` when no matching row exists. The ingestor treats
-    that as "drop this order on the floor and log" — we can't insert a
-    :class:`TradeResult` without a ``customer_id`` (the FK is RESTRICT).
+    Post-migration 0003, Customer is account-shaped (agent, broker,
+    username); the (isin, side) lives on a separate TradeInstruction.
+    The order needs both to be valid — we want to attach the
+    TradeResult only when:
+
+    1. The account exists for this agent ((agent, broker, username) →
+       Customer), AND
+    2. The customer has an enabled TradeInstruction for (isin, side).
+
+    Returns the Customer when both checks pass; ``None`` otherwise.
+    The ingestor treats ``None`` as "drop this order on the floor and
+    log" — we can't insert a :class:`TradeResult` without a
+    ``customer_id`` (the FK is RESTRICT). TradeResult still FKs to
+    Customer (not to TradeInstruction) so the existing FK shape
+    survives the migration unchanged.
     """
-    stmt = (
+    # Step 1: find the account-level Customer row.
+    customer_stmt = (
         select(Customer)
         .where(
             Customer.agent_id == agent_id,
             Customer.username == username,
             Customer.broker == broker,
-            Customer.isin == isin,
-            Customer.side == side,
         )
         .limit(1)
     )
-    result = await db.execute(stmt)
-    return result.scalar_one_or_none()
+    customer = (await db.execute(customer_stmt)).scalar_one_or_none()
+    if customer is None:
+        return None
+
+    # Step 2: confirm there's a matching TradeInstruction. We don't
+    # care about enabled here — if an order came back from a now-
+    # disabled instruction it's still legitimate trade history that we
+    # want to record. The Customer is the only thing the TradeResult
+    # FKs to anyway.
+    ti_stmt = (
+        select(TradeInstruction.id)
+        .where(
+            TradeInstruction.customer_id == customer.id,
+            TradeInstruction.isin == isin,
+            TradeInstruction.side == side,
+        )
+        .limit(1)
+    )
+    has_ti = (await db.execute(ti_stmt)).scalar_one_or_none()
+    if has_ti is None:
+        return None
+
+    return customer
 
 
 async def _resolve_or_create_run(

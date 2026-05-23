@@ -32,7 +32,7 @@ from app.services.rendering import render_config_ini
 
 def _fake_customer(
     *,
-    section_name: str,
+    section_name: str | None = None,
     username: str = "u",
     password_enc: bytes = b"",
     broker: str = "bbi",
@@ -40,23 +40,68 @@ def _fake_customer(
     side: int = 1,
     enabled: bool = True,
     display_name: str = "Test",
+    trade_instructions: "list[SimpleNamespace] | None" = None,
 ) -> SimpleNamespace:
-    """Minimal customer-row stand-in.
+    """Minimal Customer + its TradeInstructions stand-in.
 
-    The render context loader only reads a small surface of the ORM row, so
-    a SimpleNamespace is plenty. We never construct a real ``Customer`` so
-    no SQLAlchemy metadata setup is needed.
+    Post-migration 0003, the renderer's loader queries TradeInstruction
+    separately, so each customer carries its associated TIs here.
+
+    Two ways to use:
+
+    * Default — pass ``section_name`` (+ optional isin/side), get ONE
+      TradeInstruction attached. Convenience for single-trade tests
+      that pre-date the split.
+    * Multi — pass ``trade_instructions=[_fake_trade(...), ...]``
+      directly. Used by the fanout test to exercise
+      one-customer→many-sections rendering.
     """
-    return SimpleNamespace(
+    customer = SimpleNamespace(
         id=uuid.uuid4(),
-        section_name=section_name,
         username=username,
         password_enc=password_enc,
         broker=broker,
-        isin=isin,
-        side=side,
         enabled=enabled,
         display_name=display_name,
+    )
+    if trade_instructions is not None:
+        for ti in trade_instructions:
+            ti.customer_id = customer.id
+        customer.trade_instructions = trade_instructions
+    else:
+        assert section_name is not None, (
+            "_fake_customer requires either section_name or trade_instructions"
+        )
+        customer.trade_instructions = [
+            SimpleNamespace(
+                id=uuid.uuid4(),
+                customer_id=customer.id,
+                isin=isin,
+                side=side,
+                section_name=section_name,
+                enabled=enabled,
+                comment=None,
+            )
+        ]
+    return customer
+
+
+def _fake_trade(
+    *,
+    section_name: str,
+    isin: str = "IRO3AYHZ0001",
+    side: int = 1,
+    enabled: bool = True,
+) -> SimpleNamespace:
+    """Single TradeInstruction stand-in for multi-TI tests."""
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        customer_id=None,  # set by _fake_customer
+        isin=isin,
+        side=side,
+        section_name=section_name,
+        enabled=enabled,
+        comment=None,
     )
 
 
@@ -101,34 +146,45 @@ def _make_db(customer_rows: list[SimpleNamespace]) -> MagicMock:
     """
     db = MagicMock()
 
+    def _scalars_result(items):
+        result = MagicMock()
+        scalars_mock = MagicMock()
+        scalars_mock.all = MagicMock(return_value=items)
+        result.scalars = MagicMock(return_value=scalars_mock)
+        return result
+
     settings_result = MagicMock()
     settings_result.scalar_one_or_none = MagicMock(return_value=None)
 
-    customers_result = MagicMock()
-    scalars_mock = MagicMock()
-    scalars_mock.all = MagicMock(return_value=customer_rows)
-    customers_result.scalars = MagicMock(return_value=scalars_mock)
+    customers_result = _scalars_result(customer_rows)
 
-    # Phase 5: empty scheduler-jobs list — none of these render tests care
-    # about scheduler output.
-    scheduler_result = MagicMock()
-    scheduler_scalars = MagicMock()
-    scheduler_scalars.all = MagicMock(return_value=[])
-    scheduler_result.scalars = MagicMock(return_value=scheduler_scalars)
+    # One trade_instructions result per ENABLED customer — the loader's
+    # ``if not c.enabled: continue`` guard skips the TI query for
+    # disabled customers, so feeding a result for them would shift the
+    # AsyncMock side_effect sequence.
+    ti_results = [
+        _scalars_result(getattr(c, "trade_instructions", []))
+        for c in customer_rows
+        if c.enabled
+    ]
 
-    # Phase 5: no locust override — the renderer falls back to its built-in
-    # fleet defaults, which is exactly what the customer-section tests want.
+    # Phase 5: empty scheduler-jobs list.
+    scheduler_result = _scalars_result([])
+
+    # Phase 5: no locust override.
     locust_result = MagicMock()
     locust_result.scalar_one_or_none = MagicMock(return_value=None)
 
-    # Call order matches the body of ``_build_render_context``:
-    # _read_setting × 2 → _load_stack_customers → list_jobs →
-    # get_locust_config.
+    # Call order matches the body of ``_build_render_context`` →
+    # ``_load_stack_customers``:
+    # _read_setting × 2 → customers SELECT → per-customer TI SELECTs ×N →
+    # list_jobs → get_locust_config.
     db.execute = AsyncMock(
         side_effect=[
             settings_result,
             settings_result,
             customers_result,
+            *ti_results,
             scheduler_result,
             locust_result,
         ]
@@ -376,3 +432,58 @@ async def test_render_deterministic_with_same_inputs(
     out2 = render_config_ini(ctx2)
 
     assert out1 == out2
+
+
+# ---------------------------------------------------------------------------
+# Cross-join fanout: one Customer → many [section] blocks (post-0003)
+# ---------------------------------------------------------------------------
+
+
+async def test_render_fanout_many_trades_per_customer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One Customer with N TradeInstructions produces N [section] blocks,
+    each carrying the shared credentials.
+
+    Also verifies the decrypt-once-per-customer property: the fake
+    ``decrypt_password`` records its call args, and we assert it was
+    called exactly once even though three sections were rendered.
+    """
+    customer = _fake_customer(
+        username="shared-account",
+        broker="ayandeh",
+        trade_instructions=[
+            _fake_trade(section_name="a1_c1_t1_ayandeh_IROAAA_s1", isin="IROAAA", side=1),
+            _fake_trade(section_name="a1_c1_t2_ayandeh_IROBBB_s1", isin="IROBBB", side=1),
+            _fake_trade(section_name="a1_c1_t3_ayandeh_IROCCC_s2", isin="IROCCC", side=2),
+        ],
+    )
+    db = _make_db([customer])
+    stack = _fake_stack()
+
+    decrypt_calls: list = []
+
+    async def _fake_decrypt(c):
+        decrypt_calls.append(c)
+        return "shared-plaintext"
+
+    monkeypatch.setattr(
+        "app.services.customers.decrypt_password", _fake_decrypt
+    )
+
+    ctx = await stacks_svc._build_render_context(db, stack)
+    out = render_config_ini(ctx)
+
+    # Three [section] blocks for the same customer.
+    assert "[a1_c1_t1_ayandeh_IROAAA_s1]" in out
+    assert "[a1_c1_t2_ayandeh_IROBBB_s1]" in out
+    assert "[a1_c1_t3_ayandeh_IROCCC_s2]" in out
+
+    # All three sections share the same credentials (one Customer).
+    assert out.count("username = shared-account") == 3
+    assert out.count("password = shared-plaintext") == 3
+    assert out.count("broker = ayandeh") == 3
+
+    # Decrypt was called ONCE per customer, NOT once per trade. The
+    # plaintext is reused across all of that customer's instructions.
+    assert len(decrypt_calls) == 1

@@ -14,6 +14,7 @@ from __future__ import annotations
 import difflib
 import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Optional
 from uuid import UUID
 
@@ -31,6 +32,10 @@ from app.models.users import User
 from app.routers.dashboard import _ctx, templates
 from app.schemas.agent import AgentCreate
 from app.schemas.customer import CustomerCreate, CustomerUpdate
+from app.schemas.trade_instruction import (
+    TradeInstructionCreate,
+    TradeInstructionUpdate,
+)
 from app.schemas.locust import LocustUpsert
 from app.schemas.scheduler import SchedulerJobUpsert
 from app.schemas.server import ServerCreatePassword, ServerCreatePubkey
@@ -49,8 +54,12 @@ from app.services import scheduler_jobs as services_scheduler
 from app.services import servers as services_servers
 from app.services import settings_store
 from app.services import stacks as services_stacks
+from app.services import trade_instructions as services_trade_instructions
 from app.services import trades as services_trades
 from app.services.customers import OptimisticLockError
+from app.services.trade_instructions import (
+    OptimisticLockError as TradeInstructionLockError,
+)
 from app.services.locust_configs import OptimisticLockError as LocustLockError
 from app.services.run_locks import StackRunLockBusyError
 from app.services.scheduler_jobs import OptimisticLockError as SchedulerLockError
@@ -614,26 +623,19 @@ async def admin_customers(
     status: Optional[str] = None,
     broker: Optional[str] = None,
     include_disabled: Optional[str] = None,
+    q: Optional[str] = None,
 ):
-    """List all customers with optional filter chips.
+    """List all customers (accounts) with optional filters + search.
 
-    The filter chips (agent / status / broker / include-disabled) round-trip
-    through query parameters so a filtered view is bookmarkable and
-    link-shareable. We include soft-deleted agents in the lookup dict because
-    a customer can outlive its agent (Phase 9 cleanup); we still want to
-    render *which* deleted agent owned them.
+    Filters round-trip via query string so a filtered view is bookmarkable.
 
-    All filter args accept the empty string (sent by an unselected
-    ``<select><option value="">…</option>`` from the filter bar) and treat
-    it as "no filter". ``agent_id`` is typed as ``str`` rather than ``UUID``
-    here so an empty value doesn't fail pydantic parsing and 422 the page
-    into JSON; we parse it manually below.
+    ``q`` is a free-text search over ``display_name`` AND ``username``
+    (case-insensitive, parameterized ILIKE with escaped wildcards). Empty
+    is treated as "no filter".
 
-    ``include_disabled`` is a checkbox (HTML sends ``"on"`` when ticked,
-    omits the param when not). Disabled (soft-deleted) rows still occupy
-    the composite UNIQUE slot, so without this toggle an operator who
-    soft-deleted a customer has no UI path to discover what's blocking
-    a fresh create with the same tuple (see issue #75).
+    Each row carries a ``trade_count`` (total / active) lookup so the
+    template can show "N trades (M active)" without an extra fetch per
+    row.
     """
     agent_uuid: Optional[UUID] = None
     if agent_id:
@@ -645,6 +647,7 @@ async def admin_customers(
             agent_uuid = None
     status = status or None
     broker = broker or None
+    q = q or None
     show_disabled = include_disabled == "on"
     customers = await services_customers.list_customers(
         db,
@@ -652,6 +655,10 @@ async def admin_customers(
         status=status,
         broker=broker,
         include_disabled=show_disabled,
+        q=q,
+    )
+    trade_counts = await services_customers.get_customer_trade_counts(
+        db, [c.id for c in customers]
     )
     agents = {
         a.id: a
@@ -660,12 +667,14 @@ async def admin_customers(
     servers = {s.id: s for s in await services_servers.list_servers(db)}
     ctx = _ctx(request, user, current_tab="/admin/customers")
     ctx["customers"] = customers
+    ctx["trade_counts"] = trade_counts  # {customer_id: (total, active)}
     ctx["agents_by_id"] = agents
     ctx["servers_by_id"] = servers
     ctx["filter_agent_id"] = agent_id
     ctx["filter_status"] = status
     ctx["filter_broker"] = broker
     ctx["filter_include_disabled"] = show_disabled
+    ctx["filter_q"] = q or ""
     ctx["all_agents"] = list(agents.values())
     return templates.TemplateResponse("admin/customers.html", ctx)
 
@@ -719,40 +728,29 @@ async def admin_customer_create(
     agent_id: UUID = Form(...),
     display_name: str = Form(...),
     broker: str = Form(...),
-    isin: str = Form(...),
-    side: int = Form(...),
     username: str = Form(...),
     password: str = Form(...),
-    comment: Optional[str] = Form(None),
 ):
-    """Create a new customer owned by ``agent_id``.
+    """Create a new account-shaped customer owned by ``agent_id``.
 
-    Validation happens in two layers (same shape as
-    :func:`admin_server_create` and :func:`admin_agent_create`):
-    pydantic checks shape and the service layer enforces the composite
-    UNIQUE on ``(agent, account, broker, isin, side)``. Validation errors
-    re-render the form with sticky values (NEVER the password — that
-    MUST NOT round-trip through the HTML).
+    Post-migration 0003, this form no longer accepts isin/side/comment —
+    those move to the per-trade-instruction form on the customer detail
+    page. Service layer enforces the composite UNIQUE on
+    ``(agent_id, broker, username)`` (one credential set per account).
     """
     sticky = {
         "agent_id": str(agent_id),
         "display_name": display_name,
         "broker": broker,
-        "isin": isin,
-        "side": str(side),
         "username": username,
-        "comment": comment or "",
     }
 
     try:
         payload = CustomerCreate(
             display_name=display_name,
             broker=broker,  # type: ignore[arg-type]
-            isin=isin,
-            side=side,  # type: ignore[arg-type]
             username=username,
             password=password,
-            comment=comment if comment else None,
         )
     except ValidationError:
         agents = await services_agents.list_agents(db)
@@ -975,7 +973,12 @@ async def admin_customer_detail(
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Render the per-customer detail / identity card."""
+    """Render the per-customer detail page + the trade-instruction sub-list.
+
+    The page is the operator's drill-in target for an account: identity
+    card up top, list of trade instructions below with edit/delete + an
+    "+ Add trade" button.
+    """
     customer = await services_customers.get_customer(db, customer_id)
     if customer is None:
         raise HTTPException(status_code=404, detail="customer not found")
@@ -986,10 +989,14 @@ async def admin_customer_detail(
         if customer.server_id
         else None
     )
+    trade_instructions = await services_trade_instructions.list_trade_instructions(
+        db, customer_id
+    )
     ctx = _ctx(request, user, current_tab="/admin/customers")
     ctx["customer"] = customer
     ctx["agent"] = agent
     ctx["server"] = server
+    ctx["trade_instructions"] = trade_instructions
     return templates.TemplateResponse("admin/customer_detail.html", ctx)
 
 
@@ -1000,13 +1007,11 @@ async def admin_customer_edit_form(
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Render the edit form pre-populated from the current row.
+    """Render the edit form pre-populated from the current Customer row.
 
-    The password is intentionally not seeded into ``form_values`` — the
-    template renders an empty password input with a "leave empty to keep
-    current" placeholder so the admin can rotate or leave alone. The
-    row's ``version`` rides through as a hidden field for the optimistic
-    lock check on POST.
+    Account-level fields only: display_name, broker, username, enabled.
+    Trade-instruction edits go through the per-trade-instruction form on
+    the customer detail page.
     """
     customer = await services_customers.get_customer(db, customer_id)
     if customer is None:
@@ -1018,10 +1023,7 @@ async def admin_customer_edit_form(
         "agent_id": str(customer.agent_id),
         "display_name": customer.display_name,
         "broker": customer.broker,
-        "isin": customer.isin,
-        "side": str(customer.side),
         "username": customer.username,
-        "comment": customer.comment or "",
         "enabled": customer.enabled,
         "version": customer.version,
     }
@@ -1043,47 +1045,32 @@ async def admin_customer_update(
     db: AsyncSession = Depends(get_db),
     display_name: Optional[str] = Form(None),
     broker: Optional[str] = Form(None),
-    isin: Optional[str] = Form(None),
-    side: Optional[int] = Form(None),
     username: Optional[str] = Form(None),
     password: Optional[str] = Form(None),
-    comment: Optional[str] = Form(None),
     enabled: Optional[str] = Form(None),  # checkbox → "on" or absent
     version: int = Form(...),
 ):
-    """Apply an optimistic-locked update to a customer row.
+    """Apply an optimistic-locked update to a Customer (account) row.
 
-    Two behaviours are worth calling out:
+    Account-shaped fields only — per-trade edits happen via the
+    trade-instruction routes.
 
     * ``password=""`` is treated as "do not change" (we drop it before
-      building :class:`CustomerUpdate`). Sending an empty password through
-      to the service would fail pydantic's ``min_length=1`` validator
-      anyway, but we'd then end up flashing a generic "Invalid input"
-      message when the admin's intent was perfectly valid.
+      building :class:`CustomerUpdate`) so the operator can edit other
+      fields without forcing a re-type of the broker password.
     * ``enabled`` is a checkbox: HTML submits ``"on"`` when ticked and
       omits the field entirely when not. We translate that explicitly so
       the service sees a bool rather than ``"on"`` vs ``None``.
     """
-    # Build the partial update payload. Only include fields the admin
-    # actually changed — ``CustomerUpdate`` uses ``exclude_unset`` semantics
-    # downstream so anything omitted here stays untouched on the row.
     fields: dict = {"version": version}
     if display_name is not None and display_name != "":
         fields["display_name"] = display_name
     if broker is not None and broker != "":
         fields["broker"] = broker
-    if isin is not None and isin != "":
-        fields["isin"] = isin
-    if side is not None:
-        fields["side"] = side
     if username is not None and username != "":
         fields["username"] = username
     if password is not None and password != "":
         fields["password"] = password
-    if comment is not None:
-        # Empty string is a meaningful "clear comment" signal — treat it
-        # as None so the column ends up NULL rather than the literal "".
-        fields["comment"] = comment if comment != "" else None
     fields["enabled"] = enabled == "on"
 
     customer = await services_customers.get_customer(db, customer_id)
@@ -1091,22 +1078,15 @@ async def admin_customer_update(
         raise HTTPException(status_code=404, detail="customer not found")
     agent = await services_agents.get_agent(db, customer.agent_id)
 
-    # Snapshot every customer/agent attribute the error renderer needs into
-    # plain primitives BEFORE we hand the row off to ``update_customer``. The
-    # service does ``db.rollback()`` on a duplicate-tuple IntegrityError before
-    # raising ``ValueError`` — that expires every loaded attribute on the
-    # session, so anything the renderer touches on the ORM object afterwards
-    # triggers a sync lazy-load and explodes with ``MissingGreenlet`` (the
-    # renderer is a plain closure, not an async coroutine).
+    # Snapshot for the error renderer (see PR #73 — rollback expires
+    # loaded ORM attrs; the sync Jinja render would lazy-load and
+    # explode otherwise).
     _customer_snap = {
         "id": str(customer.id),
         "agent_id": str(customer.agent_id),
         "display_name": customer.display_name,
         "broker": customer.broker,
-        "isin": customer.isin,
-        "side": customer.side,
         "username": customer.username,
-        "comment": customer.comment,
         "version": customer.version,
     }
     _agent_username_snap = agent.username if agent is not None else None
@@ -1116,17 +1096,10 @@ async def admin_customer_update(
             "agent_id": _customer_snap["agent_id"],
             "display_name": display_name if display_name is not None else _customer_snap["display_name"],
             "broker": broker if broker is not None and broker != "" else _customer_snap["broker"],
-            "isin": isin if isin is not None and isin != "" else _customer_snap["isin"],
-            "side": str(side if side is not None else _customer_snap["side"]),
             "username": username if username is not None and username != "" else _customer_snap["username"],
-            "comment": comment if comment is not None else (_customer_snap["comment"] or ""),
             "enabled": enabled == "on",
             "version": _customer_snap["version"],
         }
-        # Pass the same primitives to the template via lightweight stand-ins
-        # so any ``customer.id`` / ``agent.username`` reference in the
-        # template doesn't try to lazy-load off the expired ORM row.
-        from types import SimpleNamespace
         ctx = _ctx(request, user, current_tab="/admin/customers")
         ctx["customer"] = SimpleNamespace(**_customer_snap)
         ctx["agent"] = SimpleNamespace(username=_agent_username_snap) if agent is not None else None
@@ -1199,6 +1172,243 @@ async def admin_customer_delete(
         db, customer_id, actor_id=user.id
     )
     return _flash_redirect(request, "/admin/customers")
+
+
+# ---------------------------------------------------------------------------
+# TradeInstruction CRUD (per-customer sub-resource)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/customers/{customer_id}/trade-instructions/new")
+async def admin_trade_instruction_new_form(
+    customer_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Render the "+ Add trade" form scoped to a specific customer."""
+    customer = await services_customers.get_customer(db, customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="customer not found")
+    ctx = _ctx(request, user, current_tab="/admin/customers")
+    ctx["customer"] = customer
+    ctx["form_error"] = None
+    ctx["form_values"] = {}
+    ctx["mode"] = "create"
+    return templates.TemplateResponse("admin/trade_instruction_form.html", ctx)
+
+
+@router.post("/customers/{customer_id}/trade-instructions")
+async def admin_trade_instruction_create(
+    customer_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    isin: str = Form(...),
+    side: int = Form(...),
+    comment: Optional[str] = Form(None),
+):
+    """Create a new TradeInstruction under ``customer_id``."""
+    customer = await services_customers.get_customer(db, customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="customer not found")
+
+    # PR #73 pattern: snapshot the customer's attrs to primitives BEFORE
+    # handing off to the service, so the error renderer doesn't trigger a
+    # sync lazy-load on attributes expired by ``db.rollback()``.
+    _customer_snap = SimpleNamespace(
+        id=customer.id,
+        display_name=customer.display_name,
+        broker=customer.broker,
+        username=customer.username,
+        enabled=customer.enabled,
+    )
+
+    sticky = {"isin": isin, "side": str(side), "comment": comment or ""}
+
+    try:
+        payload = TradeInstructionCreate(
+            isin=isin,
+            side=side,  # type: ignore[arg-type]
+            comment=comment if comment else None,
+        )
+    except ValidationError:
+        ctx = _ctx(request, user, current_tab="/admin/customers")
+        ctx["customer"] = _customer_snap
+        ctx["form_error"] = (
+            "Invalid input. Please review the form fields and try again."
+        )
+        ctx["form_values"] = sticky
+        ctx["mode"] = "create"
+        return templates.TemplateResponse(
+            "admin/trade_instruction_form.html",
+            ctx,
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        await services_trade_instructions.create_trade_instruction(
+            db, customer_id, payload, actor_id=user.id
+        )
+    except ValueError as exc:
+        # See PR #73 — rollback expires loaded ORM attrs incl. user.
+        await db.refresh(user)
+        ctx = _ctx(request, user, current_tab="/admin/customers")
+        ctx["customer"] = _customer_snap
+        ctx["form_error"] = str(exc)
+        ctx["form_values"] = sticky
+        ctx["mode"] = "create"
+        return templates.TemplateResponse(
+            "admin/trade_instruction_form.html",
+            ctx,
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    return _flash_redirect(request, f"/admin/customers/{customer_id}")
+
+
+@router.get("/customers/{customer_id}/trade-instructions/{trade_id}/edit")
+async def admin_trade_instruction_edit_form(
+    customer_id: UUID,
+    trade_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Render the edit form pre-populated from the TradeInstruction row."""
+    customer = await services_customers.get_customer(db, customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="customer not found")
+    ti = await services_trade_instructions.get_trade_instruction(db, trade_id)
+    if ti is None or ti.customer_id != customer_id:
+        raise HTTPException(status_code=404, detail="trade not found")
+
+    form_values = {
+        "isin": ti.isin,
+        "side": str(ti.side),
+        "comment": ti.comment or "",
+        "enabled": ti.enabled,
+        "version": ti.version,
+    }
+    ctx = _ctx(request, user, current_tab="/admin/customers")
+    ctx["customer"] = customer
+    ctx["trade_instruction"] = ti
+    ctx["form_error"] = None
+    ctx["form_values"] = form_values
+    ctx["mode"] = "edit"
+    return templates.TemplateResponse("admin/trade_instruction_form.html", ctx)
+
+
+@router.post("/customers/{customer_id}/trade-instructions/{trade_id}/edit")
+async def admin_trade_instruction_update(
+    customer_id: UUID,
+    trade_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    isin: Optional[str] = Form(None),
+    side: Optional[int] = Form(None),
+    comment: Optional[str] = Form(None),
+    enabled: Optional[str] = Form(None),
+    version: int = Form(...),
+):
+    """Apply an optimistic-locked update to a TradeInstruction row."""
+    customer = await services_customers.get_customer(db, customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="customer not found")
+    ti = await services_trade_instructions.get_trade_instruction(db, trade_id)
+    if ti is None or ti.customer_id != customer_id:
+        raise HTTPException(status_code=404, detail="trade not found")
+
+    fields: dict = {"version": version}
+    if isin is not None and isin != "":
+        fields["isin"] = isin
+    if side is not None:
+        fields["side"] = side
+    if comment is not None:
+        fields["comment"] = comment if comment != "" else None
+    fields["enabled"] = enabled == "on"
+
+    # Snapshot both the TradeInstruction AND the parent Customer for the
+    # error renderer (PR #73 pattern). The service rollback expires every
+    # loaded ORM attribute including the parent customer that the template
+    # reads broker / username / id from.
+    _ti_snap = {
+        "id": str(ti.id),
+        "customer_id": str(ti.customer_id),
+        "isin": ti.isin,
+        "side": ti.side,
+        "comment": ti.comment,
+        "enabled": ti.enabled,
+        "version": ti.version,
+    }
+    _customer_snap = SimpleNamespace(
+        id=customer.id,
+        display_name=customer.display_name,
+        broker=customer.broker,
+        username=customer.username,
+        enabled=customer.enabled,
+    )
+
+    def _render_with_error(message: str, code: int):
+        form_values = {
+            "isin": isin if isin is not None and isin != "" else _ti_snap["isin"],
+            "side": str(side if side is not None else _ti_snap["side"]),
+            "comment": comment if comment is not None else (_ti_snap["comment"] or ""),
+            "enabled": enabled == "on",
+            "version": _ti_snap["version"],
+        }
+        ctx = _ctx(request, user, current_tab="/admin/customers")
+        ctx["customer"] = _customer_snap
+        ctx["trade_instruction"] = SimpleNamespace(**_ti_snap)
+        ctx["form_error"] = message
+        ctx["form_values"] = form_values
+        ctx["mode"] = "edit"
+        return templates.TemplateResponse(
+            "admin/trade_instruction_form.html", ctx, status_code=code
+        )
+
+    try:
+        payload = TradeInstructionUpdate(**fields)
+    except ValidationError:
+        return _render_with_error(
+            "Invalid input. Please review the form fields and try again.",
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        await services_trade_instructions.update_trade_instruction(
+            db, trade_id, payload, actor_id=user.id
+        )
+    except TradeInstructionLockError:
+        return _render_with_error(
+            "This trade was changed by someone else while you were "
+            "editing. Reload the page and re-apply your changes.",
+            status.HTTP_409_CONFLICT,
+        )
+    except ValueError as exc:
+        await db.refresh(user)
+        return _render_with_error(str(exc), status.HTTP_400_BAD_REQUEST)
+
+    return _flash_redirect(request, f"/admin/customers/{customer_id}")
+
+
+@router.post("/customers/{customer_id}/trade-instructions/{trade_id}/delete")
+async def admin_trade_instruction_delete(
+    customer_id: UUID,
+    trade_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Soft-delete a TradeInstruction (sets ``enabled=False``)."""
+    ti = await services_trade_instructions.get_trade_instruction(db, trade_id)
+    if ti is None or ti.customer_id != customer_id:
+        raise HTTPException(status_code=404, detail="trade not found")
+    await services_trade_instructions.soft_delete_trade_instruction(
+        db, trade_id, actor_id=user.id
+    )
+    return _flash_redirect(request, f"/admin/customers/{customer_id}")
 
 
 def _redact_config_secrets(text: str) -> str:

@@ -1,10 +1,9 @@
 {#
-  Customer detail page.
+  Customer (account) detail page for the agent UI.
 
-  Identity card on the left + action buttons on the right. The "Server"
-  field is a READ-ONLY badge — agents cannot reassign servers, that's an
-  admin decision. The Fernet ciphertext (``password_enc``) is NEVER
-  rendered.
+  Identity card up top + trade-instruction sub-list below. Server is
+  read-only — agents can't reassign that, admins do. Fernet ciphertext
+  (``password_enc``) is NEVER rendered.
 #}
 {% extends "partials/page_shell.html" %}
 {% block page_title %}{{ customer.display_name }}{% endblock %}
@@ -15,15 +14,14 @@
     <h1 class="h1" dir="auto">{{ customer.display_name }}</h1>
     <p class="text-muted text-small">
       <span class="badge">{{ customer.broker }}</span>
-      <code class="text-small">{{ customer.isin }}</code>
-      · {{ "Buy" if customer.side == 1 else "Sell" }}
+      <code dir="ltr">{{ customer.username }}</code>
+      {% if not customer.enabled %} <span class="badge badge--down">disabled</span>{% endif %}
     </p>
   </div>
   <div class="header-actions">
     <a class="btn btn--primary btn--sm" href="/agent/customers/{{ customer.id }}/edit">Edit</a>
-    <a class="btn btn--ghost btn--sm" href="/agent/customers/{{ customer.id }}/duplicate">Duplicate with new ISIN</a>
     <form method="post" action="/agent/customers/{{ customer.id }}/delete"
-          onsubmit="return confirm('Soft-delete this customer? Trading will stop on the next render cycle.');">
+          onsubmit="return confirm('Soft-delete this customer? All its trades will stop on the next render cycle.');">
       {% include "partials/csrf.html" %}
       <button class="btn btn--danger btn--sm" type="submit">Delete</button>
     </form>
@@ -38,18 +36,6 @@
 
     <dt>Broker</dt>
     <dd><span class="badge">{{ customer.broker }}</span></dd>
-
-    <dt>ISIN</dt>
-    <dd><code>{{ customer.isin }}</code></dd>
-
-    <dt>Side</dt>
-    <dd>
-      {% if customer.side == 1 %}
-        <span class="badge badge--up">Buy</span>
-      {% else %}
-        <span class="badge badge--down">Sell</span>
-      {% endif %}
-    </dd>
 
     <dt>Broker username</dt>
     <dd dir="auto"><code>{{ customer.username }}</code></dd>
@@ -80,22 +66,70 @@
       </p>
     </dd>
 
-    <dt>Section name</dt>
-    <dd>
-      <code class="text-small">{{ customer.section_name }}</code>
-      <p class="text-small text-muted">
-        How this customer appears in <code>config.ini</code> on the trading
-        server. Generated automatically; not editable.
-      </p>
-    </dd>
-
-    {% if customer.comment %}
-    <dt>Comment</dt>
-    <dd dir="auto">{{ customer.comment }}</dd>
-    {% endif %}
-
     <dt>Version</dt>
     <dd class="text-small text-muted">v{{ customer.version }} · created {{ customer.created_at.strftime('%Y-%m-%d %H:%M UTC') }} · updated {{ customer.updated_at.strftime('%Y-%m-%d %H:%M UTC') }}</dd>
   </dl>
+</section>
+
+<section class="card" style="margin-top: 16px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <h2 class="h2" style="margin: 0;">Trade instructions</h2>
+    {% if customer.enabled %}
+    <a class="btn btn--primary btn--sm"
+       href="/agent/customers/{{ customer.id }}/trade-instructions/new">+ Add trade</a>
+    {% endif %}
+  </div>
+  <p class="text-small text-muted">
+    One section per enabled trade is emitted in the on-server
+    <code>config.ini</code> on the next redeploy.
+  </p>
+  {% if not trade_instructions %}
+    {% if customer.enabled %}
+      <p class="text-muted">No trades yet. Click <strong>+ Add trade</strong> to register one.</p>
+    {% else %}
+      <p class="text-muted">This customer is disabled — re-enable it (Edit → tick "Enabled") before adding trades.</p>
+    {% endif %}
+  {% else %}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>ISIN</th>
+        <th>Side</th>
+        <th>Enabled</th>
+        <th>Comment</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for ti in trade_instructions %}
+      <tr>
+        <td><code>{{ ti.isin }}</code></td>
+        <td>
+          {% if ti.side == 1 %}<span class="badge badge--up">Buy</span>
+          {% else %}<span class="badge badge--down">Sell</span>{% endif %}
+        </td>
+        <td>
+          {% if ti.enabled %}<span class="badge badge--up">enabled</span>
+          {% else %}<span class="badge badge--down">disabled</span>{% endif %}
+        </td>
+        <td dir="auto" class="text-small">{{ ti.comment or '—' }}</td>
+        <td style="white-space: nowrap;">
+          <a class="btn btn--ghost btn--sm"
+             href="/agent/customers/{{ customer.id }}/trade-instructions/{{ ti.id }}/edit">Edit</a>
+          {% if ti.enabled %}
+          <form method="post"
+                action="/agent/customers/{{ customer.id }}/trade-instructions/{{ ti.id }}/delete"
+                style="display:inline;"
+                onsubmit="return confirm('Soft-delete this trade? It will stop appearing in config.ini on the next render cycle.');">
+            {% include "partials/csrf.html" %}
+            <button class="btn btn--ghost btn--sm" type="submit">Delete</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
 </section>
 {% endblock %}

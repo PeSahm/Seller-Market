@@ -127,7 +127,7 @@ def _customer_snapshot(customer: Customer) -> dict:
         "stack_id": str(customer.stack_id) if customer.stack_id else None,
         "assignment_status": customer.assignment_status,
         "broker": customer.broker,
-        "section_name": customer.section_name,
+        "username": customer.username,
         "enabled": customer.enabled,
     }
 

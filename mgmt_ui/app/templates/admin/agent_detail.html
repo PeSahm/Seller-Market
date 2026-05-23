@@ -44,7 +44,7 @@
   {% else %}
   <table class="table">
     <thead><tr>
-      <th>Display name</th><th>Broker</th><th>ISIN</th><th>Side</th>
+      <th>Display name</th><th>Broker</th><th>Username</th>
       <th>Server</th><th>Status</th><th></th>
     </tr></thead>
     <tbody>
@@ -53,8 +53,7 @@
       <tr>
         <td><a href="/admin/customers/{{ c.id }}" dir="auto">{{ c.display_name }}</a></td>
         <td><span class="badge">{{ c.broker }}</span></td>
-        <td><code class="text-small">{{ c.isin }}</code></td>
-        <td>{{ "Buy" if c.side == 1 else "Sell" }}</td>
+        <td><code class="text-small" dir="ltr">{{ c.username }}</code></td>
         <td>{% if srv %}<a href="/admin/servers/{{ srv.id }}" dir="auto">{{ srv.name }}</a>{% else %}<span class="badge badge--pending">pending</span>{% endif %}</td>
         <td>
           {% if c.assignment_status == "active" %}<span class="badge badge--up">active</span>
