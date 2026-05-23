@@ -136,6 +136,42 @@
     </div>
   </div>
 
+  {# --- Verify ISIN button ---
+       Logs in to the broker (same captcha+OCR+login flow as the
+       Verify credentials button) and looks the typed ISIN up against
+       the broker's market_data endpoint. Shows the broker-side symbol
+       + title + price bounds so the operator can confirm the ISIN
+       points at the instrument they expect.
+
+       Like verify-credentials, in edit mode the row's ISIN ships as
+       ``isin_fallback`` (defensive — the ISIN input IS pre-filled in
+       edit mode, but staying parallel with broker/username keeps the
+       template predictable). #}
+  <div class="field">
+    {% if is_edit and customer %}
+      <input type="hidden" name="isin_fallback" value="{{ fv.isin|default('') }}">
+    {% endif %}
+    <button type="button" class="btn btn--ghost btn--sm"
+            hx-post="/admin/customers/verify-isin"
+            hx-include="[name=broker],[name=username],[name=password],[name=isin],[name=broker_fallback],[name=username_fallback],[name=isin_fallback]"
+            hx-target="#verify-isin-result"
+            hx-swap="innerHTML"
+            hx-indicator="#verify-isin-spinner">
+      Verify ISIN
+    </button>
+    <span id="verify-isin-spinner" class="htmx-indicator text-small text-muted" style="margin-left: 8px;">
+      Looking up the instrument at the broker… (this hits market_data;
+      can take a few seconds while we solve their captcha)
+    </span>
+    {% if is_edit %}
+    <p class="text-small text-muted" style="margin: 4px 0 0;">
+      Re-type the broker password above to verify — same as Verify
+      credentials, we can't reuse the stored one.
+    </p>
+    {% endif %}
+    <div id="verify-isin-result"></div>
+  </div>
+
   {# --- Broker credentials --- #}
   <div class="field-row">
     <div class="field field--grow">
