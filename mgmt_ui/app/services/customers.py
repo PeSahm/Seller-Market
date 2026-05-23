@@ -237,7 +237,6 @@ async def create_customer(
         username=data.username,
         password_enc=fernet_encrypt(data.password),
         broker=data.broker,
-        enabled=True,
         version=1,
     )
     db.add(customer)
