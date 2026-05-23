@@ -111,11 +111,8 @@ async def admin_dashboard(
         by_agent[key] = by_agent.get(key, 0) + 1
     pending_summary = {"total": len(pending), "by_agent": by_agent}
 
-    # Phase 4: lightweight customer roll-up for the dashboard. We
-    # deliberately use ``include_disabled=False`` here so the card mirrors
-    # what an agent sees in their own view (soft-deleted customers don't
-    # count toward "active").
-    all_customers = await services_customers.list_customers(db, include_disabled=False)
+    # Phase 4: lightweight customer roll-up for the dashboard.
+    all_customers = await services_customers.list_customers(db)
     customer_summary = {
         "total": len(all_customers),
         "active": sum(1 for c in all_customers if c.assignment_status == "active"),
@@ -501,7 +498,7 @@ async def admin_agent_detail(
     if agent is None or agent.role != "agent":
         raise HTTPException(status_code=404, detail="agent not found")
     agent_customers = await services_customers.list_customers(
-        db, agent_id=agent_id, include_disabled=False,
+        db, agent_id=agent_id,
     )
     all_stacks = await services_stacks.list_stacks(db)
     agent_stacks_list = [s for s in all_stacks if s.agent_id == agent_id]
@@ -622,7 +619,6 @@ async def admin_customers(
     agent_id: Optional[str] = None,
     status: Optional[str] = None,
     broker: Optional[str] = None,
-    include_disabled: Optional[str] = None,
     q: Optional[str] = None,
 ):
     """List all customers (accounts) with optional filters + search.
@@ -633,9 +629,8 @@ async def admin_customers(
     (case-insensitive, parameterized ILIKE with escaped wildcards). Empty
     is treated as "no filter".
 
-    Each row carries a ``trade_count`` (total / active) lookup so the
-    template can show "N trades (M active)" without an extra fetch per
-    row.
+    Each row carries a ``trade_count`` lookup so the template can show
+    "N trades" without an extra fetch per row.
     """
     agent_uuid: Optional[UUID] = None
     if agent_id:
@@ -648,13 +643,11 @@ async def admin_customers(
     status = status or None
     broker = broker or None
     q = q or None
-    show_disabled = include_disabled == "on"
     customers = await services_customers.list_customers(
         db,
         agent_id=agent_uuid,
         status=status,
         broker=broker,
-        include_disabled=show_disabled,
         q=q,
     )
     trade_counts = await services_customers.get_customer_trade_counts(
@@ -667,13 +660,12 @@ async def admin_customers(
     servers = {s.id: s for s in await services_servers.list_servers(db)}
     ctx = _ctx(request, user, current_tab="/admin/customers")
     ctx["customers"] = customers
-    ctx["trade_counts"] = trade_counts  # {customer_id: (total, active)}
+    ctx["trade_counts"] = trade_counts  # {customer_id: int}
     ctx["agents_by_id"] = agents
     ctx["servers_by_id"] = servers
     ctx["filter_agent_id"] = agent_id
     ctx["filter_status"] = status
     ctx["filter_broker"] = broker
-    ctx["filter_include_disabled"] = show_disabled
     ctx["filter_q"] = q or ""
     ctx["all_agents"] = list(agents.values())
     return templates.TemplateResponse("admin/customers.html", ctx)
@@ -1024,7 +1016,6 @@ async def admin_customer_edit_form(
         "display_name": customer.display_name,
         "broker": customer.broker,
         "username": customer.username,
-        "enabled": customer.enabled,
         "version": customer.version,
     }
 
@@ -1047,7 +1038,6 @@ async def admin_customer_update(
     broker: Optional[str] = Form(None),
     username: Optional[str] = Form(None),
     password: Optional[str] = Form(None),
-    enabled: Optional[str] = Form(None),  # checkbox → "on" or absent
     version: int = Form(...),
 ):
     """Apply an optimistic-locked update to a Customer (account) row.
@@ -1055,12 +1045,9 @@ async def admin_customer_update(
     Account-shaped fields only — per-trade edits happen via the
     trade-instruction routes.
 
-    * ``password=""`` is treated as "do not change" (we drop it before
-      building :class:`CustomerUpdate`) so the operator can edit other
-      fields without forcing a re-type of the broker password.
-    * ``enabled`` is a checkbox: HTML submits ``"on"`` when ticked and
-      omits the field entirely when not. We translate that explicitly so
-      the service sees a bool rather than ``"on"`` vs ``None``.
+    ``password=""`` is treated as "do not change" (we drop it before
+    building :class:`CustomerUpdate`) so the operator can edit other
+    fields without forcing a re-type of the broker password.
     """
     fields: dict = {"version": version}
     if display_name is not None and display_name != "":
@@ -1071,7 +1058,6 @@ async def admin_customer_update(
         fields["username"] = username
     if password is not None and password != "":
         fields["password"] = password
-    fields["enabled"] = enabled == "on"
 
     customer = await services_customers.get_customer(db, customer_id)
     if customer is None:
@@ -1097,7 +1083,6 @@ async def admin_customer_update(
             "display_name": display_name if display_name is not None else _customer_snap["display_name"],
             "broker": broker if broker is not None and broker != "" else _customer_snap["broker"],
             "username": username if username is not None and username != "" else _customer_snap["username"],
-            "enabled": enabled == "on",
             "version": _customer_snap["version"],
         }
         ctx = _ctx(request, user, current_tab="/admin/customers")
@@ -1153,25 +1138,9 @@ async def admin_customer_update(
     return _flash_redirect(request, f"/admin/customers/{customer_id}")
 
 
-@router.post("/customers/{customer_id}/delete")
-async def admin_customer_delete(
-    customer_id: UUID,
-    request: Request,
-    user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """Soft-delete a customer.
-
-    The service flips ``enabled=False`` and resets
-    ``assignment_status='pending'`` + ``stack_id=NULL``. The render layer
-    drops disabled rows from the next ``config.ini`` push, so the on-server
-    bot stops trading this customer on the next render cycle without us
-    having to touch the remote filesystem from this handler.
-    """
-    await services_customers.soft_delete_customer(
-        db, customer_id, actor_id=user.id
-    )
-    return _flash_redirect(request, "/admin/customers")
+# Customer delete intentionally absent — Customer is a long-lived
+# account record. To stop trading for an account, delete all its
+# TradeInstructions; that's the route that pushes the new config.ini.
 
 
 # ---------------------------------------------------------------------------
@@ -1221,7 +1190,6 @@ async def admin_trade_instruction_create(
         display_name=customer.display_name,
         broker=customer.broker,
         username=customer.username,
-        enabled=customer.enabled,
     )
 
     sticky = {"isin": isin, "side": str(side), "comment": comment or ""}
@@ -1287,7 +1255,6 @@ async def admin_trade_instruction_edit_form(
         "isin": ti.isin,
         "side": str(ti.side),
         "comment": ti.comment or "",
-        "enabled": ti.enabled,
         "version": ti.version,
     }
     ctx = _ctx(request, user, current_tab="/admin/customers")
@@ -1309,7 +1276,6 @@ async def admin_trade_instruction_update(
     isin: Optional[str] = Form(None),
     side: Optional[int] = Form(None),
     comment: Optional[str] = Form(None),
-    enabled: Optional[str] = Form(None),
     version: int = Form(...),
 ):
     """Apply an optimistic-locked update to a TradeInstruction row."""
@@ -1327,7 +1293,6 @@ async def admin_trade_instruction_update(
         fields["side"] = side
     if comment is not None:
         fields["comment"] = comment if comment != "" else None
-    fields["enabled"] = enabled == "on"
 
     # Snapshot both the TradeInstruction AND the parent Customer for the
     # error renderer (PR #73 pattern). The service rollback expires every
@@ -1339,7 +1304,6 @@ async def admin_trade_instruction_update(
         "isin": ti.isin,
         "side": ti.side,
         "comment": ti.comment,
-        "enabled": ti.enabled,
         "version": ti.version,
     }
     _customer_snap = SimpleNamespace(
@@ -1347,7 +1311,6 @@ async def admin_trade_instruction_update(
         display_name=customer.display_name,
         broker=customer.broker,
         username=customer.username,
-        enabled=customer.enabled,
     )
 
     def _render_with_error(message: str, code: int):
@@ -1355,7 +1318,6 @@ async def admin_trade_instruction_update(
             "isin": isin if isin is not None and isin != "" else _ti_snap["isin"],
             "side": str(side if side is not None else _ti_snap["side"]),
             "comment": comment if comment is not None else (_ti_snap["comment"] or ""),
-            "enabled": enabled == "on",
             "version": _ti_snap["version"],
         }
         ctx = _ctx(request, user, current_tab="/admin/customers")
@@ -1401,13 +1363,20 @@ async def admin_trade_instruction_delete(
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Soft-delete a TradeInstruction (sets ``enabled=False``)."""
+    """Hard-delete a TradeInstruction and push the new ``config.ini``.
+
+    The audit-log entry (with the pre-delete snapshot in ``before_json``)
+    is the only forensic trace after this commits. Best-effort push: SSH
+    errors are logged but don't fail the redirect — the operator can
+    re-trigger a push from the stack page if SSH was flaky.
+    """
     ti = await services_trade_instructions.get_trade_instruction(db, trade_id)
     if ti is None or ti.customer_id != customer_id:
         raise HTTPException(status_code=404, detail="trade not found")
-    await services_trade_instructions.soft_delete_trade_instruction(
+    await services_trade_instructions.hard_delete_trade_instruction(
         db, trade_id, actor_id=user.id
     )
+    await _push_customer_stack_config(db, customer_id, actor_id=user.id)
     return _flash_redirect(request, f"/admin/customers/{customer_id}")
 
 
