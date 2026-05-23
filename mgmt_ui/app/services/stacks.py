@@ -397,15 +397,19 @@ async def _build_render_context(
 async def _load_stack_customers(
     db: AsyncSession, stack_id: UUID
 ) -> tuple[CustomerRow, ...]:
-    """Load enabled Customer × TradeInstruction rows for ``stack_id``.
+    """Load Customer × TradeInstruction rows for ``stack_id``.
 
     Post-migration 0003, a Customer's per-trade fields (isin, side,
     section_name) live on a separate ``trade_instructions`` table. The
     renderer's contract is still "one section per tradeable position",
-    so we cross-join enabled customers with their enabled trade
-    instructions here. Each ``CustomerRow`` carries the credentials
-    pulled from Customer plus the (isin, side, section_name) from the
-    TradeInstruction.
+    so we cross-join customers with their trade instructions. Each
+    ``CustomerRow`` carries the credentials pulled from Customer plus
+    the (isin, side, section_name) from the TradeInstruction.
+
+    Migration 0004 dropped the ``enabled`` columns from both tables —
+    deletion is hard now, so anything still in the DB is meant to be
+    rendered. A Customer with zero TradeInstructions contributes zero
+    sections (delete its last TI to stop trading the account).
 
     Password decrypt goes through
     :func:`app.services.customers.decrypt_password` so the
@@ -423,31 +427,14 @@ async def _load_stack_customers(
     from app.services import customers as services_customers  # noqa: WPS433
     from app.models.trade_instructions import TradeInstruction  # noqa: WPS433
 
-    stmt = select(Customer).where(
-        Customer.stack_id == stack_id,
-        Customer.enabled.is_(True),
-    )
+    stmt = select(Customer).where(Customer.stack_id == stack_id)
     result = await db.execute(stmt)
     customer_rows = list(result.scalars().all())
 
     rendered: list[CustomerRow] = []
     for c in customer_rows:
-        # Defence in depth: even though the SELECT already filtered on
-        # enabled=True, an evolving customer service might one day surface
-        # rows through a different path. Skip anything that claims to be
-        # disabled.
-        if not c.enabled:
-            continue
-
-        # Load this customer's enabled trade instructions in one query
-        # (rather than relying on lazy-loading from the ORM, which would
-        # need an awaited refresh). Skipped customers (no instructions)
-        # contribute nothing to the rendered file — matches the
-        # pre-migration behaviour where a Customer without an isin/side
-        # would have been impossible.
         ti_stmt = select(TradeInstruction).where(
-            TradeInstruction.customer_id == c.id,
-            TradeInstruction.enabled.is_(True),
+            TradeInstruction.customer_id == c.id
         )
         ti_rows = list((await db.execute(ti_stmt)).scalars().all())
         if not ti_rows:
