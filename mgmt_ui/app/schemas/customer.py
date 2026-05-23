@@ -93,7 +93,6 @@ class CustomerUpdate(BaseModel):
     # ``password`` is only set when the caller chose to rotate it. The service
     # layer Fernet-encrypts the value into ``password_enc``.
     password: Optional[str] = Field(default=None, min_length=1, max_length=512)
-    enabled: Optional[bool] = None
     version: int = Field(..., ge=1)
 
 
@@ -119,7 +118,6 @@ class CustomerOut(BaseModel):
     display_name: str
     username: str
     broker: str
-    enabled: bool
     version: int
     created_at: datetime
     updated_at: datetime

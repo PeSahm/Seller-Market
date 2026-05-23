@@ -62,14 +62,13 @@ class TradeInstructionUpdate(BaseModel):
     """Partial update with optimistic locking.
 
     Same shape as the Customer update — ``version`` REQUIRED, every other
-    field optional. ``enabled=False`` disables only this one trade, not
-    the entire Customer.
+    field optional. Disabling a trade is no longer an option; if you
+    want a trade to stop, hard-delete it via the delete route.
     """
 
     isin: Optional[str] = Field(default=None, min_length=1, max_length=32)
     side: Optional[Side] = None
     comment: Optional[str] = Field(default=None, max_length=1024)
-    enabled: Optional[bool] = None
     version: int = Field(..., ge=1)
 
     @field_validator("isin")
@@ -91,7 +90,6 @@ class TradeInstructionOut(BaseModel):
     isin: str
     side: int
     section_name: str
-    enabled: bool
     comment: Optional[str]
     version: int
     created_at: datetime
