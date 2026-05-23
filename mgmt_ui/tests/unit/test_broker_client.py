@@ -163,8 +163,21 @@ async def test_verify_credentials_bad_password(patch_httpx):
 
     assert result.ok is False
     assert result.error is not None
-    # Generic message — doesn't expose whether username vs password was bad.
-    assert "username" not in result.error.lower() or "password" in result.error.lower()
+    # The error must not finger-point at which of the two fields was wrong.
+    # The literal substring "username" / "password" CAN appear (e.g. in
+    # the generic "check username/password" hint, which is the correct
+    # framing) — what mustn't appear is a phrase that names ONE
+    # specifically as the broken one.
+    err = result.error.lower()
+    forbidden = [
+        "wrong password", "wrong username",
+        "invalid password", "invalid username",
+        "incorrect password", "incorrect username",
+        "password is wrong", "username is wrong",
+        "bad password", "bad username",
+    ]
+    for phrase in forbidden:
+        assert phrase not in err, f"error message leaks which field was wrong: {phrase!r} in {result.error!r}"
 
 
 @pytest.mark.asyncio

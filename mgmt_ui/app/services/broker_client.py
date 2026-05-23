@@ -131,11 +131,20 @@ async def _login_once(
     """
     captcha_resp = await client.get(endpoints["captcha"], timeout=_HTTP_TIMEOUT_S)
     captcha_resp.raise_for_status()
-    cdata = captcha_resp.json()
+    # The broker is intermittently flaky and can return HTML error pages or
+    # truncated bodies on overload. Catch malformed JSON / missing keys here
+    # rather than letting them propagate as a 500 to the operator.
+    try:
+        cdata = captcha_resp.json()
+        captcha_bytes = cdata["captchaByteData"]
+        captcha_hash = cdata["hashedCaptcha"]
+        captcha_salt = cdata["salt"]
+    except (ValueError, KeyError, TypeError) as exc:
+        body_excerpt = captcha_resp.text[:200] if captcha_resp.text else "<empty>"
+        logger.warning("malformed captcha response: %s — body: %r", exc, body_excerpt)
+        raise httpx.HTTPError(f"malformed captcha response: {exc}") from exc
 
-    captcha_value = await _solve_captcha(
-        client, ocr_service_url, cdata["captchaByteData"]
-    )
+    captcha_value = await _solve_captcha(client, ocr_service_url, captcha_bytes)
     if not captcha_value:
         # Treat OCR returning empty/blank as a "retry" signal (the image
         # may have been ambiguous) rather than a hard failure.
@@ -147,8 +156,8 @@ async def _login_once(
             "loginName": username,
             "password": password,
             "captcha": {
-                "hash": cdata["hashedCaptcha"],
-                "salt": cdata["salt"],
+                "hash": captcha_hash,
+                "salt": captcha_salt,
                 "value": captcha_value,
             },
         },
@@ -159,7 +168,17 @@ async def _login_once(
     # on whether ``token`` is present.
     if login_resp.status_code >= 500:
         login_resp.raise_for_status()
-    body = login_resp.json() if login_resp.content else {}
+    try:
+        body = login_resp.json() if login_resp.content else {}
+    except ValueError:
+        # Login returned non-JSON — treat as a transient failure that the
+        # retry loop will see and (probably) re-attempt.
+        logger.warning(
+            "login response was not JSON (status=%s, body=%r)",
+            login_resp.status_code,
+            login_resp.text[:200] if login_resp.text else "<empty>",
+        )
+        return None
     return body.get("token") or None
 
 

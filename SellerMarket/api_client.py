@@ -344,11 +344,23 @@ class EphoenixAPIClient:
                 raise Exception(f"customer_info endpoint returned isError=true: {msg}")
 
             result = payload.get('result') or {}
-            full_name = result.get('fullName') or '<no name>'
-            national_id = result.get('nationalId') or '<no national_id>'
+            # Avoid PII in INFO logs (these go to centralized logging /
+            # may be exfiltrated). Just confirm the call succeeded and
+            # which broker account it was for — the username is already
+            # in scope on every other log line in this client.
             logger.info(
-                f"Customer info for {self.username}@{self.broker_code}: "
-                f"fullName={full_name!r} nationalId={national_id!r}"
+                f"Customer info fetched for {self.username}@{self.broker_code}"
+            )
+            # If a human needs to see the actual values for debugging,
+            # surface them at DEBUG with the national_id partially masked
+            # (last 4 digits only — enough to disambiguate two operator
+            # accounts without dumping the full ID).
+            national_id = result.get('nationalId') or ''
+            masked_id = ('*' * max(0, len(national_id) - 4)) + national_id[-4:] if national_id else '<missing>'
+            logger.debug(
+                "Customer info detail for %s@%s: nationalId=%s fullName_len=%d",
+                self.username, self.broker_code, masked_id,
+                len(result.get('fullName') or ''),
             )
             return result
 
