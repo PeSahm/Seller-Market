@@ -53,7 +53,12 @@ from alembic import op
 
 
 # revision identifiers, used by Alembic.
-revision: str = "0003_split_customer_trade_instruction"
+# NOTE: ``alembic_version.version_num`` is ``VARCHAR(32)`` by default —
+# anything longer triggers ``StringDataRightTruncationError`` on the
+# final UPDATE alembic_version inside the migration transaction, which
+# rolls back the whole upgrade. Keep this <= 32 chars (the descriptive
+# name lives in the FILENAME, which is unbounded).
+revision: str = "0003_split_customer_ti"
 down_revision: Union[str, Sequence[str], None] = "0002_server_image_pull_policy"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
