@@ -70,16 +70,6 @@
   </div>
 
   {% if is_edit %}
-  <div class="field">
-    <label class="radio-row">
-      <input type="checkbox" name="enabled" {% if fv.enabled %}checked{% endif %}>
-      Enabled
-    </label>
-    <p class="text-small text-muted">
-      Unticking disables just this trade. The customer's other trades
-      keep working.
-    </p>
-  </div>
   <input type="hidden" name="version" value="{{ fv.version }}">
   {% endif %}
 

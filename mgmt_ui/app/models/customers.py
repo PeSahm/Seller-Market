@@ -6,7 +6,6 @@ from typing import Optional
 
 import sqlalchemy as sa
 from sqlalchemy import (
-    Boolean,
     Enum as SAEnum,
     ForeignKey,
     Integer,
@@ -99,7 +98,6 @@ class Customer(Base):
     username: Mapped[str] = mapped_column(String(255), nullable=False)
     password_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     broker: Mapped[str] = mapped_column(String(255), nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(
         sa.TIMESTAMP(timezone=True),

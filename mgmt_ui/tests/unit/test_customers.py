@@ -137,7 +137,6 @@ async def test_optimistic_lock_version_mismatch_raises(
         broker="bbi",
         username="u",
         password_enc=b"",
-        enabled=True,
         server_id=None,
         stack_id=None,
         assignment_status="pending",

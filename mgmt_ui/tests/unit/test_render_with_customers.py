@@ -38,7 +38,6 @@ def _fake_customer(
     broker: str = "bbi",
     isin: str = "IRO3AYHZ0001",
     side: int = 1,
-    enabled: bool = True,
     display_name: str = "Test",
     trade_instructions: "list[SimpleNamespace] | None" = None,
 ) -> SimpleNamespace:
@@ -61,7 +60,6 @@ def _fake_customer(
         username=username,
         password_enc=password_enc,
         broker=broker,
-        enabled=enabled,
         display_name=display_name,
     )
     if trade_instructions is not None:
@@ -79,7 +77,6 @@ def _fake_customer(
                 isin=isin,
                 side=side,
                 section_name=section_name,
-                enabled=enabled,
                 comment=None,
             )
         ]
@@ -91,7 +88,6 @@ def _fake_trade(
     section_name: str,
     isin: str = "IRO3AYHZ0001",
     side: int = 1,
-    enabled: bool = True,
 ) -> SimpleNamespace:
     """Single TradeInstruction stand-in for multi-TI tests."""
     return SimpleNamespace(
@@ -100,7 +96,6 @@ def _fake_trade(
         isin=isin,
         side=side,
         section_name=section_name,
-        enabled=enabled,
         comment=None,
     )
 
@@ -158,14 +153,11 @@ def _make_db(customer_rows: list[SimpleNamespace]) -> MagicMock:
 
     customers_result = _scalars_result(customer_rows)
 
-    # One trade_instructions result per ENABLED customer — the loader's
-    # ``if not c.enabled: continue`` guard skips the TI query for
-    # disabled customers, so feeding a result for them would shift the
-    # AsyncMock side_effect sequence.
+    # Post-0004 the loader has no enabled filter — every customer's TIs
+    # are fetched in turn.
     ti_results = [
         _scalars_result(getattr(c, "trade_instructions", []))
         for c in customer_rows
-        if c.enabled
     ]
 
     # Phase 5: empty scheduler-jobs list.
@@ -270,47 +262,7 @@ async def test_section_header_format(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. test_render_omits_disabled_customers
-# ---------------------------------------------------------------------------
-
-
-async def test_render_omits_disabled_customers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Disabled rows must NOT appear in the rendered output.
-
-    The SELECT in :func:`_load_stack_customers` already filters on
-    ``enabled = TRUE``, but we additionally guard inside the projection loop.
-    This test exercises the projection-loop guard by handing back a row that
-    the SELECT (here a mock) didn't filter out — proving the secondary guard
-    is load-bearing.
-    """
-    enabled_row = _fake_customer(
-        section_name="a11111111_c22222222_bbi_IRO3AYHZ0001", enabled=True
-    )
-    disabled_row = _fake_customer(
-        section_name="a99999999_c99999999_bbi_IRO9DISABLE9", enabled=False
-    )
-    db = _make_db([enabled_row, disabled_row])
-    stack = _fake_stack()
-
-    async def _fake_decrypt(_c):
-        return "p"
-
-    monkeypatch.setattr(
-        "app.services.customers.decrypt_password", _fake_decrypt
-    )
-
-    ctx = await stacks_svc._build_render_context(db, stack)
-    out = render_config_ini(ctx)
-
-    assert "[a11111111_c22222222_bbi_IRO3AYHZ0001]" in out
-    assert "IRO9DISABLE9" not in out
-    assert "[a99999999_c99999999_bbi_IRO9DISABLE9]" not in out
-
-
-# ---------------------------------------------------------------------------
-# 4. test_render_passwords_are_decrypted_plaintext
+# 3. test_render_passwords_are_decrypted_plaintext
 # ---------------------------------------------------------------------------
 
 

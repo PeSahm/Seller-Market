@@ -6,7 +6,6 @@ from typing import Optional
 
 import sqlalchemy as sa
 from sqlalchemy import (
-    Boolean,
     CheckConstraint,
     ForeignKey,
     Integer,
@@ -60,7 +59,6 @@ class TradeInstruction(Base):
     isin: Mapped[str] = mapped_column(String(64), nullable=False)
     side: Mapped[int] = mapped_column(Integer, nullable=False)
     section_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(

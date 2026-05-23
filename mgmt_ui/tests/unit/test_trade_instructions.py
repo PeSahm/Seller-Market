@@ -85,7 +85,16 @@ def test_side_enum_rejects_three() -> None:
 def test_trade_instruction_out_has_required_fields() -> None:
     fields = set(TradeInstructionOut.model_fields.keys())
     assert {"id", "customer_id", "isin", "side", "section_name",
-            "enabled", "comment", "version"} <= fields
+            "comment", "version"} <= fields
+
+
+def test_trade_instruction_schemas_drop_enabled() -> None:
+    """Migration 0004 dropped the ``enabled`` column — the schemas must
+    not silently round-trip it (Pydantic v2's ``extra='ignore'`` would
+    otherwise hide an out-of-band write)."""
+    assert "enabled" not in TradeInstructionOut.model_fields
+    assert "enabled" not in TradeInstructionUpdate.model_fields
+    assert "enabled" not in TradeInstructionCreate.model_fields
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +119,6 @@ async def test_update_optimistic_lock_mismatch_raises(
         isin="IRO3AYHZ0001",
         side=1,
         section_name="a_c_t_bbi_IRO3AYHZ0001_s1",
-        enabled=True,
         comment=None,
     )
 

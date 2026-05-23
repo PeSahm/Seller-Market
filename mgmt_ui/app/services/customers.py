@@ -85,7 +85,6 @@ def _public_snapshot(customer: Customer) -> dict:
         "display_name": customer.display_name,
         "username": customer.username,
         "broker": customer.broker,
-        "enabled": customer.enabled,
         "version": customer.version,
     }
 
@@ -141,7 +140,6 @@ async def list_customers(
     status: Optional[str] = None,
     server_id: Optional[UUID] = None,
     broker: Optional[str] = None,
-    include_disabled: bool = False,
     q: Optional[str] = None,
 ) -> list[Customer]:
     """List customers with optional filters.
@@ -151,7 +149,6 @@ async def list_customers(
     literal ``%`` or ``_`` in the query string matches itself rather than
     everything). Empty / whitespace-only ``q`` is treated as "no filter".
 
-    ``include_disabled=False`` (the default) hides soft-deleted accounts.
     The result is ordered by ``display_name`` for a stable UX.
     """
     stmt = select(Customer)
@@ -163,8 +160,6 @@ async def list_customers(
         stmt = stmt.where(Customer.server_id == server_id)
     if broker is not None:
         stmt = stmt.where(Customer.broker == broker)
-    if not include_disabled:
-        stmt = stmt.where(Customer.enabled.is_(True))
     if q is not None and q.strip():
         pat = f"%{_escape_ilike(q.strip())}%"
         stmt = stmt.where(
@@ -190,8 +185,8 @@ async def get_customer(db: AsyncSession, customer_id: UUID) -> Optional[Customer
 
 async def get_customer_trade_counts(
     db: AsyncSession, customer_ids: list[UUID]
-) -> dict[UUID, tuple[int, int]]:
-    """For a list of customer ids, return ``{id: (total, enabled)}``.
+) -> dict[UUID, int]:
+    """For a list of customer ids, return ``{id: total}``.
 
     Powers the customer-list page's "trades" column. One query for the
     whole page rather than N+1 per row. Customer ids absent from the
@@ -203,13 +198,12 @@ async def get_customer_trade_counts(
         select(
             TradeInstruction.customer_id,
             func.count().label("total"),
-            func.count().filter(TradeInstruction.enabled.is_(True)).label("active"),
         )
         .where(TradeInstruction.customer_id.in_(customer_ids))
         .group_by(TradeInstruction.customer_id)
     )
     result = await db.execute(stmt)
-    return {row.customer_id: (row.total, row.active) for row in result.all()}
+    return {row.customer_id: row.total for row in result.all()}
 
 
 # ---------------------------------------------------------------------------
@@ -331,53 +325,6 @@ async def update_customer(
 
 
 # ---------------------------------------------------------------------------
-# Delete (soft)
-# ---------------------------------------------------------------------------
-
-
-async def soft_delete_customer(
-    db: AsyncSession,
-    customer_id: UUID,
-    actor_id: UUID,
-) -> None:
-    """Soft-delete a customer (account).
-
-    Marks ``enabled=False``, resets ``assignment_status='pending'`` and
-    ``stack_id=NULL``. The render layer (Phase 4) filters disabled
-    customers out of the next ``config.ini`` push.
-
-    Idempotent: deleting a missing or already-disabled customer is a no-op.
-    Disabling the customer also implicitly disables all its trade
-    instructions for rendering purposes (the renderer's join filters on
-    ``customers.enabled AND trade_instructions.enabled``); we don't
-    touch the per-instruction ``enabled`` flags so re-enabling the
-    customer restores everything that was active before.
-    """
-    customer = await get_customer(db, customer_id)
-    if customer is None:
-        return
-    if not customer.enabled:
-        return
-
-    before = _public_snapshot(customer)
-    customer.enabled = False
-    customer.assignment_status = "pending"
-    customer.stack_id = None
-    customer.version += 1
-    customer.updated_at = _now_utc()
-
-    await _write_audit(
-        db,
-        actor_id=actor_id,
-        action="customer.delete",
-        target_id=customer.id,
-        before=before,
-        after=_public_snapshot(customer),
-    )
-    await db.commit()
-
-
-# ---------------------------------------------------------------------------
 # Password decrypt (for the render layer)
 # ---------------------------------------------------------------------------
 
@@ -404,6 +351,5 @@ __all__ = [
     "get_customer",
     "get_customer_trade_counts",
     "list_customers",
-    "soft_delete_customer",
     "update_customer",
 ]

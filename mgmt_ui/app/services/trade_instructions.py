@@ -11,10 +11,12 @@ The service mirrors the shape of :mod:`app.services.customers`:
 * ``get_trade_instruction(db, id)`` — single read
 * ``create_trade_instruction(db, customer_id, data, actor_id)``
 * ``update_trade_instruction(db, id, data, actor_id)`` (optimistic-locked)
-* ``soft_delete_trade_instruction(db, id, actor_id)``
+* ``hard_delete_trade_instruction(db, id, actor_id)``
 
 Each write emits a structured audit-log entry under target_type
-``"trade_instruction"``.
+``"trade_instruction"``. The delete audit row carries the pre-delete
+snapshot in ``before_json`` and ``after_json=None`` — the row itself is
+gone after the commit; the audit entry is the only forensic trace.
 
 Section name
 ------------
@@ -104,7 +106,6 @@ def _public_snapshot(ti: TradeInstruction) -> dict:
         "isin": ti.isin,
         "side": ti.side,
         "section_name": ti.section_name,
-        "enabled": ti.enabled,
         "comment": ti.comment,
         "version": ti.version,
     }
@@ -139,20 +140,16 @@ async def _write_audit(
 async def list_trade_instructions(
     db: AsyncSession,
     customer_id: UUID,
-    *,
-    include_disabled: bool = True,
 ) -> list[TradeInstruction]:
-    """Return all trade instructions for one customer.
-
-    ``include_disabled`` defaults to True for admin UI use — the operator
-    wants to see disabled ones so they can re-enable. The renderer
-    explicitly passes False (via stacks.py's join clause) to hide them.
-    """
-    stmt = select(TradeInstruction).where(TradeInstruction.customer_id == customer_id)
-    if not include_disabled:
-        stmt = stmt.where(TradeInstruction.enabled.is_(True))
-    stmt = stmt.order_by(
-        TradeInstruction.isin, TradeInstruction.side, TradeInstruction.created_at
+    """Return all trade instructions for one customer."""
+    stmt = (
+        select(TradeInstruction)
+        .where(TradeInstruction.customer_id == customer_id)
+        .order_by(
+            TradeInstruction.isin,
+            TradeInstruction.side,
+            TradeInstruction.created_at,
+        )
     )
     result = await db.execute(stmt)
     return list(result.scalars().all())
@@ -196,7 +193,6 @@ async def create_trade_instruction(
         side=data.side,
         # Placeholder until the flush gives us the id.
         section_name="",
-        enabled=True,
         comment=data.comment,
         version=1,
     )
@@ -290,39 +286,39 @@ async def update_trade_instruction(
 
 
 # ---------------------------------------------------------------------------
-# Delete (soft)
+# Delete (hard)
 # ---------------------------------------------------------------------------
 
 
-async def soft_delete_trade_instruction(
+async def hard_delete_trade_instruction(
     db: AsyncSession,
     trade_instruction_id: UUID,
     actor_id: UUID,
 ) -> None:
-    """Soft-delete a TradeInstruction by flipping ``enabled=False``.
+    """Hard-delete a TradeInstruction — the row is gone after this commits.
 
-    Same idempotency rule as soft_delete_customer: no-op for missing /
-    already-disabled rows, no duplicate audit entries.
+    The audit row is written first (capturing the pre-delete snapshot in
+    ``before_json``) and the DELETE runs in the same transaction, so a
+    crash between the two either rolls both back or commits both. The
+    audit ``target_id`` is free-form TEXT (not an FK) so it survives the
+    deletion of the row it references.
+
+    Idempotent: missing trade_instruction is a no-op.
     """
     ti = await get_trade_instruction(db, trade_instruction_id)
     if ti is None:
         return
-    if not ti.enabled:
-        return
 
     before = _public_snapshot(ti)
-    ti.enabled = False
-    ti.version += 1
-    ti.updated_at = _now_utc()
-
     await _write_audit(
         db,
         actor_id=actor_id,
         action="trade_instruction.delete",
         target_id=ti.id,
         before=before,
-        after=_public_snapshot(ti),
+        after=None,
     )
+    await db.delete(ti)
     await db.commit()
 
 
@@ -330,7 +326,7 @@ __all__ = [
     "OptimisticLockError",
     "create_trade_instruction",
     "get_trade_instruction",
+    "hard_delete_trade_instruction",
     "list_trade_instructions",
-    "soft_delete_trade_instruction",
     "update_trade_instruction",
 ]

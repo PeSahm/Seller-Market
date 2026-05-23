@@ -10,7 +10,7 @@
 <p class="text-muted text-small">
   Each customer is one brokerage account. After creating it, open the
   customer to add trade instructions (one ISIN+side each). The bot
-  generates one <code>config.ini</code> section per enabled trade.
+  generates one <code>config.ini</code> section per trade.
 </p>
 
 <form method="get" action="/agent/customers" class="filter-bar">
@@ -54,7 +54,7 @@
   <tbody>
     {% for c in customers %}
     {% set srv = servers_by_id.get(c.server_id) if c.server_id else None %}
-    {% set _counts = trade_counts.get(c.id) if trade_counts else None %}
+    {% set _count = trade_counts.get(c.id) if trade_counts else None %}
     <tr>
       <td>
         <a href="/agent/customers/{{ c.id }}" dir="auto">{{ c.display_name }}</a>
@@ -62,8 +62,8 @@
       <td><span class="badge">{{ c.broker }}</span></td>
       <td><code class="text-small" dir="ltr">{{ c.username }}</code></td>
       <td>
-        {% if _counts %}
-          {{ _counts[0] }} <span class="text-small text-muted">({{ _counts[1] }} active)</span>
+        {% if _count %}
+          {{ _count }}
         {% else %}
           <span class="text-muted">0</span>
         {% endif %}

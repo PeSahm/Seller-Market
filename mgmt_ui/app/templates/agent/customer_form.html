@@ -82,13 +82,6 @@
   </div>
 
   {% if is_edit %}
-  <div class="field">
-    <label class="radio-row">
-      <input type="checkbox" name="enabled" value="on"
-             {% if fv.enabled %}checked{% endif %}>
-      Enabled — uncheck to disable trading on this customer (all its trades go quiet).
-    </label>
-  </div>
   <input type="hidden" name="version" value="{{ customer.version }}">
   {% endif %}
 

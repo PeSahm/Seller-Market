@@ -128,7 +128,6 @@ def _customer_snapshot(customer: Customer) -> dict:
         "assignment_status": customer.assignment_status,
         "broker": customer.broker,
         "username": customer.username,
-        "enabled": customer.enabled,
     }
 
 
@@ -465,13 +464,11 @@ async def _resolve_round_robin(
 
     candidate_ids = [s.id for s in candidate_servers]
 
-    # Per-server MAX(created_at). Filter customers to enabled ones because
-    # disabled rows don't generate traffic — a server with only disabled
-    # customers should still be considered "stale" enough to pick.
+    # Per-server MAX(created_at). Post-0004 every customer in the DB is
+    # live (no more soft-delete), so no enabled filter is needed.
     stmt = (
         select(Customer.server_id, func.max(Customer.created_at))
         .where(Customer.server_id.in_(candidate_ids))
-        .where(Customer.enabled.is_(True))
         .group_by(Customer.server_id)
     )
     result = await db.execute(stmt)
@@ -515,7 +512,6 @@ async def _resolve_least_customers(
     stmt = (
         select(Customer.server_id, func.count(Customer.id))
         .where(Customer.server_id.in_(candidate_ids))
-        .where(Customer.enabled.is_(True))
         .group_by(Customer.server_id)
     )
     result = await db.execute(stmt)
@@ -545,7 +541,7 @@ async def _resolve_broker_affinity(
     Lookup:
 
     1. ``SELECT DISTINCT server_id FROM customers WHERE agent_id = $1
-       AND broker = $2 AND server_id IS NOT NULL AND enabled``.
+       AND broker = $2 AND server_id IS NOT NULL``.
     2. If any of those server_ids are in ``candidate_servers``, pick
        the one with the most existing customers of this broker for this
        agent (so a server with 3 bbi customers wins over one with 1).
@@ -563,7 +559,6 @@ async def _resolve_broker_affinity(
         .where(Customer.agent_id == customer.agent_id)
         .where(Customer.broker == customer.broker)
         .where(Customer.server_id.is_not(None))
-        .where(Customer.enabled.is_(True))
         .group_by(Customer.server_id)
     )
     result = await db.execute(stmt)
@@ -1044,7 +1039,6 @@ async def pending_customers(
     stmt = (
         select(Customer)
         .where(Customer.assignment_status == "pending")
-        .where(Customer.enabled.is_(True))
         .order_by(Customer.created_at.asc())
     )
     if agent_id is not None:

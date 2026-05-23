@@ -5,21 +5,19 @@
     c              — Customer row (from app.models.customers)
     agents_by_id   — dict[UUID, User] for resolving agent_id to username
     servers_by_id  — dict[UUID, Server] for resolving server_id to name
-    trade_counts   — dict[UUID, tuple[total, active]] (optional)
+    trade_counts   — dict[UUID, int] (optional)
 
   Status badge mapping mirrors the stack table:
     pending   → badge--pending (waiting on admin assignment)
     assigned  → badge--pending (assigned but render not yet pushed)
     active    → badge--up      (config.ini deployed)
-    disabled  → badge--down    (soft-deleted, enabled=False)
 #}
 {% set _agent = agents_by_id.get(c.agent_id) if agents_by_id else None %}
 {% set _server = servers_by_id.get(c.server_id) if (c.server_id and servers_by_id) else None %}
-{% set _counts = trade_counts.get(c.id) if trade_counts else None %}
+{% set _count = trade_counts.get(c.id) if trade_counts else None %}
 <tr>
   <td>
     <a href="/admin/customers/{{ c.id }}" dir="auto">{{ c.display_name }}</a>
-    {% if not c.enabled %}<span class="badge badge--down" title="soft-deleted">disabled</span>{% endif %}
   </td>
   <td>
     {% if _agent %}
@@ -32,8 +30,8 @@
   <td><code class="text-small">{{ c.broker }}</code></td>
   <td><code class="text-small" dir="ltr">{{ c.username }}</code></td>
   <td>
-    {% if _counts %}
-      {{ _counts[0] }} <span class="text-small text-muted">({{ _counts[1] }} active)</span>
+    {% if _count %}
+      {{ _count }}
     {% else %}
       <span class="text-muted">0</span>
     {% endif %}
@@ -46,8 +44,7 @@
     {% endif %}
   </td>
   <td>
-    {% if not c.enabled %}<span class="badge badge--down">disabled</span>
-    {% elif c.assignment_status == 'active' %}<span class="badge badge--up">active</span>
+    {% if c.assignment_status == 'active' %}<span class="badge badge--up">active</span>
     {% elif c.assignment_status == 'assigned' %}<span class="badge badge--pending">assigned</span>
     {% elif c.assignment_status == 'pending' %}<span class="badge badge--pending">pending</span>
     {% else %}<span class="badge badge--pending">{{ c.assignment_status }}</span>{% endif %}

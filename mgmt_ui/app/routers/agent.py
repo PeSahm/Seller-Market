@@ -154,7 +154,6 @@ async def agent_dashboard(
     my_customers = await services_customers.list_customers(
         db,
         agent_id=user.id if user.role == "agent" else None,
-        include_disabled=False,
     )
     customer_summary = {
         "total": len(my_customers),
@@ -330,11 +329,11 @@ async def agent_customers(
     q = q or None
     if user.role == "admin":
         customers = await services_customers.list_customers(
-            db, status=status_filter, include_disabled=False, q=q
+            db, status=status_filter, q=q
         )
     else:
         customers = await services_customers.list_customers(
-            db, agent_id=user.id, status=status_filter, include_disabled=False, q=q
+            db, agent_id=user.id, status=status_filter, q=q
         )
     trade_counts = await services_customers.get_customer_trade_counts(
         db, [c.id for c in customers]
@@ -489,7 +488,6 @@ async def agent_customer_edit_form(
         "display_name": customer.display_name,
         "broker": customer.broker,
         "username": customer.username,
-        "enabled": customer.enabled,
     }
     ctx["brokers"] = BROKERS
     ctx["mode"] = "edit"
@@ -506,7 +504,6 @@ async def agent_customer_update(
     broker: Optional[str] = Form(None),
     username: Optional[str] = Form(None),
     password: Optional[str] = Form(None),
-    enabled: Optional[str] = Form(None),
     version: int = Form(...),
 ):
     """Apply a partial, optimistic-locked update to a Customer (account)."""
@@ -524,7 +521,6 @@ async def agent_customer_update(
         update_kwargs["username"] = username
     if password:
         update_kwargs["password"] = password
-    update_kwargs["enabled"] = enabled == "on"
 
     # PR #73 pattern: snapshot the customer's mutable attrs to primitives
     # BEFORE handing the row to ``update_customer``. The service does
@@ -538,7 +534,6 @@ async def agent_customer_update(
         display_name=customer.display_name,
         broker=customer.broker,
         username=customer.username,
-        enabled=customer.enabled,
         version=customer.version,
     )
 
@@ -546,7 +541,6 @@ async def agent_customer_update(
         "display_name": display_name if display_name is not None else customer.display_name,
         "broker": broker if broker is not None else customer.broker,
         "username": username if username is not None else customer.username,
-        "enabled": update_kwargs["enabled"],
     }
 
     try:
@@ -618,29 +612,8 @@ async def agent_customer_update(
     )
 
 
-@router.post("/customers/{customer_id}/delete")
-async def agent_customer_delete(
-    customer_id: UUID,
-    request: Request,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Soft-delete a customer (the service flips ``enabled=False``)."""
-    _require_agent_or_admin(user)
-    customer = await services_customers.get_customer(db, customer_id)
-    if customer is None or not _can_access_customer(user, customer):
-        raise HTTPException(status_code=404, detail="customer not found")
-    await services_customers.soft_delete_customer(
-        db, customer_id, actor_id=user.id
-    )
-    if request.headers.get("HX-Request"):
-        return Response(
-            status_code=204, headers={"HX-Redirect": "/agent/customers"}
-        )
-    return Response(
-        status_code=status.HTTP_303_SEE_OTHER,
-        headers={"Location": "/agent/customers"},
-    )
+# Customer delete intentionally absent — see admin.py for the rationale.
+# To stop trading for an account, delete each of its TradeInstructions.
 
 
 # ---------------------------------------------------------------------------
@@ -692,7 +665,6 @@ async def agent_trade_instruction_create(
         display_name=customer.display_name,
         broker=customer.broker,
         username=customer.username,
-        enabled=customer.enabled,
     )
 
     sticky = {"isin": isin, "side": str(side), "comment": comment or ""}
@@ -769,7 +741,6 @@ async def agent_trade_instruction_edit_form(
         "isin": ti.isin,
         "side": str(ti.side),
         "comment": ti.comment or "",
-        "enabled": ti.enabled,
         "version": ti.version,
     }
     ctx["mode"] = "edit"
@@ -786,7 +757,6 @@ async def agent_trade_instruction_update(
     isin: Optional[str] = Form(None),
     side: Optional[int] = Form(None),
     comment: Optional[str] = Form(None),
-    enabled: Optional[str] = Form(None),
     version: int = Form(...),
 ):
     _require_agent_or_admin(user)
@@ -804,7 +774,6 @@ async def agent_trade_instruction_update(
         fields["side"] = side
     if comment is not None:
         fields["comment"] = comment if comment != "" else None
-    fields["enabled"] = enabled == "on"
 
     # PR #73 pattern: snapshot both the TI and the parent Customer to
     # primitives before the service call. After ``db.rollback()`` on a
@@ -816,7 +785,6 @@ async def agent_trade_instruction_update(
         isin=ti.isin,
         side=ti.side,
         comment=ti.comment,
-        enabled=ti.enabled,
         version=ti.version,
     )
     _customer_snap = SimpleNamespace(
@@ -824,14 +792,12 @@ async def agent_trade_instruction_update(
         display_name=customer.display_name,
         broker=customer.broker,
         username=customer.username,
-        enabled=customer.enabled,
     )
 
     sticky = {
         "isin": isin if isin is not None and isin != "" else ti.isin,
         "side": str(side if side is not None else ti.side),
         "comment": comment if comment is not None else (ti.comment or ""),
-        "enabled": fields["enabled"],
         "version": ti.version,
     }
 
@@ -905,6 +871,7 @@ async def agent_trade_instruction_delete(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Hard-delete a TradeInstruction and push the new ``config.ini``."""
     _require_agent_or_admin(user)
     customer = await services_customers.get_customer(db, customer_id)
     if customer is None or not _can_access_customer(user, customer):
@@ -912,9 +879,10 @@ async def agent_trade_instruction_delete(
     ti = await services_trade_instructions.get_trade_instruction(db, trade_id)
     if ti is None or ti.customer_id != customer_id:
         raise HTTPException(status_code=404, detail="trade not found")
-    await services_trade_instructions.soft_delete_trade_instruction(
+    await services_trade_instructions.hard_delete_trade_instruction(
         db, trade_id, actor_id=user.id
     )
+    await _push_customer_stack_config(db, customer_id, actor_id=user.id)
     redirect_to = f"/agent/customers/{customer_id}"
     if request.headers.get("HX-Request"):
         return Response(status_code=204, headers={"HX-Redirect": redirect_to})
@@ -1776,7 +1744,6 @@ async def agent_trades(
     picker_customers = await services_customers.list_customers(
         db,
         agent_id=user.id if user.role != "admin" else None,
-        include_disabled=True,
     )
 
     ctx = _ctx(request, user, current_tab="/agent/trades")

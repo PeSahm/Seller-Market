@@ -109,18 +109,8 @@
     <textarea class="input" id="comment" name="comment" rows="2" maxlength="1024" dir="auto">{{ fv.comment|default('') }}</textarea>
   </div>
 
-  {# --- Enabled toggle (edit only) --- #}
+  {# --- Optimistic-lock token (edit only) --- #}
   {% if is_edit %}
-  <div class="field">
-    <label class="radio-row">
-      <input type="checkbox" name="enabled" {% if fv.enabled %}checked{% endif %}>
-      Enabled
-    </label>
-    <p class="text-small text-muted">
-      Unticking disables only this trade. The customer (and its other
-      trades) keep working.
-    </p>
-  </div>
   <input type="hidden" name="version" value="{{ fv.version }}">
   {% endif %}
 
