@@ -186,6 +186,12 @@
       Verifying… (this hits the broker; can take a few seconds while we
       solve their captcha)
     </span>
+    {% if is_edit %}
+    <p class="text-small text-muted" style="margin: 4px 0 0;">
+      Re-type the broker password above to verify — the stored one isn't
+      decrypted for probing.
+    </p>
+    {% endif %}
     <div id="verify-result"></div>
   </div>
 
