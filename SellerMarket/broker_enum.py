@@ -56,10 +56,15 @@ class BrokerCode(Enum):
         # ib: api8.ibtrader.ir — a separate shard from the regular api.ibtrader.ir.
         if self.value == "ib":
             portfolio = 'https://api8.ibtrader.ir/api/portfolio/getrealsecuritypositionbydate'
+            customer_info = 'https://api8.ibtrader.ir/api/party/getcustomerinfo'
         else:
             portfolio = (
                 f'https://backofficeexternal{prefix}{domain}'
                 '/api/portfolio/getrealsecuritypositionbydate'
+            )
+            customer_info = (
+                f'https://backofficeexternal{prefix}{domain}'
+                '/api/party/getcustomerinfo'
             )
 
         return {
@@ -72,4 +77,5 @@ class BrokerCode(Enum):
             'open_orders': f'https://api{prefix}{domain}/api/v2/orders/GetOpenOrders',
             'market_data': f'https://{mdapi}.{domain}/api/v2/instruments/full',
             'portfolio': portfolio,
+            'customer_info': customer_info,
         }
