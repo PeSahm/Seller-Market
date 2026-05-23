@@ -845,6 +845,26 @@ async def admin_customer_verify_credentials(
             "admin/partials/customer_verify_result.html", ctx
         )
 
+    if not password:
+        # Edit mode allows submitting the form without a password (the
+        # placeholder says "Leave empty to keep current"), but verify
+        # NEEDS a real password — we can't decrypt the stored one
+        # server-side just for a probe (defeats the password-at-rest
+        # design). Short-circuit with a clear instruction instead of
+        # five attempts against the broker with an empty password.
+        ctx = _ctx(request, user, current_tab="/admin/customers")
+        ctx["result"] = broker_client.VerifyResult(
+            ok=False,
+            error=(
+                "Type the broker password above before clicking Verify — "
+                "we can't reuse the stored one for verification."
+            ),
+        )
+        ctx["typed_username"] = effective_username
+        return templates.TemplateResponse(
+            "admin/partials/customer_verify_result.html", ctx
+        )
+
     ocr_service_url = await settings_store.get_setting(db, "ocr_service_url")
     result = await broker_client.verify_credentials(
         broker_code=effective_broker,
