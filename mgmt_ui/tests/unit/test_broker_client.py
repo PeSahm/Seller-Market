@@ -26,7 +26,12 @@ import httpx
 import pytest
 
 from app.services import broker_client
-from app.services.broker_client import VerifyResult, verify_credentials
+from app.services.broker_client import (
+    IsinInfo,
+    VerifyResult,
+    verify_credentials,
+    verify_isin,
+)
 
 
 @pytest.mark.asyncio
@@ -54,7 +59,13 @@ async def test_endpoints_for_ib():
     )
 
 
-def _make_handler(*, login_token, customer_info_payload, ocr_text="ABCD"):
+def _make_handler(
+    *,
+    login_token,
+    customer_info_payload,
+    ocr_text="ABCD",
+    market_data_payload=None,
+):
     """Build a callable that routes a request to a canned response based
     on URL substring. Used as the ``handler`` for ``httpx.MockTransport``.
     """
@@ -78,6 +89,10 @@ def _make_handler(*, login_token, customer_info_payload, ocr_text="ABCD"):
             return httpx.Response(200, json={"token": login_token})
         if "/api/party/getcustomerinfo" in url:
             return httpx.Response(200, json=customer_info_payload)
+        if "/api/v2/instruments/full" in url:
+            # ``market_data_payload`` defaults to "no instrument" — only
+            # the verify_isin tests override it.
+            return httpx.Response(200, json=market_data_payload or [])
         return httpx.Response(404, text=f"unmocked URL: {url}")
 
     return handler
@@ -100,11 +115,12 @@ def patch_httpx(monkeypatch):
 
     monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
 
-    def configure(*, token, payload, ocr_text="ABCD"):
+    def configure(*, token, payload, ocr_text="ABCD", market_data=None):
         state["handler"] = _make_handler(
             login_token=token,
             customer_info_payload=payload,
             ocr_text=ocr_text,
+            market_data_payload=market_data,
         )
 
     return configure
@@ -205,3 +221,109 @@ async def test_verify_credentials_broker_error_surfaces_message(patch_httpx):
 
     assert result.ok is False
     assert result.error == "حساب کاربری غیرفعال است."
+
+
+# ---------------------------------------------------------------------------
+# verify_isin tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_isin_success(patch_httpx):
+    """Happy path: market_data returns one instrument; ``IsinInfo`` carries
+    symbol, title, prices, volumes pulled from the nested ``i`` and ``t``
+    keys (same shape the bot's ``get_instrument_info`` uses).
+    """
+    patch_httpx(
+        token="fake-jwt-token",
+        payload={"result": {}, "isError": False},  # customer-info not called
+        market_data=[
+            {
+                "i": {
+                    "s": "saipa",
+                    "t": "Iran Khodro Saipa",
+                    "maxeq": 1_000_000,
+                    "mineq": 1,
+                },
+                "t": {
+                    "cup": 12_345,
+                    "minap": 11_500,
+                    "maxap": 13_200,
+                },
+            }
+        ],
+    )
+
+    result = await verify_isin(
+        broker_code="ayandeh",
+        username="4580090306",
+        password="correct",
+        isin="IRO3SAIPA0001",
+        ocr_service_url="http://ocr.test",
+    )
+
+    assert isinstance(result, IsinInfo)
+    assert result.ok is True
+    assert result.isin == "IRO3SAIPA0001"
+    assert result.symbol == "saipa"
+    assert result.title == "Iran Khodro Saipa"
+    assert result.last_price == 12_345
+    assert result.min_price == 11_500
+    assert result.max_price == 13_200
+    assert result.max_volume == 1_000_000
+    assert result.min_volume == 1
+    assert result.error is None
+
+
+@pytest.mark.asyncio
+async def test_verify_isin_not_found(patch_httpx):
+    """market_data returns an empty array — no instrument matches the
+    typed ISIN. Return ``ok=False`` with a clear error naming the ISIN."""
+    patch_httpx(
+        token="fake-jwt-token",
+        payload={"result": {}, "isError": False},
+        market_data=[],
+    )
+
+    result = await verify_isin(
+        broker_code="ayandeh",
+        username="4580090306",
+        password="correct",
+        isin="IROABOGUS0001",
+        ocr_service_url="http://ocr.test",
+    )
+
+    assert result.ok is False
+    assert "IROABOGUS0001" in (result.error or "")
+    assert result.symbol is None
+
+
+@pytest.mark.asyncio
+async def test_verify_isin_bad_credentials(patch_httpx):
+    """Login returns no token → can't even call market_data. The error
+    must point at the credentials, not at the ISIN."""
+    patch_httpx(
+        token=None,  # login never returns a token
+        payload={"result": {}, "isError": False},
+        market_data=[],  # never reached
+    )
+
+    result = await verify_isin(
+        broker_code="ayandeh",
+        username="4580090306",
+        password="WRONG",
+        isin="IRO3SAIPA0001",
+        ocr_service_url="http://ocr.test",
+    )
+
+    assert result.ok is False
+    # The same forbidden-phrase guarantees as verify_credentials apply.
+    assert result.error is not None
+    err = result.error.lower()
+    for phrase in [
+        "wrong password",
+        "wrong username",
+        "invalid password",
+        "invalid username",
+    ]:
+        assert phrase not in err

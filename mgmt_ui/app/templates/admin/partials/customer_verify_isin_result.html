@@ -1,0 +1,46 @@
+{# Result partial for the Verify-ISIN button on the customer form.
+   ``result`` is a broker_client.IsinInfo. #}
+{% if result.ok %}
+<div class="flash flash--success" style="margin-top: 8px;">
+  <strong>✓ ISIN verified</strong>
+</div>
+<dl class="kv kv--inline">
+  <dt>Symbol</dt>
+  <dd>
+    {% if result.symbol %}
+      <strong dir="auto" style="font-size: 1.1em;">{{ result.symbol }}</strong>
+    {% else %}—{% endif %}
+  </dd>
+  {% if result.title %}
+  <dt>Title</dt>
+  <dd dir="auto">{{ result.title }}</dd>
+  {% endif %}
+  <dt>ISIN</dt>
+  <dd><code dir="ltr">{{ result.isin or '—' }}</code></dd>
+  {% if result.last_price is not none %}
+  <dt>Last price</dt>
+  <dd><code>{{ '{:,.0f}'.format(result.last_price) }}</code></dd>
+  {% endif %}
+  {% if result.min_price is not none and result.max_price is not none %}
+  <dt>Price band</dt>
+  <dd>
+    <code>{{ '{:,.0f}'.format(result.min_price) }}</code>
+    –
+    <code>{{ '{:,.0f}'.format(result.max_price) }}</code>
+  </dd>
+  {% endif %}
+  {% if result.max_volume is not none %}
+  <dt>Max volume</dt>
+  <dd><code>{{ '{:,}'.format(result.max_volume) }}</code></dd>
+  {% endif %}
+  {% if result.min_volume is not none %}
+  <dt>Min volume</dt>
+  <dd><code>{{ '{:,}'.format(result.min_volume) }}</code></dd>
+  {% endif %}
+</dl>
+{% else %}
+<div class="flash flash--error" style="margin-top: 8px;">
+  <strong>✗ ISIN verification failed</strong>
+  <p class="text-small" dir="auto">{{ result.error or 'Unknown error.' }}</p>
+</div>
+{% endif %}

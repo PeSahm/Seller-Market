@@ -65,8 +65,31 @@ class VerifyResult:
     error: Optional[str] = None  # operator-facing error explanation
 
 
+@dataclass
+class IsinInfo:
+    """Outcome of an ISIN lookup against the broker's market_data endpoint.
+
+    Same ``ok=True`` / ``ok=False`` shape as :class:`VerifyResult`. On
+    success the operator sees the broker-side ``symbol`` + ``title`` so
+    they can confirm they typed the right instrument; price + volume
+    bounds round out the sanity card.
+    """
+
+    ok: bool
+    isin: Optional[str] = None
+    symbol: Optional[str] = None
+    title: Optional[str] = None
+    last_price: Optional[float] = None
+    min_price: Optional[float] = None
+    max_price: Optional[float] = None
+    max_volume: Optional[int] = None
+    min_volume: Optional[int] = None
+    error: Optional[str] = None
+
+
 def _endpoints_for(broker_code: str) -> dict[str, str]:
-    """Return the captcha / login / customer_info URL trio for a broker.
+    """Return the captcha / login / customer_info / market_data URL set
+    for a broker.
 
     Duplicates the URL-construction logic in
     ``SellerMarket/broker_enum.py::BrokerCode.get_endpoints``. We do NOT
@@ -80,8 +103,11 @@ def _endpoints_for(broker_code: str) -> dict[str, str]:
             "captcha": f"https://identity{prefix}{domain}/api/Captcha/GetCaptcha",
             "login": f"https://identity{prefix}{domain}/api/v2/accounts/login",
             "customer_info": "https://api8.ibtrader.ir/api/party/getcustomerinfo",
+            "market_data": "https://mdapi.ibtrader.ir/api/v2/instruments/full",
         }
-    # ephoenix family — same prefix shape as the bot.
+    # ephoenix family — same prefix shape as the bot. Note that
+    # ``market_data`` is a SHARED host across the whole ephoenix family
+    # (``mdapi1.ephoenix.ir``) — no per-broker prefix there.
     domain = "ephoenix.ir"
     prefix = f"-{broker_code}."
     return {
@@ -91,6 +117,7 @@ def _endpoints_for(broker_code: str) -> dict[str, str]:
             f"https://backofficeexternal{prefix}{domain}"
             "/api/party/getcustomerinfo"
         ),
+        "market_data": "https://mdapi1.ephoenix.ir/api/v2/instruments/full",
     }
 
 
@@ -193,6 +220,41 @@ async def _login_once(
     return body.get("token") or None
 
 
+async def _get_token_with_retries(
+    client: httpx.AsyncClient,
+    endpoints: dict[str, str],
+    username: str,
+    password: str,
+    ocr_service_url: str,
+) -> tuple[Optional[str], Optional[str]]:
+    """Drive the captcha-login retry loop. Return (token, last_error).
+
+    Extracted from ``verify_credentials`` so both verify endpoints (creds
+    + isin) can reuse the same path — captcha solves are flaky, so each
+    operation gets up to ``_MAX_LOGIN_RETRIES`` attempts of its own.
+    """
+    last_error: Optional[str] = None
+    for attempt in range(1, _MAX_LOGIN_RETRIES + 1):
+        try:
+            token = await _login_once(
+                client, endpoints, username, password, ocr_service_url
+            )
+        except httpx.HTTPError as exc:
+            # Transport-level failure on captcha / OCR / login.
+            # Include the URL + exception class on the WARNING line so the
+            # operator can tell *which* of the three hosts actually failed.
+            failed_url = getattr(getattr(exc, "request", None), "url", None)
+            last_error = (
+                f"login attempt {attempt} failed ({type(exc).__name__}"
+                f" on {failed_url}): {exc}"
+            )
+            logger.warning(last_error)
+            continue
+        if token:
+            return token, None
+    return None, last_error
+
+
 async def verify_credentials(
     broker_code: str,
     username: str,
@@ -206,32 +268,9 @@ async def verify_credentials(
     endpoints = _endpoints_for(broker_code)
 
     async with httpx.AsyncClient() as client:
-        token: Optional[str] = None
-        last_error: Optional[str] = None
-
-        for attempt in range(1, _MAX_LOGIN_RETRIES + 1):
-            try:
-                token = await _login_once(
-                    client, endpoints, username, password, ocr_service_url
-                )
-            except httpx.HTTPError as exc:
-                # Transport-level failure on captcha / OCR / login.
-                # Retry on the next loop iteration — captchas are flaky;
-                # the broker host occasionally returns 502.
-                # Include the URL + exception class on the WARNING line so
-                # the operator can tell *which* of the three hosts (broker
-                # captcha, OCR, broker login) actually failed — the raw
-                # ``str(exc)`` from httpx often omits the URL.
-                failed_url = getattr(getattr(exc, "request", None), "url", None)
-                last_error = (
-                    f"login attempt {attempt} failed ({type(exc).__name__}"
-                    f" on {failed_url}): {exc}"
-                )
-                logger.warning(last_error)
-                continue
-            if token:
-                break
-
+        token, last_error = await _get_token_with_retries(
+            client, endpoints, username, password, ocr_service_url
+        )
         if not token:
             return VerifyResult(
                 ok=False,
@@ -282,4 +321,96 @@ async def verify_credentials(
             bourse_code=result.get("bourseCode") or None,
             type_=result.get("type") or None,
             message=payload.get("message") or None,
+        )
+
+
+async def verify_isin(
+    broker_code: str,
+    username: str,
+    password: str,
+    isin: str,
+    ocr_service_url: str,
+) -> IsinInfo:
+    """Look up an ISIN against the broker's ``market_data`` endpoint and
+    return the broker-side symbol / title / price-bounds.
+
+    Same login flow as :func:`verify_credentials` — captcha + OCR + login
+    to obtain a Bearer token — then ``POST /api/v2/instruments/full``
+    with ``{"isinList": [<isin>]}`` and pluck the first record.
+
+    Mirrors ``SellerMarket/api_client.py::get_instrument_info`` wire
+    contract.
+    """
+    endpoints = _endpoints_for(broker_code)
+
+    async with httpx.AsyncClient() as client:
+        token, last_error = await _get_token_with_retries(
+            client, endpoints, username, password, ocr_service_url
+        )
+        if not token:
+            return IsinInfo(
+                ok=False,
+                isin=isin,
+                error=(
+                    last_error
+                    or "Authentication failed — check username/password "
+                    f"(captcha solve gave up after {_MAX_LOGIN_RETRIES} attempts)"
+                ),
+            )
+
+        try:
+            md_resp = await client.post(
+                endpoints["market_data"],
+                headers={
+                    "authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36"
+                    ),
+                },
+                json={"isinList": [isin]},
+                timeout=_HTTP_TIMEOUT_S,
+            )
+            md_resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.exception("market_data HTTP error for ISIN %s", isin)
+            return IsinInfo(
+                ok=False,
+                isin=isin,
+                error=f"cannot reach broker market-data endpoint: {exc}",
+            )
+
+        try:
+            instruments = md_resp.json() or []
+        except ValueError:
+            return IsinInfo(
+                ok=False,
+                isin=isin,
+                error="broker returned non-JSON market data",
+            )
+        if not instruments:
+            return IsinInfo(
+                ok=False,
+                isin=isin,
+                error=f"No instrument found for ISIN {isin}.",
+            )
+
+        # Same nested-key shape used by the bot's get_instrument_info.
+        # Be defensive about missing nested keys — surface a clear error
+        # rather than letting a KeyError become a 500.
+        item = instruments[0] or {}
+        i = item.get("i") or {}
+        t = item.get("t") or {}
+        return IsinInfo(
+            ok=True,
+            isin=isin,
+            symbol=i.get("s") or None,
+            title=i.get("t") or None,
+            last_price=t.get("cup"),
+            min_price=t.get("minap"),
+            max_price=t.get("maxap"),
+            max_volume=i.get("maxeq"),
+            min_volume=i.get("mineq"),
         )

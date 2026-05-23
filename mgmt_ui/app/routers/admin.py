@@ -883,6 +883,91 @@ async def admin_customer_verify_credentials(
     )
 
 
+@router.post("/customers/verify-isin")
+async def admin_customer_verify_isin(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    broker: str = Form(""),
+    username: str = Form(""),
+    password: str = Form(...),
+    isin: str = Form(""),
+    broker_fallback: str = Form(""),
+    username_fallback: str = Form(""),
+    isin_fallback: str = Form(""),
+):
+    """One-shot probe: log in to the broker with the typed credentials,
+    then look up the typed ISIN against ``market_data`` and return the
+    broker-confirmed symbol/title/price-bounds as an HTMX partial.
+
+    Same auth flow as ``admin_customer_verify_credentials`` (captcha + OCR
+    + login). Same edit-mode fallback shape: the dropdown's
+    ``value=""`` sentinel means the live broker field can be blank;
+    ``broker_fallback`` (and defensively ``username_fallback``,
+    ``isin_fallback``) carry the row-sourced values from the customer
+    being edited.
+
+    Never persists anything. Password is consumed only for the duration
+    of the request and never echoed back in the partial.
+    """
+    effective_broker = broker or broker_fallback
+    effective_username = username or username_fallback
+    effective_isin = (isin or isin_fallback or "").strip().upper()
+
+    if not effective_broker:
+        ctx = _ctx(request, user, current_tab="/admin/customers")
+        ctx["result"] = broker_client.IsinInfo(
+            ok=False,
+            isin=effective_isin or None,
+            error="No broker selected — pick one in the Broker dropdown above.",
+        )
+        return templates.TemplateResponse(
+            "admin/partials/customer_verify_isin_result.html", ctx
+        )
+
+    if not effective_isin:
+        ctx = _ctx(request, user, current_tab="/admin/customers")
+        ctx["result"] = broker_client.IsinInfo(
+            ok=False,
+            error="No ISIN to verify — type one in the ISIN field above.",
+        )
+        return templates.TemplateResponse(
+            "admin/partials/customer_verify_isin_result.html", ctx
+        )
+
+    if not password:
+        # Same reason as verify-credentials: we can't reuse the stored
+        # ciphertext, and login requires a real password to obtain the
+        # Bearer token that market_data needs.
+        ctx = _ctx(request, user, current_tab="/admin/customers")
+        ctx["result"] = broker_client.IsinInfo(
+            ok=False,
+            isin=effective_isin,
+            error=(
+                "Type the broker password above before clicking Verify ISIN — "
+                "we need it to obtain a Bearer token for the market-data call."
+            ),
+        )
+        return templates.TemplateResponse(
+            "admin/partials/customer_verify_isin_result.html", ctx
+        )
+
+    ocr_service_url = await settings_store.get_setting(db, "ocr_service_url")
+    result = await broker_client.verify_isin(
+        broker_code=effective_broker,
+        username=effective_username,
+        password=password,
+        isin=effective_isin,
+        ocr_service_url=ocr_service_url,
+    )
+    ctx = _ctx(request, user, current_tab="/admin/customers")
+    ctx["result"] = result
+    return templates.TemplateResponse(
+        "admin/partials/customer_verify_isin_result.html",
+        ctx,
+    )
+
+
 @router.get("/customers/{customer_id}")
 async def admin_customer_detail(
     customer_id: UUID,
