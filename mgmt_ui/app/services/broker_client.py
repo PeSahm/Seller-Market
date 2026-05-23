@@ -218,7 +218,15 @@ async def verify_credentials(
                 # Transport-level failure on captcha / OCR / login.
                 # Retry on the next loop iteration — captchas are flaky;
                 # the broker host occasionally returns 502.
-                last_error = f"login attempt {attempt} failed: {exc}"
+                # Include the URL + exception class on the WARNING line so
+                # the operator can tell *which* of the three hosts (broker
+                # captcha, OCR, broker login) actually failed — the raw
+                # ``str(exc)`` from httpx often omits the URL.
+                failed_url = getattr(getattr(exc, "request", None), "url", None)
+                last_error = (
+                    f"login attempt {attempt} failed ({type(exc).__name__}"
+                    f" on {failed_url}): {exc}"
+                )
                 logger.warning(last_error)
                 continue
             if token:
