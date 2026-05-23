@@ -70,8 +70,10 @@ def _make_handler(*, login_token, customer_info_payload, ocr_text="ABCD"):
                     "hashedCaptcha": "hash-xyz",
                 },
             )
-        if "/predict" in url:
-            return httpx.Response(200, json={"text": ocr_text})
+        if "/ocr/captcha-easy-base64" in url:
+            # Real service returns plain text (sometimes JSON-quoted).
+            # The client peels surrounding quotes itself.
+            return httpx.Response(200, text=ocr_text)
         if "/api/v2/accounts/login" in url:
             return httpx.Response(200, json={"token": login_token})
         if "/api/party/getcustomerinfo" in url:

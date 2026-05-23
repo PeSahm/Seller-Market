@@ -101,20 +101,31 @@ async def _solve_captcha(
 ) -> Optional[str]:
     """Send a captcha image to the OCR microservice and return the decoded text.
 
-    Returns ``None`` if the OCR service can't decode this captcha (an empty
-    or missing ``text`` in the response).
+    Returns ``None`` if the OCR service can't decode this captcha (empty
+    body after stripping).
+
+    Mirrors the wire contract in
+    ``SellerMarket/captcha_utils.py::decode_captcha``:
+
+    * ``POST {ocr_service_url}/ocr/captcha-easy-base64``
+    * headers: ``Content-Type: application/json``, ``accept: text/plain``
+    * body: ``{"base64": "<base64-image-string>"}``
+    * response body is the decoded text in plain text, occasionally wrapped
+      in JSON-style double quotes — peel them off.
     """
-    # The OCR service exposes a /predict endpoint that takes the base64-encoded
-    # captcha image and returns ``{"text": "<decoded>"}``. Matches the contract
-    # used by the bot's captcha_decoder callable.
-    url = ocr_service_url.rstrip("/") + "/predict"
+    url = ocr_service_url.rstrip("/") + "/ocr/captcha-easy-base64"
     resp = await client.post(
         url,
-        json={"image": captcha_byte_data},
+        json={"base64": captcha_byte_data},
+        headers={"accept": "text/plain", "Content-Type": "application/json"},
         timeout=_HTTP_TIMEOUT_S,
     )
     resp.raise_for_status()
-    return (resp.json() or {}).get("text") or None
+    text = (resp.text or "").strip()
+    # Some OCR backends return ``"ABCD"`` (quoted) — peel them.
+    if len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+        text = text[1:-1]
+    return text or None
 
 
 async def _login_once(
