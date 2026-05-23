@@ -242,20 +242,20 @@ async def verify_credentials(
                 ),
             )
 
-        # Token in hand — call getcustomerinfo.
+        # Token in hand — call getcustomerinfo. This is a GET (not POST);
+        # the broker returns 405 Method Not Allowed for POST. The
+        # user-id is read from the Bearer token.
         try:
-            info_resp = await client.post(
+            info_resp = await client.get(
                 endpoints["customer_info"],
                 headers={
                     "authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
                     "Accept": "application/json",
                     "User-Agent": (
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36"
                     ),
                 },
-                json={},
                 timeout=_HTTP_TIMEOUT_S,
             )
             info_resp.raise_for_status()

@@ -325,15 +325,14 @@ class EphoenixAPIClient:
             token = self.authenticate()
             headers = {
                 'authorization': f'Bearer {token}',
-                'Content-Type': 'application/json',
                 'Accept': 'application/json',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
-            # Empty body — the endpoint reads the user-id from the token.
-            response = requests.post(
+            # GET — the broker reads the user-id from the Bearer token.
+            # An earlier draft POSTed empty body and got 405 Method Not Allowed.
+            response = requests.get(
                 self.endpoints['customer_info'],
                 headers=headers,
-                json={},
                 timeout=10,
             )
             response.raise_for_status()
