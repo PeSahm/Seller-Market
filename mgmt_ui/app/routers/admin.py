@@ -802,27 +802,53 @@ async def admin_customer_verify_credentials(
     request: Request,
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    broker: str = Form(...),
-    username: str = Form(...),
+    broker: str = Form(""),
+    username: str = Form(""),
     password: str = Form(...),
+    broker_fallback: str = Form(""),
+    username_fallback: str = Form(""),
 ):
     """One-shot probe: log in to the broker with the typed credentials and
     return the broker-confirmed customer info as an HTMX partial.
 
-    Powers the *Verify credentials* button on
-    ``/admin/customers/new``. Never persists anything; the password is
-    accepted only for the duration of this request and is NEVER echoed back
-    in the rendered partial.
+    Powers the *Verify credentials* button on both the add and edit
+    customer pages. Never persists anything; the password is accepted only
+    for the duration of this request and is NEVER echoed back in the
+    rendered partial.
+
+    Edit-mode quirk: the broker <select> on the edit form defaults to
+    ``value=""`` (the "keep current" sentinel), so the live form posts an
+    empty broker even when the row has one. The template ships
+    ``broker_fallback`` (and defensively ``username_fallback``) sourced
+    from the loaded customer row; we use them as the fallback when the
+    live field is blank.
 
     Returns the ``admin/partials/customer_verify_result.html`` partial with
     a :class:`broker_client.VerifyResult` in the context — success renders
     a green badge plus the broker-reported ``fullName`` / ``nationalId``,
     failure renders a red badge plus the operator-readable error.
     """
+    # Prefer the live form field; fall back to the row-sourced hidden input.
+    effective_broker = broker or broker_fallback
+    effective_username = username or username_fallback
+
+    if not effective_broker:
+        # Render the failure partial directly instead of trying a request
+        # to ``https://identity-.ephoenix.ir/...`` which DNS-fails.
+        ctx = _ctx(request, user, current_tab="/admin/customers")
+        ctx["result"] = broker_client.VerifyResult(
+            ok=False,
+            error="No broker selected — pick one in the Broker dropdown above.",
+        )
+        ctx["typed_username"] = effective_username
+        return templates.TemplateResponse(
+            "admin/partials/customer_verify_result.html", ctx
+        )
+
     ocr_service_url = await settings_store.get_setting(db, "ocr_service_url")
     result = await broker_client.verify_credentials(
-        broker_code=broker,
-        username=username,
+        broker_code=effective_broker,
+        username=effective_username,
         password=password,
         ocr_service_url=ocr_service_url,
     )
@@ -830,7 +856,7 @@ async def admin_customer_verify_credentials(
     ctx["result"] = result
     # Echo the typed username so the partial can warn on
     # ``nationalId != username`` (operator picked the wrong account).
-    ctx["typed_username"] = username
+    ctx["typed_username"] = effective_username
     return templates.TemplateResponse(
         "admin/partials/customer_verify_result.html",
         ctx,
