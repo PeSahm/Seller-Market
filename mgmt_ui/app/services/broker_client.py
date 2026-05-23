@@ -358,28 +358,54 @@ async def verify_isin(
                 ),
             )
 
-        try:
-            md_resp = await client.post(
-                endpoints["market_data"],
-                headers={
-                    "authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36"
-                    ),
-                },
-                json={"isinList": [isin]},
-                timeout=_HTTP_TIMEOUT_S,
-            )
-            md_resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            logger.exception("market_data HTTP error for ISIN %s", isin)
+        # The market_data host (``mdapi1.ephoenix.ir`` for the ephoenix
+        # family) is occasionally slow to handshake from Iranian VPSes —
+        # we saw a ``httpx.ConnectTimeout`` in production at the same
+        # moment a curl probe completed in 80ms. Don't make the operator
+        # pay the full captcha-login cost again for a transient blip:
+        # retry the POST a few times before giving up. Bumped per-call
+        # timeout to 20s as well so a one-off slow handshake doesn't
+        # trip the budget.
+        md_resp = None
+        last_md_error: Optional[str] = None
+        for md_attempt in range(1, 4):
+            try:
+                md_resp = await client.post(
+                    endpoints["market_data"],
+                    headers={
+                        "authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36"
+                        ),
+                    },
+                    json={"isinList": [isin]},
+                    timeout=20.0,
+                )
+                md_resp.raise_for_status()
+                break
+            except httpx.HTTPError as exc:
+                # ``str(httpx.ConnectTimeout())`` is the empty string —
+                # surface the class name and the URL so the operator
+                # can see what actually died.
+                failed_url = getattr(getattr(exc, "request", None), "url", None)
+                last_md_error = (
+                    f"market_data attempt {md_attempt} failed "
+                    f"({type(exc).__name__} on {failed_url}): {exc or '<no detail>'}"
+                )
+                logger.warning(last_md_error)
+                md_resp = None
+                continue
+        if md_resp is None:
             return IsinInfo(
                 ok=False,
                 isin=isin,
-                error=f"cannot reach broker market-data endpoint: {exc}",
+                error=(
+                    last_md_error
+                    or "cannot reach broker market-data endpoint after 3 attempts"
+                ),
             )
 
         try:
