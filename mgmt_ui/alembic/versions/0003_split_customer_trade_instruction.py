@@ -127,7 +127,11 @@ def upgrade() -> None:
                 SELECT DISTINCT ON (agent_id, broker, username)
                        id AS canonical_id, agent_id, broker, username
                 FROM customers
-                ORDER BY agent_id, broker, username, created_at ASC, id ASC
+                -- ``enabled DESC`` picks an enabled row over a disabled one
+                -- if the group has both — otherwise the consolidated Customer
+                -- inherits ``enabled=False`` even though some of its
+                -- trade instructions are still meant to be active.
+                ORDER BY agent_id, broker, username, enabled DESC, created_at ASC, id ASC
             )
             INSERT INTO trade_instructions (
                 id, customer_id, isin, side, section_name, comment,
@@ -163,7 +167,11 @@ def upgrade() -> None:
                 SELECT DISTINCT ON (agent_id, broker, username)
                        id AS canonical_id, agent_id, broker, username
                 FROM customers
-                ORDER BY agent_id, broker, username, created_at ASC, id ASC
+                -- ``enabled DESC`` picks an enabled row over a disabled one
+                -- if the group has both — otherwise the consolidated Customer
+                -- inherits ``enabled=False`` even though some of its
+                -- trade instructions are still meant to be active.
+                ORDER BY agent_id, broker, username, enabled DESC, created_at ASC, id ASC
             )
             UPDATE trade_results tr
             SET customer_id = can.canonical_id
@@ -186,7 +194,11 @@ def upgrade() -> None:
                 SELECT DISTINCT ON (agent_id, broker, username)
                        id AS canonical_id, agent_id, broker, username
                 FROM customers
-                ORDER BY agent_id, broker, username, created_at ASC, id ASC
+                -- ``enabled DESC`` picks an enabled row over a disabled one
+                -- if the group has both — otherwise the consolidated Customer
+                -- inherits ``enabled=False`` even though some of its
+                -- trade instructions are still meant to be active.
+                ORDER BY agent_id, broker, username, enabled DESC, created_at ASC, id ASC
             )
             DELETE FROM customers c
             USING canonical can

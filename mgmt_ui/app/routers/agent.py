@@ -21,6 +21,7 @@ from __future__ import annotations
 import difflib
 import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Optional
 from uuid import UUID
 
@@ -525,6 +526,22 @@ async def agent_customer_update(
         update_kwargs["password"] = password
     update_kwargs["enabled"] = enabled == "on"
 
+    # PR #73 pattern: snapshot the customer's mutable attrs to primitives
+    # BEFORE handing the row to ``update_customer``. The service does
+    # ``db.rollback()`` on the duplicate-tuple IntegrityError before
+    # raising ValueError, which expires every loaded ORM attribute. Any
+    # subsequent attribute access (e.g. in the Jinja-sync template) would
+    # trigger a lazy-load via ``do_ping_w_event`` and explode with
+    # ``MissingGreenlet``.
+    _customer_snap = SimpleNamespace(
+        id=customer.id,
+        display_name=customer.display_name,
+        broker=customer.broker,
+        username=customer.username,
+        enabled=customer.enabled,
+        version=customer.version,
+    )
+
     sticky = {
         "display_name": display_name if display_name is not None else customer.display_name,
         "broker": broker if broker is not None else customer.broker,
@@ -579,7 +596,9 @@ async def agent_customer_update(
         ctx["form_values"] = sticky
         ctx["brokers"] = BROKERS
         ctx["mode"] = "edit"
-        ctx["customer"] = customer
+        # Use the snapshot taken before update_customer — the live ``customer``
+        # object's attrs are expired after the rollback (see comment above).
+        ctx["customer"] = _customer_snap
         return templates.TemplateResponse(
             "agent/customer_form.html",
             ctx,
@@ -665,6 +684,17 @@ async def agent_trade_instruction_create(
     if customer is None or not _can_access_customer(user, customer):
         raise HTTPException(status_code=404, detail="customer not found")
 
+    # PR #73 pattern: snapshot the parent customer's attrs BEFORE the
+    # service call so the error renderer can use plain primitives even
+    # after the rollback expires the live ORM row.
+    _customer_snap = SimpleNamespace(
+        id=customer.id,
+        display_name=customer.display_name,
+        broker=customer.broker,
+        username=customer.username,
+        enabled=customer.enabled,
+    )
+
     sticky = {"isin": isin, "side": str(side), "comment": comment or ""}
 
     try:
@@ -675,7 +705,7 @@ async def agent_trade_instruction_create(
         )
     except (ValidationError, ValueError) as exc:
         ctx = _ctx(request, user, current_tab="/agent/customers")
-        ctx["customer"] = customer
+        ctx["customer"] = _customer_snap
         ctx["form_error"] = (
             "Invalid input. Please review the form fields and try again."
             if isinstance(exc, ValidationError)
@@ -696,7 +726,7 @@ async def agent_trade_instruction_create(
     except ValueError as exc:
         await db.refresh(user)
         ctx = _ctx(request, user, current_tab="/agent/customers")
-        ctx["customer"] = customer
+        ctx["customer"] = _customer_snap
         ctx["form_error"] = str(exc)
         ctx["form_values"] = sticky
         ctx["mode"] = "create"
@@ -776,6 +806,27 @@ async def agent_trade_instruction_update(
         fields["comment"] = comment if comment != "" else None
     fields["enabled"] = enabled == "on"
 
+    # PR #73 pattern: snapshot both the TI and the parent Customer to
+    # primitives before the service call. After ``db.rollback()`` on a
+    # duplicate-tuple IntegrityError, both ORM objects' attrs are expired
+    # and the sync Jinja render would lazy-load → MissingGreenlet.
+    _ti_snap = SimpleNamespace(
+        id=ti.id,
+        customer_id=ti.customer_id,
+        isin=ti.isin,
+        side=ti.side,
+        comment=ti.comment,
+        enabled=ti.enabled,
+        version=ti.version,
+    )
+    _customer_snap = SimpleNamespace(
+        id=customer.id,
+        display_name=customer.display_name,
+        broker=customer.broker,
+        username=customer.username,
+        enabled=customer.enabled,
+    )
+
     sticky = {
         "isin": isin if isin is not None and isin != "" else ti.isin,
         "side": str(side if side is not None else ti.side),
@@ -788,8 +839,8 @@ async def agent_trade_instruction_update(
         payload = TradeInstructionUpdate(**fields)
     except (ValidationError, ValueError) as exc:
         ctx = _ctx(request, user, current_tab="/agent/customers")
-        ctx["customer"] = customer
-        ctx["trade_instruction"] = ti
+        ctx["customer"] = _customer_snap
+        ctx["trade_instruction"] = _ti_snap
         ctx["form_error"] = (
             "Invalid input. Please review the form fields and try again."
             if isinstance(exc, ValidationError)
@@ -809,8 +860,8 @@ async def agent_trade_instruction_update(
         )
     except TradeInstructionLockError:
         ctx = _ctx(request, user, current_tab="/agent/customers")
-        ctx["customer"] = customer
-        ctx["trade_instruction"] = ti
+        ctx["customer"] = _customer_snap
+        ctx["trade_instruction"] = _ti_snap
         ctx["form_error"] = (
             "Another change won the race. Reload the page and try again."
         )
@@ -824,8 +875,8 @@ async def agent_trade_instruction_update(
     except ValueError as exc:
         await db.refresh(user)
         ctx = _ctx(request, user, current_tab="/agent/customers")
-        ctx["customer"] = customer
-        ctx["trade_instruction"] = ti
+        ctx["customer"] = _customer_snap
+        ctx["trade_instruction"] = _ti_snap
         ctx["form_error"] = str(exc)
         ctx["form_values"] = sticky
         ctx["mode"] = "edit"

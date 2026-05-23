@@ -106,7 +106,11 @@
     <code>config.ini</code> on the next redeploy.
   </p>
   {% if not trade_instructions %}
-    <p class="text-muted">No trade instructions yet. Click <strong>+ Add trade</strong> to register one.</p>
+    {% if customer.enabled %}
+      <p class="text-muted">No trade instructions yet. Click <strong>+ Add trade</strong> to register one.</p>
+    {% else %}
+      <p class="text-muted">This customer is disabled — re-enable it (Edit → tick "Enabled") before adding trades.</p>
+    {% endif %}
   {% else %}
   <table class="table">
     <thead>

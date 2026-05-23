@@ -14,6 +14,7 @@ from __future__ import annotations
 import difflib
 import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Optional
 from uuid import UUID
 
@@ -1099,7 +1100,6 @@ async def admin_customer_update(
             "enabled": enabled == "on",
             "version": _customer_snap["version"],
         }
-        from types import SimpleNamespace
         ctx = _ctx(request, user, current_tab="/admin/customers")
         ctx["customer"] = SimpleNamespace(**_customer_snap)
         ctx["agent"] = SimpleNamespace(username=_agent_username_snap) if agent is not None else None
@@ -1213,6 +1213,17 @@ async def admin_trade_instruction_create(
     if customer is None:
         raise HTTPException(status_code=404, detail="customer not found")
 
+    # PR #73 pattern: snapshot the customer's attrs to primitives BEFORE
+    # handing off to the service, so the error renderer doesn't trigger a
+    # sync lazy-load on attributes expired by ``db.rollback()``.
+    _customer_snap = SimpleNamespace(
+        id=customer.id,
+        display_name=customer.display_name,
+        broker=customer.broker,
+        username=customer.username,
+        enabled=customer.enabled,
+    )
+
     sticky = {"isin": isin, "side": str(side), "comment": comment or ""}
 
     try:
@@ -1223,7 +1234,7 @@ async def admin_trade_instruction_create(
         )
     except ValidationError:
         ctx = _ctx(request, user, current_tab="/admin/customers")
-        ctx["customer"] = customer
+        ctx["customer"] = _customer_snap
         ctx["form_error"] = (
             "Invalid input. Please review the form fields and try again."
         )
@@ -1243,7 +1254,7 @@ async def admin_trade_instruction_create(
         # See PR #73 — rollback expires loaded ORM attrs incl. user.
         await db.refresh(user)
         ctx = _ctx(request, user, current_tab="/admin/customers")
-        ctx["customer"] = customer
+        ctx["customer"] = _customer_snap
         ctx["form_error"] = str(exc)
         ctx["form_values"] = sticky
         ctx["mode"] = "create"
@@ -1318,7 +1329,10 @@ async def admin_trade_instruction_update(
         fields["comment"] = comment if comment != "" else None
     fields["enabled"] = enabled == "on"
 
-    # Snapshot for the error renderer (PR #73 pattern).
+    # Snapshot both the TradeInstruction AND the parent Customer for the
+    # error renderer (PR #73 pattern). The service rollback expires every
+    # loaded ORM attribute including the parent customer that the template
+    # reads broker / username / id from.
     _ti_snap = {
         "id": str(ti.id),
         "customer_id": str(ti.customer_id),
@@ -1328,6 +1342,13 @@ async def admin_trade_instruction_update(
         "enabled": ti.enabled,
         "version": ti.version,
     }
+    _customer_snap = SimpleNamespace(
+        id=customer.id,
+        display_name=customer.display_name,
+        broker=customer.broker,
+        username=customer.username,
+        enabled=customer.enabled,
+    )
 
     def _render_with_error(message: str, code: int):
         form_values = {
@@ -1337,9 +1358,8 @@ async def admin_trade_instruction_update(
             "enabled": enabled == "on",
             "version": _ti_snap["version"],
         }
-        from types import SimpleNamespace
         ctx = _ctx(request, user, current_tab="/admin/customers")
-        ctx["customer"] = customer
+        ctx["customer"] = _customer_snap
         ctx["trade_instruction"] = SimpleNamespace(**_ti_snap)
         ctx["form_error"] = message
         ctx["form_values"] = form_values

@@ -32,7 +32,7 @@ from app.services.rendering import render_config_ini
 
 def _fake_customer(
     *,
-    section_name: str,
+    section_name: str | None = None,
     username: str = "u",
     password_enc: bytes = b"",
     broker: str = "bbi",
@@ -40,13 +40,21 @@ def _fake_customer(
     side: int = 1,
     enabled: bool = True,
     display_name: str = "Test",
+    trade_instructions: "list[SimpleNamespace] | None" = None,
 ) -> SimpleNamespace:
-    """Minimal Customer + one matching TradeInstruction stand-in.
+    """Minimal Customer + its TradeInstructions stand-in.
 
     Post-migration 0003, the renderer's loader queries TradeInstruction
-    separately, so each customer carries its associated TI (or list of
-    TIs) here. ``section_name``/``isin``/``side`` describe the
-    TradeInstruction that the (Customer × TI) row produces.
+    separately, so each customer carries its associated TIs here.
+
+    Two ways to use:
+
+    * Default — pass ``section_name`` (+ optional isin/side), get ONE
+      TradeInstruction attached. Convenience for single-trade tests
+      that pre-date the split.
+    * Multi — pass ``trade_instructions=[_fake_trade(...), ...]``
+      directly. Used by the fanout test to exercise
+      one-customer→many-sections rendering.
     """
     customer = SimpleNamespace(
         id=uuid.uuid4(),
@@ -56,18 +64,45 @@ def _fake_customer(
         enabled=enabled,
         display_name=display_name,
     )
-    customer.trade_instructions = [
-        SimpleNamespace(
-            id=uuid.uuid4(),
-            customer_id=customer.id,
-            isin=isin,
-            side=side,
-            section_name=section_name,
-            enabled=enabled,
-            comment=None,
+    if trade_instructions is not None:
+        for ti in trade_instructions:
+            ti.customer_id = customer.id
+        customer.trade_instructions = trade_instructions
+    else:
+        assert section_name is not None, (
+            "_fake_customer requires either section_name or trade_instructions"
         )
-    ]
+        customer.trade_instructions = [
+            SimpleNamespace(
+                id=uuid.uuid4(),
+                customer_id=customer.id,
+                isin=isin,
+                side=side,
+                section_name=section_name,
+                enabled=enabled,
+                comment=None,
+            )
+        ]
     return customer
+
+
+def _fake_trade(
+    *,
+    section_name: str,
+    isin: str = "IRO3AYHZ0001",
+    side: int = 1,
+    enabled: bool = True,
+) -> SimpleNamespace:
+    """Single TradeInstruction stand-in for multi-TI tests."""
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        customer_id=None,  # set by _fake_customer
+        isin=isin,
+        side=side,
+        section_name=section_name,
+        enabled=enabled,
+        comment=None,
+    )
 
 
 def _fake_stack(stack_id: uuid.UUID | None = None) -> SimpleNamespace:
@@ -397,3 +432,58 @@ async def test_render_deterministic_with_same_inputs(
     out2 = render_config_ini(ctx2)
 
     assert out1 == out2
+
+
+# ---------------------------------------------------------------------------
+# Cross-join fanout: one Customer → many [section] blocks (post-0003)
+# ---------------------------------------------------------------------------
+
+
+async def test_render_fanout_many_trades_per_customer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One Customer with N TradeInstructions produces N [section] blocks,
+    each carrying the shared credentials.
+
+    Also verifies the decrypt-once-per-customer property: the fake
+    ``decrypt_password`` records its call args, and we assert it was
+    called exactly once even though three sections were rendered.
+    """
+    customer = _fake_customer(
+        username="shared-account",
+        broker="ayandeh",
+        trade_instructions=[
+            _fake_trade(section_name="a1_c1_t1_ayandeh_IROAAA_s1", isin="IROAAA", side=1),
+            _fake_trade(section_name="a1_c1_t2_ayandeh_IROBBB_s1", isin="IROBBB", side=1),
+            _fake_trade(section_name="a1_c1_t3_ayandeh_IROCCC_s2", isin="IROCCC", side=2),
+        ],
+    )
+    db = _make_db([customer])
+    stack = _fake_stack()
+
+    decrypt_calls: list = []
+
+    async def _fake_decrypt(c):
+        decrypt_calls.append(c)
+        return "shared-plaintext"
+
+    monkeypatch.setattr(
+        "app.services.customers.decrypt_password", _fake_decrypt
+    )
+
+    ctx = await stacks_svc._build_render_context(db, stack)
+    out = render_config_ini(ctx)
+
+    # Three [section] blocks for the same customer.
+    assert "[a1_c1_t1_ayandeh_IROAAA_s1]" in out
+    assert "[a1_c1_t2_ayandeh_IROBBB_s1]" in out
+    assert "[a1_c1_t3_ayandeh_IROCCC_s2]" in out
+
+    # All three sections share the same credentials (one Customer).
+    assert out.count("username = shared-account") == 3
+    assert out.count("password = shared-plaintext") == 3
+    assert out.count("broker = ayandeh") == 3
+
+    # Decrypt was called ONCE per customer, NOT once per trade. The
+    # plaintext is reused across all of that customer's instructions.
+    assert len(decrypt_calls) == 1
