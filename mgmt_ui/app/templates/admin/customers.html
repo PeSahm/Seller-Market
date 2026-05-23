@@ -42,13 +42,8 @@
       <option value="{{ b }}" {% if filter_broker == b %}selected{% endif %}>{{ b }}</option>
     {% endfor %}
   </select>
-  <label class="checkbox-row" style="display:inline-flex;align-items:center;gap:.4em">
-    <input type="checkbox" name="include_disabled" value="on"
-           {{ 'checked' if filter_include_disabled else '' }}>
-    Show disabled
-  </label>
   <button class="btn btn--ghost btn--sm" type="submit">Filter</button>
-  {% if filter_q or filter_agent_id or filter_status or filter_broker or filter_include_disabled %}
+  {% if filter_q or filter_agent_id or filter_status or filter_broker %}
     <a class="btn btn--ghost btn--sm" href="/admin/customers">Clear</a>
   {% endif %}
 </form>
@@ -56,7 +51,7 @@
 {% if not customers %}
 <div class="card">
   <p class="text-muted">No customers match these filters.</p>
-  {% if not (filter_q or filter_agent_id or filter_status or filter_broker or filter_include_disabled) %}
+  {% if not (filter_q or filter_agent_id or filter_status or filter_broker) %}
     <p class="text-small text-muted">
       Click <strong>+ Add customer</strong> to create the first account, or
       have an agent declare one from their dashboard. Trade instructions

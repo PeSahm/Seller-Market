@@ -15,16 +15,10 @@
     <p class="text-muted text-small">
       <span class="badge">{{ customer.broker }}</span>
       <code dir="ltr">{{ customer.username }}</code>
-      {% if not customer.enabled %} <span class="badge badge--down">disabled</span>{% endif %}
     </p>
   </div>
   <div class="header-actions">
     <a class="btn btn--primary btn--sm" href="/agent/customers/{{ customer.id }}/edit">Edit</a>
-    <form method="post" action="/agent/customers/{{ customer.id }}/delete"
-          onsubmit="return confirm('Soft-delete this customer? All its trades will stop on the next render cycle.');">
-      {% include "partials/csrf.html" %}
-      <button class="btn btn--danger btn--sm" type="submit">Delete</button>
-    </form>
   </div>
 </div>
 
@@ -49,9 +43,6 @@
       {% else %}
         <span class="badge">{{ customer.assignment_status }}</span>
       {% endif %}
-      {% if not customer.enabled %}
-        <span class="badge badge--down">disabled</span>
-      {% endif %}
     </dd>
 
     <dt>Server</dt>
@@ -74,28 +65,22 @@
 <section class="card" style="margin-top: 16px;">
   <div style="display:flex;justify-content:space-between;align-items:center;">
     <h2 class="h2" style="margin: 0;">Trade instructions</h2>
-    {% if customer.enabled %}
     <a class="btn btn--primary btn--sm"
        href="/agent/customers/{{ customer.id }}/trade-instructions/new">+ Add trade</a>
-    {% endif %}
   </div>
   <p class="text-small text-muted">
-    One section per enabled trade is emitted in the on-server
-    <code>config.ini</code> on the next redeploy.
+    One section per trade is emitted in the on-server
+    <code>config.ini</code>. Deleting a trade hard-deletes the row and
+    immediately pushes the new <code>config.ini</code> to the trading host.
   </p>
   {% if not trade_instructions %}
-    {% if customer.enabled %}
-      <p class="text-muted">No trades yet. Click <strong>+ Add trade</strong> to register one.</p>
-    {% else %}
-      <p class="text-muted">This customer is disabled — re-enable it (Edit → tick "Enabled") before adding trades.</p>
-    {% endif %}
+    <p class="text-muted">No trades yet. Click <strong>+ Add trade</strong> to register one.</p>
   {% else %}
   <table class="table">
     <thead>
       <tr>
         <th>ISIN</th>
         <th>Side</th>
-        <th>Enabled</th>
         <th>Comment</th>
         <th></th>
       </tr>
@@ -108,23 +93,17 @@
           {% if ti.side == 1 %}<span class="badge badge--up">Buy</span>
           {% else %}<span class="badge badge--down">Sell</span>{% endif %}
         </td>
-        <td>
-          {% if ti.enabled %}<span class="badge badge--up">enabled</span>
-          {% else %}<span class="badge badge--down">disabled</span>{% endif %}
-        </td>
         <td dir="auto" class="text-small">{{ ti.comment or '—' }}</td>
         <td style="white-space: nowrap;">
           <a class="btn btn--ghost btn--sm"
              href="/agent/customers/{{ customer.id }}/trade-instructions/{{ ti.id }}/edit">Edit</a>
-          {% if ti.enabled %}
           <form method="post"
                 action="/agent/customers/{{ customer.id }}/trade-instructions/{{ ti.id }}/delete"
                 style="display:inline;"
-                onsubmit="return confirm('Soft-delete this trade? It will stop appearing in config.ini on the next render cycle.');">
+                onsubmit="return confirm('Delete this trade? The row will be permanently removed and the new config.ini pushed to the trading host.');">
             {% include "partials/csrf.html" %}
-            <button class="btn btn--ghost btn--sm" type="submit">Delete</button>
+            <button class="btn btn--danger btn--sm" type="submit">Delete</button>
           </form>
-          {% endif %}
         </td>
       </tr>
       {% endfor %}
