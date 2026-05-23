@@ -158,6 +158,27 @@
     </div>
   </div>
 
+  {# --- Verify credentials button ---
+       Sends the broker, username, password to the verify endpoint and
+       swaps in a result partial. The button is type="button" so it does
+       NOT submit the form. The result swap is local to #verify-result; the
+       password input is included via hx-include but never echoed back. #}
+  <div class="field">
+    <button type="button" class="btn btn--ghost btn--sm"
+            hx-post="/admin/customers/verify-credentials"
+            hx-include="[name=broker],[name=username],[name=password]"
+            hx-target="#verify-result"
+            hx-swap="innerHTML"
+            hx-indicator="#verify-spinner">
+      Verify credentials
+    </button>
+    <span id="verify-spinner" class="htmx-indicator text-small text-muted" style="margin-left: 8px;">
+      Verifying… (this hits the broker; can take a few seconds while we
+      solve their captcha)
+    </span>
+    <div id="verify-result"></div>
+  </div>
+
   {# --- Comment --- #}
   <div class="field">
     <label class="label" for="comment">Comment (optional)</label>

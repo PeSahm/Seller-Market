@@ -38,6 +38,7 @@ from app.schemas.settings_page import SettingsUpdate
 from app.security.deps import require_admin
 from app.services import agents as services_agents
 from app.services import audit as services_audit
+from app.services import broker_client
 from app.services import customers as services_customers
 from app.services import distribution as services_distribution
 from app.services import health_signals as services_health
@@ -794,6 +795,46 @@ async def admin_customer_create(
         )
 
     return _flash_redirect(request, f"/admin/customers/{customer.id}")
+
+
+@router.post("/customers/verify-credentials")
+async def admin_customer_verify_credentials(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    broker: str = Form(...),
+    username: str = Form(...),
+    password: str = Form(...),
+):
+    """One-shot probe: log in to the broker with the typed credentials and
+    return the broker-confirmed customer info as an HTMX partial.
+
+    Powers the *Verify credentials* button on
+    ``/admin/customers/new``. Never persists anything; the password is
+    accepted only for the duration of this request and is NEVER echoed back
+    in the rendered partial.
+
+    Returns the ``admin/partials/customer_verify_result.html`` partial with
+    a :class:`broker_client.VerifyResult` in the context — success renders
+    a green badge plus the broker-reported ``fullName`` / ``nationalId``,
+    failure renders a red badge plus the operator-readable error.
+    """
+    ocr_service_url = await settings_store.get_setting(db, "ocr_service_url")
+    result = await broker_client.verify_credentials(
+        broker_code=broker,
+        username=username,
+        password=password,
+        ocr_service_url=ocr_service_url,
+    )
+    ctx = _ctx(request, user, current_tab="/admin/customers")
+    ctx["result"] = result
+    # Echo the typed username so the partial can warn on
+    # ``nationalId != username`` (operator picked the wrong account).
+    ctx["typed_username"] = username
+    return templates.TemplateResponse(
+        "admin/partials/customer_verify_result.html",
+        ctx,
+    )
 
 
 @router.get("/customers/{customer_id}")
