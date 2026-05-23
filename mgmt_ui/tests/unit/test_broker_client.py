@@ -65,13 +65,33 @@ def _make_handler(
     customer_info_payload,
     ocr_text="ABCD",
     market_data_payload=None,
+    counters=None,
+    customer_info_status=200,
 ):
     """Build a callable that routes a request to a canned response based
     on URL substring. Used as the ``handler`` for ``httpx.MockTransport``.
+
+    ``counters`` is an optional dict the handler increments per route hit
+    so cache tests can assert e.g. "login was called once across two
+    verify_credentials calls".
+
+    ``customer_info_status`` lets a test simulate a 401 on the customer-
+    info call (token-invalidation path).
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
+        if counters is not None:
+            for label, marker in (
+                ("captcha", "/api/Captcha/GetCaptcha"),
+                ("ocr", "/ocr/captcha-easy-base64"),
+                ("login", "/api/v2/accounts/login"),
+                ("customer_info", "/api/party/getcustomerinfo"),
+                ("market_data", "/api/v2/instruments/full"),
+            ):
+                if marker in url:
+                    counters[label] = counters.get(label, 0) + 1
+                    break
         if "/api/Captcha/GetCaptcha" in url:
             return httpx.Response(
                 200,
@@ -88,7 +108,13 @@ def _make_handler(
         if "/api/v2/accounts/login" in url:
             return httpx.Response(200, json={"token": login_token})
         if "/api/party/getcustomerinfo" in url:
-            return httpx.Response(200, json=customer_info_payload)
+            # The first call uses ``customer_info_status``; subsequent
+            # calls (e.g. after a 401 → token refresh) always return 200.
+            # That lets a single test mimic "cached token rejected →
+            # fresh token works".
+            if counters is not None and counters.get("customer_info", 0) > 1:
+                return httpx.Response(200, json=customer_info_payload)
+            return httpx.Response(customer_info_status, json=customer_info_payload)
         if "/api/v2/instruments/full" in url:
             # ``market_data_payload`` defaults to "no instrument" — only
             # the verify_isin tests override it.
@@ -115,15 +141,39 @@ def patch_httpx(monkeypatch):
 
     monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
 
-    def configure(*, token, payload, ocr_text="ABCD", market_data=None):
+    state["counters"] = {}
+
+    def configure(
+        *,
+        token,
+        payload,
+        ocr_text="ABCD",
+        market_data=None,
+        customer_info_status=200,
+    ):
+        # Reset counters when a test reconfigures.
+        state["counters"].clear()
         state["handler"] = _make_handler(
             login_token=token,
             customer_info_payload=payload,
             ocr_text=ocr_text,
             market_data_payload=market_data,
+            counters=state["counters"],
+            customer_info_status=customer_info_status,
         )
+        return state["counters"]
 
     return configure
+
+
+@pytest.fixture(autouse=True)
+def _clear_token_cache():
+    """Wipe the in-process token cache between tests. The cache is module
+    state, so without this a test that populates it would leak into the
+    next test's expectations."""
+    broker_client._TOKEN_CACHE.clear()
+    yield
+    broker_client._TOKEN_CACHE.clear()
 
 
 @pytest.mark.asyncio
@@ -327,3 +377,105 @@ async def test_verify_isin_bad_credentials(patch_httpx):
         "invalid username",
     ]:
         assert phrase not in err
+
+
+# ---------------------------------------------------------------------------
+# Token-cache tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_token_cache_hit_skips_captcha(patch_httpx):
+    """Second verify_credentials with identical (broker, username,
+    password) should reuse the cached token: ZERO captcha / OCR / login
+    hits on the second call."""
+    counters = patch_httpx(
+        token="cached-jwt",
+        payload={
+            "result": {"fullName": "name", "nationalId": "id"},
+            "isError": False,
+        },
+    )
+
+    r1 = await verify_credentials(
+        broker_code="ayandeh",
+        username="4580090306",
+        password="correct",
+        ocr_service_url="http://ocr.test",
+    )
+    assert r1.ok is True
+
+    snap = dict(counters)
+    assert snap.get("login", 0) == 1, f"first call should have logged in once: {snap}"
+    assert snap.get("captcha", 0) == 1
+    assert snap.get("customer_info", 0) == 1
+
+    r2 = await verify_credentials(
+        broker_code="ayandeh",
+        username="4580090306",
+        password="correct",
+        ocr_service_url="http://ocr.test",
+    )
+    assert r2.ok is True
+
+    # No new captcha / OCR / login hits — only the customer_info call.
+    assert counters.get("login", 0) == 1, "second call should reuse cached token"
+    assert counters.get("captcha", 0) == 1
+    assert counters.get("ocr", 0) == 1
+    assert counters.get("customer_info", 0) == 2
+
+
+@pytest.mark.asyncio
+async def test_token_cache_misses_on_password_change(patch_httpx):
+    """A different password (same broker+username) gets a clean miss so
+    the new password is actually verified against the broker — not
+    silently accepted because a previous one worked."""
+    counters = patch_httpx(
+        token="jwt-1",
+        payload={"result": {"fullName": "x"}, "isError": False},
+    )
+
+    await verify_credentials(
+        broker_code="ayandeh", username="u",
+        password="first-password", ocr_service_url="http://ocr.test",
+    )
+    await verify_credentials(
+        broker_code="ayandeh", username="u",
+        password="DIFFERENT-password", ocr_service_url="http://ocr.test",
+    )
+
+    assert counters.get("login", 0) == 2, (
+        "second call had a different password — must do a fresh login"
+    )
+
+
+@pytest.mark.asyncio
+async def test_token_cache_invalidates_on_401(patch_httpx):
+    """If the cached token returns 401 from customer_info (broker
+    rotated/revoked it server-side), we drop the cache entry and
+    re-login transparently — the caller still gets ok=True from the
+    fresh-token retry."""
+    counters = patch_httpx(
+        token="fresh-jwt",
+        payload={
+            "result": {"fullName": "name", "nationalId": "id"},
+            "isError": False,
+        },
+        customer_info_status=401,  # first call only; handler resets after
+    )
+
+    # Pre-populate the cache with a stale token. The next verify will
+    # hit the (mocked) 401 on customer_info, drop it, and re-login.
+    broker_client._token_cache_put("ayandeh", "u", "p", "stale-token")
+
+    result = await verify_credentials(
+        broker_code="ayandeh", username="u", password="p",
+        ocr_service_url="http://ocr.test",
+    )
+    assert result.ok is True
+
+    # Exactly one login (the refresh after the 401), one captcha, two
+    # customer_info hits (the failing one + the retry).
+    assert counters.get("login", 0) == 1
+    assert counters.get("captcha", 0) == 1
+    assert counters.get("customer_info", 0) == 2

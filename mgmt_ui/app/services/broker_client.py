@@ -28,7 +28,9 @@ batch background job, not an interactive button).
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -45,6 +47,48 @@ _MAX_LOGIN_RETRIES = 5
 # Per-step timeouts in seconds. Generous enough for Iranian-VPS latency but
 # short enough that a hung broker host doesn't pin the button forever.
 _HTTP_TIMEOUT_S = 10.0
+
+# In-process Bearer-token cache. Keyed by (broker_code, username,
+# password-fingerprint) so a different password gets a clean miss (and
+# therefore a fresh login + real password check). Holds (token, expires_at).
+# Cleared on container restart — which is fine: the captcha cost on a
+# cold UI process is the same as it always was.
+#
+# A 30 minute TTL is comfortably inside the typical broker JWT lifetime
+# (~2h) but short enough that a revoked / rotated token is dropped before
+# it can stay wedged in the cache for long.
+_TOKEN_CACHE: dict[tuple[str, str, str], tuple[str, float]] = {}
+_TOKEN_CACHE_TTL_S = 30 * 60
+
+
+def _password_fingerprint(password: str) -> str:
+    """SHA-256 of the password, first 16 hex chars. NOT a security
+    construct — the password is already in process memory at this point
+    — just a stable cache-key component so different passwords miss the
+    cache (and therefore trigger a real login + real password check)."""
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()[:16]
+
+
+def _token_cache_get(broker_code: str, username: str, password: str) -> Optional[str]:
+    key = (broker_code, username, _password_fingerprint(password))
+    entry = _TOKEN_CACHE.get(key)
+    if entry is None:
+        return None
+    token, expires_at = entry
+    if time.monotonic() >= expires_at:
+        _TOKEN_CACHE.pop(key, None)
+        return None
+    return token
+
+
+def _token_cache_put(broker_code: str, username: str, password: str, token: str) -> None:
+    key = (broker_code, username, _password_fingerprint(password))
+    _TOKEN_CACHE[key] = (token, time.monotonic() + _TOKEN_CACHE_TTL_S)
+
+
+def _token_cache_drop(broker_code: str, username: str, password: str) -> None:
+    key = (broker_code, username, _password_fingerprint(password))
+    _TOKEN_CACHE.pop(key, None)
 
 
 @dataclass
@@ -255,6 +299,66 @@ async def _get_token_with_retries(
     return None, last_error
 
 
+async def _get_token(
+    client: httpx.AsyncClient,
+    broker_code: str,
+    endpoints: dict[str, str],
+    username: str,
+    password: str,
+    ocr_service_url: str,
+    *,
+    force_refresh: bool = False,
+) -> tuple[Optional[str], Optional[str]]:
+    """Cached wrapper around ``_get_token_with_retries``.
+
+    Returns ``(token, last_error)``. Uses an in-process LRU keyed by
+    ``(broker, username, password-fingerprint)`` so repeated UI clicks
+    on Verify Credentials / Verify ISIN don't each pay the
+    ~5-second captcha cost.
+
+    Pass ``force_refresh=True`` to skip the cache (used when a
+    downstream call returns 401 — the cached token has expired
+    server-side and we need a fresh one).
+    """
+    if not force_refresh:
+        cached = _token_cache_get(broker_code, username, password)
+        if cached:
+            logger.debug(
+                "token cache HIT for %s@%s (skipping captcha+login)",
+                username, broker_code,
+            )
+            return cached, None
+    logger.debug(
+        "token cache MISS for %s@%s (running captcha+login)",
+        username, broker_code,
+    )
+    token, err = await _get_token_with_retries(
+        client, endpoints, username, password, ocr_service_url
+    )
+    if token:
+        _token_cache_put(broker_code, username, password, token)
+    return token, err
+
+
+async def _fetch_customer_info(
+    client: httpx.AsyncClient, url: str, token: str
+) -> httpx.Response:
+    """GET ``customer_info`` with the given Bearer token. Caller checks
+    the response status (401 → cache invalidate + retry, else
+    ``raise_for_status``)."""
+    return await client.get(
+        url,
+        headers={
+            "authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            ),
+        },
+        timeout=_HTTP_TIMEOUT_S,
+    )
+
+
 async def verify_credentials(
     broker_code: str,
     username: str,
@@ -263,13 +367,15 @@ async def verify_credentials(
 ) -> VerifyResult:
     """Verify broker credentials and return the broker-side customer info.
 
-    See module docstring for the full flow.
+    See module docstring for the full flow. Uses the in-process token
+    cache when possible; on a 401 from the customer-info call we drop
+    the cached token and retry once with a fresh login.
     """
     endpoints = _endpoints_for(broker_code)
 
     async with httpx.AsyncClient() as client:
-        token, last_error = await _get_token_with_retries(
-            client, endpoints, username, password, ocr_service_url
+        token, last_error = await _get_token(
+            client, broker_code, endpoints, username, password, ocr_service_url
         )
         if not token:
             return VerifyResult(
@@ -281,22 +387,37 @@ async def verify_credentials(
                 ),
             )
 
-        # Token in hand — call getcustomerinfo. This is a GET (not POST);
-        # the broker returns 405 Method Not Allowed for POST. The
-        # user-id is read from the Bearer token.
+        # Token in hand — call getcustomerinfo. GET, not POST; the broker
+        # returns 405 for POST. The user-id is read from the Bearer token.
+        # If the cached token returns 401, the broker has invalidated it
+        # (rotated, expired, revoked): drop our cache entry and try once
+        # more with a fresh login.
         try:
-            info_resp = await client.get(
-                endpoints["customer_info"],
-                headers={
-                    "authorization": f"Bearer {token}",
-                    "Accept": "application/json",
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36"
-                    ),
-                },
-                timeout=_HTTP_TIMEOUT_S,
+            info_resp = await _fetch_customer_info(
+                client, endpoints["customer_info"], token
             )
+            if info_resp.status_code == 401:
+                logger.info(
+                    "cached token for %s@%s returned 401 — refreshing",
+                    username, broker_code,
+                )
+                _token_cache_drop(broker_code, username, password)
+                token, last_error = await _get_token(
+                    client, broker_code, endpoints, username, password,
+                    ocr_service_url, force_refresh=True,
+                )
+                if not token:
+                    return VerifyResult(
+                        ok=False,
+                        error=(
+                            last_error
+                            or "Authentication failed after token refresh — "
+                            "check username/password"
+                        ),
+                    )
+                info_resp = await _fetch_customer_info(
+                    client, endpoints["customer_info"], token
+                )
             info_resp.raise_for_status()
         except httpx.HTTPError as exc:
             logger.exception("getcustomerinfo HTTP error")
@@ -343,34 +464,14 @@ async def verify_isin(
     """
     endpoints = _endpoints_for(broker_code)
 
-    async with httpx.AsyncClient() as client:
-        token, last_error = await _get_token_with_retries(
-            client, endpoints, username, password, ocr_service_url
-        )
-        if not token:
-            return IsinInfo(
-                ok=False,
-                isin=isin,
-                error=(
-                    last_error
-                    or "Authentication failed — check username/password "
-                    f"(captcha solve gave up after {_MAX_LOGIN_RETRIES} attempts)"
-                ),
-            )
-
-        # The market_data host (``mdapi1.ephoenix.ir`` for the ephoenix
-        # family) is occasionally slow to handshake from Iranian VPSes —
-        # we saw a ``httpx.ConnectTimeout`` in production at the same
-        # moment a curl probe completed in 80ms. Don't make the operator
-        # pay the full captcha-login cost again for a transient blip:
-        # retry the POST a few times before giving up. Bumped per-call
-        # timeout to 20s as well so a one-off slow handshake doesn't
-        # trip the budget.
-        md_resp = None
-        last_md_error: Optional[str] = None
-        for md_attempt in range(1, 4):
+    async def _do_market_data_call(client, token, *, max_attempts=3):
+        """POST market_data with the given Bearer token, retrying on
+        transient transport failures. Returns ``(response, error_str)``
+        — exactly one is non-None."""
+        last = None
+        for md_attempt in range(1, max_attempts + 1):
             try:
-                md_resp = await client.post(
+                resp = await client.post(
                     endpoints["market_data"],
                     headers={
                         "authorization": f"Bearer {token}",
@@ -384,28 +485,64 @@ async def verify_isin(
                     json={"isinList": [isin]},
                     timeout=20.0,
                 )
-                md_resp.raise_for_status()
-                break
+                if resp.status_code == 401:
+                    # Don't burn retries on a 401 — caller decides.
+                    return resp, None
+                resp.raise_for_status()
+                return resp, None
             except httpx.HTTPError as exc:
-                # ``str(httpx.ConnectTimeout())`` is the empty string —
-                # surface the class name and the URL so the operator
-                # can see what actually died.
                 failed_url = getattr(getattr(exc, "request", None), "url", None)
-                last_md_error = (
+                last = (
                     f"market_data attempt {md_attempt} failed "
                     f"({type(exc).__name__} on {failed_url}): {exc or '<no detail>'}"
                 )
-                logger.warning(last_md_error)
-                md_resp = None
-                continue
-        if md_resp is None:
+                logger.warning(last)
+        return None, (last or "market_data exhausted retries")
+
+    async with httpx.AsyncClient() as client:
+        token, last_error = await _get_token(
+            client, broker_code, endpoints, username, password, ocr_service_url
+        )
+        if not token:
             return IsinInfo(
                 ok=False,
                 isin=isin,
                 error=(
-                    last_md_error
-                    or "cannot reach broker market-data endpoint after 3 attempts"
+                    last_error
+                    or "Authentication failed — check username/password "
+                    f"(captcha solve gave up after {_MAX_LOGIN_RETRIES} attempts)"
                 ),
+            )
+
+        md_resp, md_error = await _do_market_data_call(client, token)
+        if md_resp is not None and md_resp.status_code == 401:
+            # Cached token rejected — refresh and try once more.
+            logger.info(
+                "cached token for %s@%s returned 401 on market_data — refreshing",
+                username, broker_code,
+            )
+            _token_cache_drop(broker_code, username, password)
+            token, last_error = await _get_token(
+                client, broker_code, endpoints, username, password,
+                ocr_service_url, force_refresh=True,
+            )
+            if not token:
+                return IsinInfo(
+                    ok=False,
+                    isin=isin,
+                    error=(
+                        last_error
+                        or "Authentication failed after token refresh — "
+                        "check username/password"
+                    ),
+                )
+            md_resp, md_error = await _do_market_data_call(client, token)
+        if md_resp is None:
+            return IsinInfo(
+                ok=False,
+                isin=isin,
+                error=md_error
+                or "cannot reach broker market-data endpoint after 3 attempts",
             )
 
         try:
