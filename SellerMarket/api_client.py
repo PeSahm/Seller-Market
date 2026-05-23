@@ -298,6 +298,65 @@ class EphoenixAPIClient:
                         f"({self.username}@{self.broker_code}): {e}")
             raise
 
+    def get_customer_info(self) -> Dict[str, Any]:
+        """
+        Fetch the broker's customer-info record for this account.
+
+        Used as a credential sanity check: the endpoint requires a valid
+        Bearer token, so a successful response confirms the username/password
+        we just authenticated with are correct. The returned ``result`` dict
+        also carries the broker-side ``fullName`` and ``nationalId`` which
+        the mgmt UI surfaces back to the operator on the add-customer form
+        so they can confirm they typed the right credentials.
+
+        No cache. Credentials change between calls; this is a one-shot probe.
+
+        Returns:
+            The broker's ``result`` dict (see CLAUDE.md for the documented
+            shape). Notable fields: ``fullName``, ``nationalId``,
+            ``bourseCode``, ``type``, ``email``, ``phone``, ``birthDate``.
+
+        Raises:
+            requests.HTTPError: transport / auth / rate-limit failures.
+            Exception: broker-side error response (isError=true), with the
+                operator-readable Persian message surfaced verbatim.
+        """
+        try:
+            token = self.authenticate()
+            headers = {
+                'authorization': f'Bearer {token}',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            # Empty body — the endpoint reads the user-id from the token.
+            response = requests.post(
+                self.endpoints['customer_info'],
+                headers=headers,
+                json={},
+                timeout=10,
+            )
+            response.raise_for_status()
+
+            payload = response.json()
+            if payload.get('isError'):
+                msg = payload.get('message') or '<no message>'
+                raise Exception(f"customer_info endpoint returned isError=true: {msg}")
+
+            result = payload.get('result') or {}
+            full_name = result.get('fullName') or '<no name>'
+            national_id = result.get('nationalId') or '<no national_id>'
+            logger.info(
+                f"Customer info for {self.username}@{self.broker_code}: "
+                f"fullName={full_name!r} nationalId={national_id!r}"
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to get customer info for "
+                        f"{self.username}@{self.broker_code}: {e}")
+            raise
+
     def get_instrument_info(self, isin: str, use_cache: bool = True) -> Dict[str, Any]:
         """
         Get instrument information including price limits and max volume.
