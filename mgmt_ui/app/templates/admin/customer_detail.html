@@ -1,12 +1,13 @@
 {#
-  Per-customer identity / action page.
+  Per-customer (account) detail page.
 
   Inputs:
-    customer  — Customer ORM row (NOTE: ``password_enc`` is the Fernet
-                ciphertext; we deliberately never render it here. The render
-                layer is the only path that decrypts it.)
-    agent     — User row (the owning agent, may be soft-deleted)
-    server    — Server row if currently assigned, else None
+    customer            — Customer ORM row (account-shaped post-0003;
+                          password_enc is the Fernet ciphertext, never
+                          rendered here).
+    agent               — User row (the owning agent, may be soft-deleted)
+    server              — Server row if currently assigned, else None
+    trade_instructions  — list of TradeInstruction rows for this customer
 #}
 {% extends "partials/page_shell.html" %}
 {% block page_title %}{{ customer.display_name }}{% endblock %}
@@ -16,8 +17,7 @@
   <div>
     <h1 class="h1" dir="auto">{{ customer.display_name }}</h1>
     <p class="text-muted text-small">
-      <code>{{ customer.broker }}</code> · <code>{{ customer.isin }}</code>
-      · {% if customer.side == 1 %}Buy{% else %}Sell{% endif %}
+      <code>{{ customer.broker }}</code> · <code dir="ltr">{{ customer.username }}</code>
       {% if not customer.enabled %} · <span class="badge badge--down">disabled</span>{% endif %}
     </p>
   </div>
@@ -26,7 +26,7 @@
     {% if customer.assignment_status == 'active' or customer.server_id %}
       <a class="btn btn--primary btn--sm" href="/admin/customers/{{ customer.id }}/assign">Reassign…</a>
       <form method="post" action="/admin/customers/{{ customer.id }}/unassign" style="display:inline;"
-            onsubmit="return confirm('Unassign this customer? The current stack will be re-rendered without this section.');">
+            onsubmit="return confirm('Unassign this customer? The current stack will be re-rendered without its sections.');">
         {% include "partials/csrf.html" %}
         <button class="btn btn--ghost btn--sm" type="submit">Unassign</button>
       </form>
@@ -35,7 +35,7 @@
     {% endif %}
     {% if customer.enabled %}
     <form method="post" action="/admin/customers/{{ customer.id }}/delete" style="display:inline;"
-          onsubmit="return confirm('Soft-delete this customer? The on-server bot will stop trading it on the next render cycle.');">
+          onsubmit="return confirm('Soft-delete this customer? All its trade instructions will stop appearing in config.ini on the next render cycle.');">
       {% include "partials/csrf.html" %}
       <button class="btn btn--danger btn--sm" type="submit">Delete</button>
     </form>
@@ -75,23 +75,10 @@
           <span class="text-muted">— (unassigned)</span>
         {% endif %}
       </dd>
-      <dt>Section name</dt>
-      <dd><code class="text-small" dir="ltr">{{ customer.section_name }}</code></dd>
       <dt>Broker</dt>
       <dd><code>{{ customer.broker }}</code></dd>
-      <dt>ISIN</dt>
-      <dd><code>{{ customer.isin }}</code></dd>
-      <dt>Side</dt>
-      <dd>
-        {% if customer.side == 1 %}<span class="badge badge--up">Buy (1)</span>
-        {% else %}<span class="badge badge--down">Sell (2)</span>{% endif %}
-      </dd>
       <dt>Broker username</dt>
       <dd dir="auto"><code>{{ customer.username }}</code></dd>
-      {% if customer.comment %}
-      <dt>Comment</dt>
-      <dd dir="auto">{{ customer.comment }}</dd>
-      {% endif %}
       <dt>Version</dt>
       <dd><code class="text-small">{{ customer.version }}</code></dd>
       <dt>Created</dt>
@@ -105,4 +92,64 @@
     </dl>
   </section>
 </div>
+
+<section class="card" style="margin-top: 16px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <h2 class="h2" style="margin: 0;">Trade instructions</h2>
+    {% if customer.enabled %}
+    <a class="btn btn--primary btn--sm"
+       href="/admin/customers/{{ customer.id }}/trade-instructions/new">+ Add trade</a>
+    {% endif %}
+  </div>
+  <p class="text-small text-muted">
+    One section per enabled trade is emitted in the on-server
+    <code>config.ini</code> on the next redeploy.
+  </p>
+  {% if not trade_instructions %}
+    <p class="text-muted">No trade instructions yet. Click <strong>+ Add trade</strong> to register one.</p>
+  {% else %}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>ISIN</th>
+        <th>Side</th>
+        <th>Enabled</th>
+        <th>Comment</th>
+        <th>Section</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for ti in trade_instructions %}
+      <tr>
+        <td><code>{{ ti.isin }}</code></td>
+        <td>
+          {% if ti.side == 1 %}<span class="badge badge--up">Buy</span>
+          {% else %}<span class="badge badge--down">Sell</span>{% endif %}
+        </td>
+        <td>
+          {% if ti.enabled %}<span class="badge badge--up">enabled</span>
+          {% else %}<span class="badge badge--down">disabled</span>{% endif %}
+        </td>
+        <td dir="auto" class="text-small">{{ ti.comment or '—' }}</td>
+        <td><code class="text-small" dir="ltr">{{ ti.section_name }}</code></td>
+        <td style="white-space: nowrap;">
+          <a class="btn btn--ghost btn--sm"
+             href="/admin/customers/{{ customer.id }}/trade-instructions/{{ ti.id }}/edit">Edit</a>
+          {% if ti.enabled %}
+          <form method="post"
+                action="/admin/customers/{{ customer.id }}/trade-instructions/{{ ti.id }}/delete"
+                style="display:inline;"
+                onsubmit="return confirm('Soft-delete this trade? It will stop appearing in config.ini on the next render cycle.');">
+            {% include "partials/csrf.html" %}
+            <button class="btn btn--ghost btn--sm" type="submit">Delete</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
 {% endblock %}

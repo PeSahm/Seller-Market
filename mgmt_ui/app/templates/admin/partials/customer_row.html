@@ -5,6 +5,7 @@
     c              — Customer row (from app.models.customers)
     agents_by_id   — dict[UUID, User] for resolving agent_id to username
     servers_by_id  — dict[UUID, Server] for resolving server_id to name
+    trade_counts   — dict[UUID, tuple[total, active]] (optional)
 
   Status badge mapping mirrors the stack table:
     pending   → badge--pending (waiting on admin assignment)
@@ -14,6 +15,7 @@
 #}
 {% set _agent = agents_by_id.get(c.agent_id) if agents_by_id else None %}
 {% set _server = servers_by_id.get(c.server_id) if (c.server_id and servers_by_id) else None %}
+{% set _counts = trade_counts.get(c.id) if trade_counts else None %}
 <tr>
   <td>
     <a href="/admin/customers/{{ c.id }}" dir="auto">{{ c.display_name }}</a>
@@ -28,11 +30,13 @@
     {% endif %}
   </td>
   <td><code class="text-small">{{ c.broker }}</code></td>
-  <td><code class="text-small">{{ c.isin }}</code></td>
+  <td><code class="text-small" dir="ltr">{{ c.username }}</code></td>
   <td>
-    {% if c.side == 1 %}<span class="badge badge--up">Buy</span>
-    {% elif c.side == 2 %}<span class="badge badge--down">Sell</span>
-    {% else %}<span class="text-muted">{{ c.side }}</span>{% endif %}
+    {% if _counts %}
+      {{ _counts[0] }} <span class="text-small text-muted">({{ _counts[1] }} active)</span>
+    {% else %}
+      <span class="text-muted">0</span>
+    {% endif %}
   </td>
   <td>
     {% if _server %}
@@ -48,6 +52,5 @@
     {% elif c.assignment_status == 'pending' %}<span class="badge badge--pending">pending</span>
     {% else %}<span class="badge badge--pending">{{ c.assignment_status }}</span>{% endif %}
   </td>
-  <td><code class="text-small" dir="ltr">{{ c.section_name }}</code></td>
   <td><a class="btn btn--ghost btn--sm" href="/admin/customers/{{ c.id }}">view →</a></td>
 </tr>

@@ -40,8 +40,11 @@ from app.routers.dashboard import _ctx, templates
 from app.schemas.customer import (
     BROKERS,
     CustomerCreate,
-    CustomerDuplicate,
     CustomerUpdate,
+)
+from app.schemas.trade_instruction import (
+    TradeInstructionCreate,
+    TradeInstructionUpdate,
 )
 from app.schemas.locust import LocustUpsert
 from app.schemas.scheduler import SchedulerJobUpsert
@@ -56,8 +59,12 @@ from app.services import scheduler_jobs as services_scheduler
 from app.services import servers as services_servers
 from app.services import settings_store
 from app.services import stacks as services_stacks
+from app.services import trade_instructions as services_trade_instructions
 from app.services import trades as services_trades
 from app.services.customers import OptimisticLockError
+from app.services.trade_instructions import (
+    OptimisticLockError as TradeInstructionLockError,
+)
 from app.services.locust_configs import OptimisticLockError as LocustLockError
 from app.services.run_locks import StackRunLockBusyError
 from app.services.scheduler_jobs import OptimisticLockError as SchedulerLockError
@@ -310,31 +317,34 @@ async def agent_customers(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     status: Optional[str] = None,
+    q: Optional[str] = None,
 ):
     """List the current agent's customers. Admin sees all; agents see only theirs.
 
-    ``status`` query param (linked from the dashboard's "N pending" badge)
-    narrows the list to ``pending`` / ``assigned`` / ``active`` rows.
-    Any other / empty value is treated as "no filter".
-
-    We pre-load the server lookup dict so the table can render a read-only
-    "Server" badge column without lazy-loading per row.
+    ``status`` and ``q`` (free-text search over display_name+username) are
+    both bookmarkable query params.
     """
     _require_agent_or_admin(user)
     status_filter = status if status in {"pending", "assigned", "active"} else None
+    q = q or None
     if user.role == "admin":
         customers = await services_customers.list_customers(
-            db, status=status_filter, include_disabled=False
+            db, status=status_filter, include_disabled=False, q=q
         )
     else:
         customers = await services_customers.list_customers(
-            db, agent_id=user.id, status=status_filter, include_disabled=False
+            db, agent_id=user.id, status=status_filter, include_disabled=False, q=q
         )
+    trade_counts = await services_customers.get_customer_trade_counts(
+        db, [c.id for c in customers]
+    )
     servers_by_id = {s.id: s for s in await services_servers.list_servers(db)}
     ctx = _ctx(request, user, current_tab="/agent/customers")
     ctx["customers"] = customers
+    ctx["trade_counts"] = trade_counts
     ctx["servers_by_id"] = servers_by_id
     ctx["filter_status"] = status_filter
+    ctx["filter_q"] = q or ""
     return templates.TemplateResponse("agent/customers.html", ctx)
 
 
@@ -360,42 +370,28 @@ async def agent_customer_create(
     db: AsyncSession = Depends(get_db),
     display_name: str = Form(...),
     broker: str = Form(...),
-    isin: str = Form(...),
-    side: int = Form(...),
     username: str = Form(...),
     password: str = Form(...),
-    comment: Optional[str] = Form(None),
 ):
-    """Create a new customer owned by the current agent.
+    """Create a new account-shaped customer owned by the current agent.
 
-    Pydantic validates shape (ISIN charset, side range, broker enum). The
-    service layer enforces the composite UNIQUE on
-    ``(agent_id, username, broker, isin, side)`` and raises ``ValueError`` on
-    collision; we surface that as an inline form error.
-
-    Note: ``password`` is intentionally dropped from ``form_values`` on
-    re-render — secrets MUST NOT round-trip through the HTML.
+    Post-migration 0003, the form is account-shaped. Trade instructions
+    are added via the per-customer detail page.
     """
     _require_agent_or_admin(user)
 
     sticky = {
         "display_name": display_name,
         "broker": broker,
-        "isin": isin,
-        "side": side,
         "username": username,
-        "comment": comment,
     }
 
     try:
         payload = CustomerCreate(
             display_name=display_name,
-            broker=broker,
-            isin=isin,
-            side=side,
+            broker=broker,  # type: ignore[arg-type]
             username=username,
             password=password,
-            comment=comment,
         )
     except (ValidationError, ValueError) as exc:
         ctx = _ctx(request, user, current_tab="/agent/customers")
@@ -413,14 +409,12 @@ async def agent_customer_create(
             status_code=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Admins acting-as-agent: in Phase 4 there is no "act-as" session yet, so
-    # an admin creating from /agent/customers/new owns the row themselves.
-    # The act-as flow (Phase 4 also, separate agent) will override agent_id.
     try:
         customer = await services_customers.create_customer(
             db, agent_id=user.id, data=payload, actor_id=user.id
         )
     except ValueError as exc:
+        await db.refresh(user)
         ctx = _ctx(request, user, current_tab="/agent/customers")
         ctx["form_error"] = str(exc)
         ctx["form_values"] = sticky
@@ -448,7 +442,7 @@ async def agent_customer_detail(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Render the per-customer detail page.
+    """Render the per-customer detail page + trade-instruction list.
 
     Cross-tenant isolation: an agent requesting another agent's UUID gets a
     404 (NOT 403). We do NOT want to leak existence of other tenants' rows.
@@ -460,9 +454,13 @@ async def agent_customer_detail(
     server = None
     if customer.server_id:
         server = await services_servers.get_server(db, customer.server_id)
+    trade_instructions = await services_trade_instructions.list_trade_instructions(
+        db, customer_id
+    )
     ctx = _ctx(request, user, current_tab="/agent/customers")
     ctx["customer"] = customer
     ctx["server"] = server
+    ctx["trade_instructions"] = trade_instructions
     return templates.TemplateResponse("agent/customer_detail.html", ctx)
 
 
@@ -473,10 +471,11 @@ async def agent_customer_edit_form(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Render the "edit customer" form pre-filled with current values.
+    """Render the "edit customer" form (account-shaped fields only).
 
-    Password is intentionally NOT pre-filled — the agent leaves it empty to
-    keep the current password, or types a new one to rotate.
+    Password intentionally NOT pre-filled — agent leaves empty to keep
+    the current password, or types a new one to rotate. Per-trade
+    edits live on the customer detail page.
     """
     _require_agent_or_admin(user)
     customer = await services_customers.get_customer(db, customer_id)
@@ -488,11 +487,7 @@ async def agent_customer_edit_form(
     ctx["form_values"] = {
         "display_name": customer.display_name,
         "broker": customer.broker,
-        "isin": customer.isin,
-        "side": customer.side,
         "username": customer.username,
-        # NEVER pre-fill password — agent leaves empty to keep current.
-        "comment": customer.comment,
         "enabled": customer.enabled,
     }
     ctx["brokers"] = BROKERS
@@ -508,56 +503,32 @@ async def agent_customer_update(
     db: AsyncSession = Depends(get_db),
     display_name: Optional[str] = Form(None),
     broker: Optional[str] = Form(None),
-    isin: Optional[str] = Form(None),
-    side: Optional[int] = Form(None),
     username: Optional[str] = Form(None),
     password: Optional[str] = Form(None),
-    comment: Optional[str] = Form(None),
     enabled: Optional[str] = Form(None),
     version: int = Form(...),
 ):
-    """Apply a partial, optimistic-locked update.
-
-    Empty ``password`` form field → caller didn't rotate; we drop the field
-    from the update payload (vs. setting it to empty, which the schema would
-    reject anyway via ``min_length=1``).
-
-    ``enabled`` is a checkbox: HTML form sends ``"on"`` when checked and
-    omits the field when unchecked, so a missing value means "disable".
-    """
+    """Apply a partial, optimistic-locked update to a Customer (account)."""
     _require_agent_or_admin(user)
     customer = await services_customers.get_customer(db, customer_id)
     if customer is None or not _can_access_customer(user, customer):
         raise HTTPException(status_code=404, detail="customer not found")
 
-    # Build CustomerUpdate kwargs, dropping fields the form didn't send and
-    # handling the password "leave blank = no change" rule.
     update_kwargs: dict = {}
     if display_name is not None:
         update_kwargs["display_name"] = display_name
     if broker is not None:
         update_kwargs["broker"] = broker
-    if isin is not None:
-        update_kwargs["isin"] = isin
-    if side is not None:
-        update_kwargs["side"] = side
     if username is not None:
         update_kwargs["username"] = username
-    if password:  # truthy → caller wants to rotate; empty string is dropped
+    if password:
         update_kwargs["password"] = password
-    if comment is not None:
-        update_kwargs["comment"] = comment
-    # enabled checkbox: "on" if checked, absent (None) if unchecked.
     update_kwargs["enabled"] = enabled == "on"
 
-    # Sticky values for any re-render (NEVER include password).
     sticky = {
         "display_name": display_name if display_name is not None else customer.display_name,
         "broker": broker if broker is not None else customer.broker,
-        "isin": isin if isin is not None else customer.isin,
-        "side": side if side is not None else customer.side,
         "username": username if username is not None else customer.username,
-        "comment": comment if comment is not None else customer.comment,
         "enabled": update_kwargs["enabled"],
     }
 
@@ -585,12 +556,6 @@ async def agent_customer_update(
             db, customer_id, payload, actor_id=user.id
         )
     except OptimisticLockError:
-        # Another change won the race. Tell the user, return 409.
-        # Re-read the row so the form shows the *current* server-side state
-        # (including the bumped version) on retry — but re-verify tenant
-        # access against the refreshed row. If a future move-customer-
-        # between-agents flow happened mid-edit, ownership might have
-        # changed; we must NOT leak a row the user no longer owns.
         fresh = await services_customers.get_customer(db, customer_id)
         if fresh is None or not _can_access_customer(user, fresh):
             raise HTTPException(status_code=404, detail="customer not found")
@@ -608,7 +573,7 @@ async def agent_customer_update(
             status_code=status.HTTP_409_CONFLICT,
         )
     except ValueError as exc:
-        # Composite UNIQUE collision — surface as an inline form error.
+        await db.refresh(user)
         ctx = _ctx(request, user, current_tab="/agent/customers")
         ctx["form_error"] = str(exc)
         ctx["form_values"] = sticky
@@ -621,14 +586,8 @@ async def agent_customer_update(
             status_code=status.HTTP_400_BAD_REQUEST,
         )
     except LookupError as exc:
-        # Race: row vanished between the access check and the update. Treat
-        # as 404 for consistency with cross-tenant isolation.
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    # Push the updated config.ini so the next bot run reads the new field
-    # values. Without this, the DB row is updated but the trading bot keeps
-    # using its on-disk copy of config.ini. Same semantics as the admin
-    # /customers/{id}/edit route.
     await _push_customer_stack_config(db, customer_id, actor_id=user.id)
 
     redirect_to = f"/agent/customers/{customer_id}"
@@ -665,95 +624,247 @@ async def agent_customer_delete(
     )
 
 
-@router.get("/customers/{customer_id}/duplicate")
-async def agent_customer_duplicate_form(
+# ---------------------------------------------------------------------------
+# TradeInstruction CRUD (per-customer sub-resource)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/customers/{customer_id}/trade-instructions/new")
+async def agent_trade_instruction_new_form(
     customer_id: UUID,
     request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Render the minimal "duplicate to new ISIN" form.
-
-    Only asks for the new ISIN (+ optional new display name). Broker, side,
-    username and password ciphertext are inherited from the source.
-    """
+    """Render the "+ Add trade" form for a customer."""
     _require_agent_or_admin(user)
     customer = await services_customers.get_customer(db, customer_id)
     if customer is None or not _can_access_customer(user, customer):
         raise HTTPException(status_code=404, detail="customer not found")
     ctx = _ctx(request, user, current_tab="/agent/customers")
-    ctx["source"] = customer
+    ctx["customer"] = customer
     ctx["form_error"] = None
     ctx["form_values"] = {}
-    return templates.TemplateResponse("agent/customer_duplicate.html", ctx)
+    ctx["mode"] = "create"
+    return templates.TemplateResponse("agent/trade_instruction_form.html", ctx)
 
 
-@router.post("/customers/{customer_id}/duplicate")
-async def agent_customer_duplicate(
+@router.post("/customers/{customer_id}/trade-instructions")
+async def agent_trade_instruction_create(
     customer_id: UUID,
     request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     isin: str = Form(...),
-    new_display_name: Optional[str] = Form(None),
+    side: int = Form(...),
+    comment: Optional[str] = Form(None),
 ):
-    """Clone a customer to a new ISIN.
-
-    The service layer carries over broker, side, username, and Fernet
-    ciphertext from the source — we don't decrypt to clone.
-    """
+    """Create a new TradeInstruction under a customer the agent owns."""
     _require_agent_or_admin(user)
-    source = await services_customers.get_customer(db, customer_id)
-    if source is None or not _can_access_customer(user, source):
+    customer = await services_customers.get_customer(db, customer_id)
+    if customer is None or not _can_access_customer(user, customer):
         raise HTTPException(status_code=404, detail="customer not found")
 
-    # Normalize blank display name to None so the service layer falls back to
-    # the "<source.display_name> (<new_isin>)" default.
-    normalized_name = (
-        new_display_name.strip() if new_display_name else None
-    ) or None
-
-    sticky = {"isin": isin, "new_display_name": new_display_name or ""}
+    sticky = {"isin": isin, "side": str(side), "comment": comment or ""}
 
     try:
-        payload = CustomerDuplicate(
-            isin=isin, new_display_name=normalized_name
+        payload = TradeInstructionCreate(
+            isin=isin,
+            side=side,  # type: ignore[arg-type]
+            comment=comment if comment else None,
         )
     except (ValidationError, ValueError) as exc:
         ctx = _ctx(request, user, current_tab="/agent/customers")
-        ctx["source"] = source
+        ctx["customer"] = customer
         ctx["form_error"] = (
             "Invalid input. Please review the form fields and try again."
             if isinstance(exc, ValidationError)
             else str(exc)
         )
         ctx["form_values"] = sticky
+        ctx["mode"] = "create"
         return templates.TemplateResponse(
-            "agent/customer_duplicate.html",
+            "agent/trade_instruction_form.html",
             ctx,
             status_code=status.HTTP_400_BAD_REQUEST,
         )
 
     try:
-        new_customer = await services_customers.duplicate_customer(
-            db, source.id, payload, actor_id=user.id
+        await services_trade_instructions.create_trade_instruction(
+            db, customer_id, payload, actor_id=user.id
         )
     except ValueError as exc:
+        await db.refresh(user)
         ctx = _ctx(request, user, current_tab="/agent/customers")
-        ctx["source"] = source
+        ctx["customer"] = customer
         ctx["form_error"] = str(exc)
         ctx["form_values"] = sticky
+        ctx["mode"] = "create"
         return templates.TemplateResponse(
-            "agent/customer_duplicate.html",
+            "agent/trade_instruction_form.html",
             ctx,
             status_code=status.HTTP_400_BAD_REQUEST,
         )
-    except LookupError as exc:
-        # Source disappeared between the access check and the duplicate
-        # service call. Surface as 404.
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    redirect_to = f"/agent/customers/{new_customer.id}"
+    redirect_to = f"/agent/customers/{customer_id}"
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": redirect_to})
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER,
+        headers={"Location": redirect_to},
+    )
+
+
+@router.get("/customers/{customer_id}/trade-instructions/{trade_id}/edit")
+async def agent_trade_instruction_edit_form(
+    customer_id: UUID,
+    trade_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _require_agent_or_admin(user)
+    customer = await services_customers.get_customer(db, customer_id)
+    if customer is None or not _can_access_customer(user, customer):
+        raise HTTPException(status_code=404, detail="customer not found")
+    ti = await services_trade_instructions.get_trade_instruction(db, trade_id)
+    if ti is None or ti.customer_id != customer_id:
+        raise HTTPException(status_code=404, detail="trade not found")
+
+    ctx = _ctx(request, user, current_tab="/agent/customers")
+    ctx["customer"] = customer
+    ctx["trade_instruction"] = ti
+    ctx["form_error"] = None
+    ctx["form_values"] = {
+        "isin": ti.isin,
+        "side": str(ti.side),
+        "comment": ti.comment or "",
+        "enabled": ti.enabled,
+        "version": ti.version,
+    }
+    ctx["mode"] = "edit"
+    return templates.TemplateResponse("agent/trade_instruction_form.html", ctx)
+
+
+@router.post("/customers/{customer_id}/trade-instructions/{trade_id}/edit")
+async def agent_trade_instruction_update(
+    customer_id: UUID,
+    trade_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    isin: Optional[str] = Form(None),
+    side: Optional[int] = Form(None),
+    comment: Optional[str] = Form(None),
+    enabled: Optional[str] = Form(None),
+    version: int = Form(...),
+):
+    _require_agent_or_admin(user)
+    customer = await services_customers.get_customer(db, customer_id)
+    if customer is None or not _can_access_customer(user, customer):
+        raise HTTPException(status_code=404, detail="customer not found")
+    ti = await services_trade_instructions.get_trade_instruction(db, trade_id)
+    if ti is None or ti.customer_id != customer_id:
+        raise HTTPException(status_code=404, detail="trade not found")
+
+    fields: dict = {"version": version}
+    if isin is not None and isin != "":
+        fields["isin"] = isin
+    if side is not None:
+        fields["side"] = side
+    if comment is not None:
+        fields["comment"] = comment if comment != "" else None
+    fields["enabled"] = enabled == "on"
+
+    sticky = {
+        "isin": isin if isin is not None and isin != "" else ti.isin,
+        "side": str(side if side is not None else ti.side),
+        "comment": comment if comment is not None else (ti.comment or ""),
+        "enabled": fields["enabled"],
+        "version": ti.version,
+    }
+
+    try:
+        payload = TradeInstructionUpdate(**fields)
+    except (ValidationError, ValueError) as exc:
+        ctx = _ctx(request, user, current_tab="/agent/customers")
+        ctx["customer"] = customer
+        ctx["trade_instruction"] = ti
+        ctx["form_error"] = (
+            "Invalid input. Please review the form fields and try again."
+            if isinstance(exc, ValidationError)
+            else str(exc)
+        )
+        ctx["form_values"] = sticky
+        ctx["mode"] = "edit"
+        return templates.TemplateResponse(
+            "agent/trade_instruction_form.html",
+            ctx,
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        await services_trade_instructions.update_trade_instruction(
+            db, trade_id, payload, actor_id=user.id
+        )
+    except TradeInstructionLockError:
+        ctx = _ctx(request, user, current_tab="/agent/customers")
+        ctx["customer"] = customer
+        ctx["trade_instruction"] = ti
+        ctx["form_error"] = (
+            "Another change won the race. Reload the page and try again."
+        )
+        ctx["form_values"] = sticky
+        ctx["mode"] = "edit"
+        return templates.TemplateResponse(
+            "agent/trade_instruction_form.html",
+            ctx,
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    except ValueError as exc:
+        await db.refresh(user)
+        ctx = _ctx(request, user, current_tab="/agent/customers")
+        ctx["customer"] = customer
+        ctx["trade_instruction"] = ti
+        ctx["form_error"] = str(exc)
+        ctx["form_values"] = sticky
+        ctx["mode"] = "edit"
+        return templates.TemplateResponse(
+            "agent/trade_instruction_form.html",
+            ctx,
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    await _push_customer_stack_config(db, customer_id, actor_id=user.id)
+
+    redirect_to = f"/agent/customers/{customer_id}"
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": redirect_to})
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER,
+        headers={"Location": redirect_to},
+    )
+
+
+@router.post("/customers/{customer_id}/trade-instructions/{trade_id}/delete")
+async def agent_trade_instruction_delete(
+    customer_id: UUID,
+    trade_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _require_agent_or_admin(user)
+    customer = await services_customers.get_customer(db, customer_id)
+    if customer is None or not _can_access_customer(user, customer):
+        raise HTTPException(status_code=404, detail="customer not found")
+    ti = await services_trade_instructions.get_trade_instruction(db, trade_id)
+    if ti is None or ti.customer_id != customer_id:
+        raise HTTPException(status_code=404, detail="trade not found")
+    await services_trade_instructions.soft_delete_trade_instruction(
+        db, trade_id, actor_id=user.id
+    )
+    redirect_to = f"/agent/customers/{customer_id}"
     if request.headers.get("HX-Request"):
         return Response(status_code=204, headers={"HX-Redirect": redirect_to})
     return Response(

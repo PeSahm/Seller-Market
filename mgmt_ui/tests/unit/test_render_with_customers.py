@@ -41,23 +41,33 @@ def _fake_customer(
     enabled: bool = True,
     display_name: str = "Test",
 ) -> SimpleNamespace:
-    """Minimal customer-row stand-in.
+    """Minimal Customer + one matching TradeInstruction stand-in.
 
-    The render context loader only reads a small surface of the ORM row, so
-    a SimpleNamespace is plenty. We never construct a real ``Customer`` so
-    no SQLAlchemy metadata setup is needed.
+    Post-migration 0003, the renderer's loader queries TradeInstruction
+    separately, so each customer carries its associated TI (or list of
+    TIs) here. ``section_name``/``isin``/``side`` describe the
+    TradeInstruction that the (Customer × TI) row produces.
     """
-    return SimpleNamespace(
+    customer = SimpleNamespace(
         id=uuid.uuid4(),
-        section_name=section_name,
         username=username,
         password_enc=password_enc,
         broker=broker,
-        isin=isin,
-        side=side,
         enabled=enabled,
         display_name=display_name,
     )
+    customer.trade_instructions = [
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            customer_id=customer.id,
+            isin=isin,
+            side=side,
+            section_name=section_name,
+            enabled=enabled,
+            comment=None,
+        )
+    ]
+    return customer
 
 
 def _fake_stack(stack_id: uuid.UUID | None = None) -> SimpleNamespace:
@@ -101,34 +111,45 @@ def _make_db(customer_rows: list[SimpleNamespace]) -> MagicMock:
     """
     db = MagicMock()
 
+    def _scalars_result(items):
+        result = MagicMock()
+        scalars_mock = MagicMock()
+        scalars_mock.all = MagicMock(return_value=items)
+        result.scalars = MagicMock(return_value=scalars_mock)
+        return result
+
     settings_result = MagicMock()
     settings_result.scalar_one_or_none = MagicMock(return_value=None)
 
-    customers_result = MagicMock()
-    scalars_mock = MagicMock()
-    scalars_mock.all = MagicMock(return_value=customer_rows)
-    customers_result.scalars = MagicMock(return_value=scalars_mock)
+    customers_result = _scalars_result(customer_rows)
 
-    # Phase 5: empty scheduler-jobs list — none of these render tests care
-    # about scheduler output.
-    scheduler_result = MagicMock()
-    scheduler_scalars = MagicMock()
-    scheduler_scalars.all = MagicMock(return_value=[])
-    scheduler_result.scalars = MagicMock(return_value=scheduler_scalars)
+    # One trade_instructions result per ENABLED customer — the loader's
+    # ``if not c.enabled: continue`` guard skips the TI query for
+    # disabled customers, so feeding a result for them would shift the
+    # AsyncMock side_effect sequence.
+    ti_results = [
+        _scalars_result(getattr(c, "trade_instructions", []))
+        for c in customer_rows
+        if c.enabled
+    ]
 
-    # Phase 5: no locust override — the renderer falls back to its built-in
-    # fleet defaults, which is exactly what the customer-section tests want.
+    # Phase 5: empty scheduler-jobs list.
+    scheduler_result = _scalars_result([])
+
+    # Phase 5: no locust override.
     locust_result = MagicMock()
     locust_result.scalar_one_or_none = MagicMock(return_value=None)
 
-    # Call order matches the body of ``_build_render_context``:
-    # _read_setting × 2 → _load_stack_customers → list_jobs →
-    # get_locust_config.
+    # Call order matches the body of ``_build_render_context`` →
+    # ``_load_stack_customers``:
+    # _read_setting × 2 → customers SELECT → per-customer TI SELECTs ×N →
+    # list_jobs → get_locust_config.
     db.execute = AsyncMock(
         side_effect=[
             settings_result,
             settings_result,
             customers_result,
+            *ti_results,
             scheduler_result,
             locust_result,
         ]

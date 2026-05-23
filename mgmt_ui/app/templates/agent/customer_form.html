@@ -1,12 +1,8 @@
 {#
-  Add / edit a customer.
+  Add / edit a customer (account-shaped post-0003).
 
-  Modes: `mode == "create"` (default) — POSTs to /agent/customers.
-         `mode == "edit"`            — POSTs to /agent/customers/{id}/edit.
-
-  Sticky values: `form_values` (a plain dict) holds the previously-typed
-  values on a validation re-render. The password is INTENTIONALLY never
-  echoed back — secrets must not round-trip through the HTML.
+  Trade instructions (ISIN + side + comment) are now managed on the
+  customer detail page — this form only carries the account fields.
 #}
 {% extends "partials/page_shell.html" %}
 {% block page_title %}{% if mode == "edit" %}Edit customer{% else %}Add customer{% endif %}{% endblock %}
@@ -19,11 +15,10 @@
   {% if is_edit %}Edit customer{% else %}Add customer{% endif %}
 </h1>
 <p class="text-muted text-small">
-  Each customer is one trading account — a broker login plus an
-  <code>(ISIN, side)</code> pair. The mgmt UI generates the
-  <code>config.ini</code> section name automatically and Fernet-encrypts
-  your broker password at rest. The plaintext password is never displayed
-  back to you after submission.
+  Each customer is one brokerage account — a broker login (username +
+  password). Add the ISINs / sides you want to trade for this account
+  on the detail page after save. Password is Fernet-encrypted at rest
+  and never displayed back.
 </p>
 
 {% if form_error %}
@@ -50,41 +45,14 @@
     </p>
   </div>
 
-  <div class="field-row">
-    <div class="field field--grow">
-      <label class="label" for="broker">Broker</label>
-      <select class="input" id="broker" name="broker" required>
-        {% for b in brokers %}
-        <option value="{{ b }}" {% if fv.broker == b %}selected{% endif %}>{{ b }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div class="field field--grow">
-      <label class="label" for="isin">ISIN</label>
-      <input class="input" id="isin" name="isin" required
-             value="{{ fv.isin|default('') }}"
-             placeholder="IRO3AYHZ0001"
-             maxlength="32"
-             style="text-transform: uppercase"
-             autocomplete="off">
-      <p class="text-small text-muted">ASCII alphanumeric — no spaces or punctuation.</p>
-    </div>
+  <div class="field">
+    <label class="label" for="broker">Broker</label>
+    <select class="input" id="broker" name="broker" required>
+      {% for b in brokers %}
+      <option value="{{ b }}" {% if fv.broker == b %}selected{% endif %}>{{ b }}</option>
+      {% endfor %}
+    </select>
   </div>
-
-  <fieldset class="field">
-    <legend class="label">Side</legend>
-    {% set side_val = fv.side|default(1) %}
-    <label class="radio-row">
-      <input type="radio" name="side" value="1"
-             {% if side_val|string == "1" %}checked{% endif %}>
-      Buy
-    </label>
-    <label class="radio-row">
-      <input type="radio" name="side" value="2"
-             {% if side_val|string == "2" %}checked{% endif %}>
-      Sell
-    </label>
-  </fieldset>
 
   <div class="field">
     <label class="label" for="username">Broker username</label>
@@ -113,19 +81,12 @@
     </p>
   </div>
 
-  <div class="field">
-    <label class="label" for="comment">Comment (optional)</label>
-    <textarea class="input" id="comment" name="comment" rows="2"
-              maxlength="1024" dir="auto"
-              placeholder="Free-form note, visible only to you and your admin.">{{ fv.comment|default('') }}</textarea>
-  </div>
-
   {% if is_edit %}
   <div class="field">
     <label class="radio-row">
       <input type="checkbox" name="enabled" value="on"
              {% if fv.enabled %}checked{% endif %}>
-      Enabled — uncheck to disable trading on this customer (soft delete).
+      Enabled — uncheck to disable trading on this customer (all its trades go quiet).
     </label>
   </div>
   <input type="hidden" name="version" value="{{ customer.version }}">
