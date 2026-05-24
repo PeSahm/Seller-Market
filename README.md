@@ -320,10 +320,11 @@ locust -f locustfile_new.py --headless --users 10 --spawn-rate 10 --run-time 30s
 
 | Type | Expiry | Purpose |
 |------|--------|---------|
-| **Tokens** | 1 hour | Authentication tokens |
+| **Tokens** | 2 hours | Authentication tokens (login is expensive) |
 | **Market Data** | 5 minutes | Price limits, volumes |
-| **Buying Power** | 1 minute | Account balance |
-| **Order Params** | 30 seconds | Pre-calculated orders |
+| **Buying Power** | 5 minutes | Account balance (refreshes so post-credit BP isn't masked by a pre-credit snapshot) |
+| **Holdings** | 5 minutes | Per-ISIN share count |
+| **Order Params** | 5 minutes | Pre-calculated orders |
 
 ### Cache Management
 
