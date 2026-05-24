@@ -99,7 +99,7 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
         try:
             logger.debug("  - forcing fresh buying-power fetch (cache bypass)")
             buying_power = api_client.get_buying_power(use_cache=False)  # Force fresh fetch
-            logger.info(f"✓ Buying power cached: {buying_power:,.0f} Rials (expires in 2 hours)")
+            logger.info(f"✓ Buying power cached: {buying_power:,.0f} Rials (expires in 5 minutes)")
         except Exception as e:
             logger.error(f"❌ Failed to fetch buying power: {e}")
             return False
@@ -112,7 +112,7 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
             logger.info(f"✓ Instrument info cached: {instrument_info['title']} ({instrument_info['symbol']})")
             logger.info(f"  - Price range: [{instrument_info['min_price']:,} - {instrument_info['max_price']:,}]")
             logger.info(f"  - Volume range: [{instrument_info['min_volume']:,} - {instrument_info['max_volume']:,}]")
-            logger.info(f"  - Cache expires in 2 hours")
+            logger.info(f"  - Cache expires in 5 minutes")
         except Exception as e:
             logger.error(f"❌ Failed to fetch instrument info: {e}")
             return False
@@ -166,7 +166,7 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
             buying_power=buying_power,
             max_allowed_volume=max_volume
         )
-        logger.info(f"✓ Order parameters cached (expires in 2 hours)")
+        logger.info(f"✓ Order parameters cached (expires in 5 minutes)")
         
         logger.info(f"\n✓✓✓ Cache warmup successful for {username}@{broker_code} ✓✓✓\n")
         return True
