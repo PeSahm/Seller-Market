@@ -1352,6 +1352,12 @@ async def admin_trade_instruction_update(
         await db.refresh(user)
         return _render_with_error(str(exc), status.HTTP_400_BAD_REQUEST)
 
+    # Push the updated config.ini so the trading host picks up the new
+    # ISIN / side / comment without waiting for an unrelated mutation.
+    # Best-effort: SSH errors are logged but don't fail the redirect —
+    # the DB write has already committed.
+    await _push_customer_stack_config(db, customer_id, actor_id=user.id)
+
     return _flash_redirect(request, f"/admin/customers/{customer_id}")
 
 
