@@ -112,12 +112,17 @@ class CachedOrderParams:
 class TradingCache:
     """
     Cache manager for trading bot data.
-    
+
     Caches:
-    - Authentication tokens (2 hour expiry)
-    - Market data (5 minute expiry - refreshes near market open)
-    - Buying power (1 minute expiry - can change quickly)
-    - Order parameters (30 second expiry - for instant market start)
+    - Authentication tokens (2 hour expiry — login is expensive)
+    - Everything else (5 minute expiry)
+
+    The 5-minute TTL is deliberate: agents top up customer buying power
+    only a few minutes before market open. A longer TTL would serve a
+    pre-credit BP snapshot (often near zero) and silently size orders
+    against the wrong number. 5 minutes is the upper bound on how stale
+    a cached BP / holdings / market / order-params row may be before
+    the bot refreshes it from the broker.
     """
     
     def __init__(self, cache_dir: str = ".cache"):
@@ -217,15 +222,15 @@ class TradingCache:
     
     # Market Data Cache
     
-    def save_market_data(self, isin: str, market_data: Dict[str, Any], 
-                        expiry_minutes: int = 120):
+    def save_market_data(self, isin: str, market_data: Dict[str, Any],
+                        expiry_minutes: int = 5):
         """
         Save market data to cache.
-        
+
         Args:
             isin: Stock ISIN code
             market_data: Market data dictionary
-            expiry_minutes: Cache validity in minutes (default 120 = 2 hours)
+            expiry_minutes: Cache validity in minutes (default 5)
         """
         now = datetime.now()
         cached_data = CachedMarketData(
@@ -281,16 +286,18 @@ class TradingCache:
     
     # Buying Power Cache
     
-    def save_buying_power(self, username: str, broker_code: str, 
-                         buying_power: float, expiry_minutes: int = 120):
+    def save_buying_power(self, username: str, broker_code: str,
+                         buying_power: float, expiry_minutes: int = 5):
         """
         Save buying power to cache.
-        
+
         Args:
             username: Account username
             broker_code: Broker code
             buying_power: Available buying power
-            expiry_minutes: Cache validity in minutes (default 120 = 2 hours)
+            expiry_minutes: Cache validity in minutes (default 5 — BP changes
+                when the agent tops the account up shortly before market open;
+                a longer TTL would size orders against the pre-credit balance)
         """
         now = datetime.now()
         cached_bp = CachedBuyingPower(
@@ -336,7 +343,7 @@ class TradingCache:
     # Holdings Cache (portfolio share count per ISIN)
 
     def save_holdings(self, username: str, broker_code: str, isin: str,
-                      volume: int, expiry_minutes: int = 60):
+                      volume: int, expiry_minutes: int = 5):
         """
         Save portfolio holdings (share count) for one ISIN.
 
@@ -345,8 +352,9 @@ class TradingCache:
             broker_code: Broker code
             isin: Stock ISIN
             volume: Whole-share count (already int-coerced from the broker's float)
-            expiry_minutes: Cache validity in minutes (default 60 = 1 hour;
-                holdings are fixed during a pre-market dispatch session)
+            expiry_minutes: Cache validity in minutes (default 5 — same
+                rationale as buying power: agents may move shares between
+                accounts close to market open)
         """
         now = datetime.now()
         cached = CachedHoldings(
@@ -387,12 +395,12 @@ class TradingCache:
 
     # Order Parameters Cache
     
-    def save_order_params(self, username: str, broker_code: str, isin: str, 
+    def save_order_params(self, username: str, broker_code: str, isin: str,
                          side: int, price: float, volume: int, buying_power: float,
-                         max_allowed_volume: int, expiry_seconds: int = 7200):
+                         max_allowed_volume: int, expiry_seconds: int = 300):
         """
         Save calculated order parameters to cache.
-        
+
         Args:
             username: Account username
             broker_code: Broker code
@@ -402,7 +410,8 @@ class TradingCache:
             volume: Calculated volume
             buying_power: Buying power used
             max_allowed_volume: Maximum allowed volume
-            expiry_seconds: Cache validity in seconds (default 7200 = 2 hours)
+            expiry_seconds: Cache validity in seconds (default 300 = 5 minutes —
+                derived from the BP / market inputs which also expire in 5 min)
         """
         now = datetime.now()
         cached_params = CachedOrderParams(

@@ -516,7 +516,7 @@ class TestGetHoldings(unittest.TestCase):
         self.assertIsInstance(holdings, int)
         # The cache write should record the truncated int, not the float.
         self.mock_cache.save_holdings.assert_called_once_with(
-            self.username, self.broker_code, self.isin, 445608, expiry_minutes=60
+            self.username, self.broker_code, self.isin, 445608
         )
         # Confirm the request body is the broker-required {"entity": true} envelope.
         _, kwargs = mock_post.call_args
@@ -539,9 +539,9 @@ class TestGetHoldings(unittest.TestCase):
         holdings = client.get_holdings(self.isin, use_cache=False)
 
         self.assertEqual(holdings, 0)
-        # We still cache the 0 so the next dispatch within 1h doesn't re-POST.
+        # We still cache the 0 so the next dispatch within the TTL doesn't re-POST.
         self.mock_cache.save_holdings.assert_called_once_with(
-            self.username, self.broker_code, self.isin, 0, expiry_minutes=60
+            self.username, self.broker_code, self.isin, 0
         )
 
     @patch('api_client.requests.post')

@@ -282,7 +282,7 @@ class EphoenixAPIClient:
                                f"{volume:,} shares (cache=miss)")
                     if self.cache:
                         self.cache.save_holdings(self.username, self.broker_code,
-                                                 isin, volume, expiry_minutes=60)
+                                                 isin, volume)
                     return volume
 
             # ISIN not found in portfolio → operator owns 0 shares.
@@ -290,7 +290,7 @@ class EphoenixAPIClient:
                           f"— portfolio has {len(positions)} position(s) but none match")
             if self.cache:
                 self.cache.save_holdings(self.username, self.broker_code,
-                                         isin, 0, expiry_minutes=60)
+                                         isin, 0)
             return 0
 
         except Exception as e:

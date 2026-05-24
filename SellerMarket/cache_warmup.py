@@ -91,7 +91,7 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
         except Exception as e:
             logger.error(f"❌ Authentication failed for {username}@{broker_code}: {e}")
             if broker_code == 'gs':
-                logger.warning(f"⚠️  GS broker captcha can be tricky - this account will be skipped but others will continue")
+                logger.warning("⚠️  GS broker captcha can be tricky - this account will be skipped but others will continue")
             return False
         
         # Step 2: Fetch and cache buying power
@@ -99,7 +99,7 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
         try:
             logger.debug("  - forcing fresh buying-power fetch (cache bypass)")
             buying_power = api_client.get_buying_power(use_cache=False)  # Force fresh fetch
-            logger.info(f"✓ Buying power cached: {buying_power:,.0f} Rials (expires in 2 hours)")
+            logger.info(f"✓ Buying power cached: {buying_power:,.0f} Rials (expires in 5 minutes)")
         except Exception as e:
             logger.error(f"❌ Failed to fetch buying power: {e}")
             return False
@@ -112,7 +112,7 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
             logger.info(f"✓ Instrument info cached: {instrument_info['title']} ({instrument_info['symbol']})")
             logger.info(f"  - Price range: [{instrument_info['min_price']:,} - {instrument_info['max_price']:,}]")
             logger.info(f"  - Volume range: [{instrument_info['min_volume']:,} - {instrument_info['max_volume']:,}]")
-            logger.info(f"  - Cache expires in 2 hours")
+            logger.info("  - Cache expires in 5 minutes")
         except Exception as e:
             logger.error(f"❌ Failed to fetch instrument info: {e}")
             return False
@@ -166,7 +166,7 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
             buying_power=buying_power,
             max_allowed_volume=max_volume
         )
-        logger.info(f"✓ Order parameters cached (expires in 2 hours)")
+        logger.info("✓ Order parameters cached (expires in 5 minutes)")
         
         logger.info(f"\n✓✓✓ Cache warmup successful for {username}@{broker_code} ✓✓✓\n")
         return True
@@ -174,7 +174,7 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
     except Exception as e:
         logger.error(f"❌ Failed to warm up cache for {username}@{broker_code}: {e}")
         if broker_code == 'gs':
-            logger.warning(f"⚠️  GS broker has stricter rate limiting - retry manually if needed")
+            logger.warning("⚠️  GS broker has stricter rate limiting - retry manually if needed")
         return False
 
 
@@ -225,7 +225,7 @@ def main():
         sections = config.sections()
     
     logger.info(f"\n{'='*80}")
-    logger.info(f"CACHE WARMUP STARTED")
+    logger.info("CACHE WARMUP STARTED")
     logger.info(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"Sections to process: {len(sections)}")
     logger.info(f"{'='*80}\n")
@@ -243,11 +243,11 @@ def main():
     
     # Display cache statistics
     logger.info(f"\n{'='*80}")
-    logger.info(f"CACHE WARMUP COMPLETED")
+    logger.info("CACHE WARMUP COMPLETED")
     logger.info(f"{'='*80}")
     logger.info(f"Successful accounts: {success_count}")
     logger.info(f"Failed accounts: {failed_count}")
-    logger.info(f"\nCache Statistics:")
+    logger.info("\nCache Statistics:")
     
     stats = cache.get_cache_stats()
     logger.info(f"  - Total entries: {stats['total_entries']}")
