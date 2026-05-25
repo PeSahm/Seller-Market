@@ -314,6 +314,57 @@ class SSHPool:
         finally:
             await self.release(server)
 
+    async def run_with_retry(
+        self,
+        server: Server,
+        sync_work,  # Callable[[paramiko.SSHClient], T]
+        *,
+        retries: int = 1,
+    ):
+        """Run ``sync_work(client)`` in a worker thread with stale-transport recovery.
+
+        The pool's :meth:`acquire` only checks ``transport.is_active()``, which
+        keeps returning ``True`` for a transport whose underlying socket has
+        gone away (NAT timeout, remote sshd restart, idle disconnect) until
+        the next channel-open round-trip actually fails. When that happens
+        paramiko raises :class:`paramiko.ChannelException` (or in some races a
+        bare :class:`paramiko.SSHException`) — but the broken client stays in
+        the pool, so every subsequent caller hits the same wall.
+
+        This wrapper turns the broken-transport case into a self-healing
+        single retry: if ``sync_work`` raises a transport-level failure on
+        the first attempt, we evict the cached client and re-acquire (which
+        forces a fresh transport), then run ``sync_work`` again. Auth and
+        host-key failures are NOT retried — those are caller errors, not
+        transport-decay, and retrying would spam credential attempts.
+
+        See issue #94 for the user-visible symptom this fixes.
+        """
+        last_exc: Optional[BaseException] = None
+        for attempt in range(retries + 1):
+            client = await self.acquire(server)
+            try:
+                return await asyncio.to_thread(sync_work, client)
+            except (
+                paramiko.AuthenticationException,
+                paramiko.BadHostKeyException,
+            ):
+                # Caller-input failures; don't retry.
+                raise
+            except (paramiko.ChannelException, paramiko.SSHException) as exc:
+                last_exc = exc
+                if attempt >= retries:
+                    raise
+                logger.warning(
+                    "ssh op failed on %s (attempt %d/%d); evicting and retrying: %s",
+                    _conn_key(server), attempt + 1, retries + 1, exc,
+                )
+                await self.close(server)
+        # Unreachable — the loop either returns or re-raises — but keep the
+        # type-checker happy.
+        assert last_exc is not None
+        raise last_exc
+
     def observed_pin(self, server: Server) -> Optional[str]:
         """Return the SHA256 fingerprint observed at connect time, if any.
 

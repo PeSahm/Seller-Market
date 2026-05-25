@@ -54,15 +54,15 @@ async def test_writes_in_place_to_destination() -> None:
     fake_stdin = MagicMock()
     fake_client.exec_command.return_value = (fake_stdin, fake_stdout, fake_stderr)
 
-    class _Session:
-        async def __aenter__(self) -> MagicMock:
-            return fake_client
-
-        async def __aexit__(self, *a: object) -> bool:
-            return False
+    # The helper now goes through ssh_pool.run_with_retry(server, sync_work)
+    # so the stale-transport recovery from issue #94 wraps every SFTP op.
+    # The test just needs to invoke sync_work against our fake_client and
+    # return its result, mimicking the happy path.
+    async def _fake_run_with_retry(server, sync_work, *args, **kwargs):
+        return sync_work(fake_client)
 
     fake_pool = MagicMock()
-    fake_pool.session = lambda server: _Session()
+    fake_pool.run_with_retry = _fake_run_with_retry
 
     target = "/root/seller-market/agents/1/config.ini"
 
