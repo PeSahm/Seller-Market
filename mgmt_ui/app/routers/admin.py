@@ -1232,6 +1232,12 @@ async def admin_trade_instruction_create(
             status_code=status.HTTP_400_BAD_REQUEST,
         )
 
+    # Push the new config.ini so the trading host picks up the new trade
+    # instruction without waiting for an unrelated mutation. Best-effort:
+    # SSH errors are logged but don't fail the redirect — the DB write
+    # has already committed.
+    await _push_customer_stack_config(db, customer_id, actor_id=user.id)
+
     return _flash_redirect(request, f"/admin/customers/{customer_id}")
 
 
