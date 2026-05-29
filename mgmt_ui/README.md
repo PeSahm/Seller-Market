@@ -306,13 +306,14 @@ pytest
 ```
 mgmt_ui/
   app/
-    routers/        HTTP routes (admin, agent, auth, ws)
+    routers/        HTTP routes: admin, agent, auth, dashboard, health + ws/ (WebSocket run stream)
     models/         SQLAlchemy ORM models
     schemas/        Pydantic request/response schemas
-    services/       Business logic (customers, trade_instructions, stacks, ssh/, rendering/)
-    workers/        Background asyncio workers (health, ingestors, janitor)
+    services/       Business-logic modules (customers, trade_instructions, stacks, distribution, …) + ssh/ and rendering/ subpackages
+    workers/        Background asyncio workers: health, stack_health, trade_ingestor, scheduled_run_ingestor, health_scanner, janitor
     security/       CSRF, Fernet crypto, auth deps
     templates/      Jinja/HTMX templates
+    static/         CSS / JS assets
   alembic/          DB migrations
   tests/
   pyproject.toml
