@@ -71,45 +71,50 @@ async def run_command(
     Raises:
         RemoteCommandError: if ``check=True`` and ``exit_code != 0``.
     """
-    async with ssh_pool.session(server) as client:
-
-        def _exec() -> RemoteResult:
+    def _exec(client: paramiko.SSHClient) -> RemoteResult:
+        # Socket-level errors are wrapped here so the caller always sees an
+        # app-level exception; paramiko ChannelException / SSHException are
+        # NOT caught — they propagate raw so the surrounding run_with_retry
+        # can evict a stale transport and retry once.
+        try:
+            stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
             try:
-                stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+                if stdin_data is not None:
+                    stdin.write(stdin_data)
+                    stdin.flush()
                 try:
-                    if stdin_data is not None:
-                        stdin.write(stdin_data)
-                        stdin.flush()
-                    # Always half-close stdin so the remote command sees EOF.
-                    try:
-                        stdin.channel.shutdown_write()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    # Drain stdout/stderr BEFORE recv_exit_status to avoid a
-                    # deadlock when the remote command's output exceeds the
-                    # paramiko channel window (~2 MiB). Both reads block until
-                    # EOF, which the remote side signals at process exit.
-                    out = stdout.read().decode("utf-8", errors="replace")
-                    err = stderr.read().decode("utf-8", errors="replace")
-                    exit_code = stdout.channel.recv_exit_status()
-                finally:
-                    try:
-                        stdin.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                return RemoteResult(exit_code=exit_code, stdout=out, stderr=err)
-            except paramiko.AuthenticationException as exc:
-                raise AuthenticationError(str(exc)) from exc
-            except paramiko.SSHException as exc:
-                raise SSHConnectionError(str(exc)) from exc
-            except (socket.timeout, TimeoutError) as exc:
-                raise SSHConnectionError(
-                    f"command timed out: {command!r}"
-                ) from exc
-            except (socket.error, OSError) as exc:
-                raise SSHConnectionError(str(exc)) from exc
+                    stdin.channel.shutdown_write()
+                except Exception:  # noqa: BLE001
+                    pass
+                # Drain stdout/stderr BEFORE recv_exit_status to avoid a
+                # deadlock when the remote command's output exceeds the
+                # paramiko channel window (~2 MiB). Both reads block until
+                # EOF, which the remote side signals at process exit.
+                out = stdout.read().decode("utf-8", errors="replace")
+                err = stderr.read().decode("utf-8", errors="replace")
+                exit_code = stdout.channel.recv_exit_status()
+            finally:
+                try:
+                    stdin.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            return RemoteResult(exit_code=exit_code, stdout=out, stderr=err)
+        except (socket.timeout, TimeoutError) as exc:
+            raise SSHConnectionError(
+                f"command timed out: {command!r}"
+            ) from exc
+        except (socket.error, OSError) as exc:
+            raise SSHConnectionError(str(exc)) from exc
 
-        result = await asyncio.to_thread(_exec)
+    try:
+        result = await ssh_pool.run_with_retry(server, _exec)
+    except paramiko.AuthenticationException as exc:
+        raise AuthenticationError(str(exc)) from exc
+    except paramiko.SSHException as exc:
+        # Covers ChannelException too (subclass). Reached only after the
+        # retry inside run_with_retry already evicted + tried a fresh
+        # transport, so this is a "really broken" path.
+        raise SSHConnectionError(str(exc) or exc.__class__.__name__) from exc
 
     if check and not result.ok:
         # Log at DEBUG only — stderr may contain sensitive material.

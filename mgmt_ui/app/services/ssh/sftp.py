@@ -147,49 +147,48 @@ async def sftp_atomic_write(
     else:
         payload = content
 
-    async with ssh_pool.session(server) as client:
-
-        def _write() -> None:
+    def _write(client: paramiko.SSHClient) -> None:
+        # paramiko ChannelException / SSHException are NOT caught here so
+        # run_with_retry can evict a stale transport and retry once.
+        try:
+            sftp: paramiko.SFTPClient = client.open_sftp()
             try:
-                sftp: paramiko.SFTPClient = client.open_sftp()
+                # 'wb' = O_WRONLY|O_CREAT|O_TRUNC — re-uses the
+                # existing inode if the file is already there, which
+                # is the whole point of this rewrite. Paramiko's
+                # set_pipelined(False) trades a tiny bit of throughput
+                # for a stricter "data hit the wire" guarantee.
+                with sftp.file(remote_path, "wb") as fh:
+                    fh.set_pipelined(False)
+                    fh.write(payload)
+                sftp.chmod(remote_path, mode)
+            finally:
                 try:
-                    # 'wb' = O_WRONLY|O_CREAT|O_TRUNC — re-uses the
-                    # existing inode if the file is already there, which
-                    # is the whole point of this rewrite. Paramiko's
-                    # set_pipelined(False) trades a tiny bit of throughput
-                    # for a stricter "data hit the wire" guarantee.
-                    with sftp.file(remote_path, "wb") as fh:
-                        fh.set_pipelined(False)
-                        fh.write(payload)
-                    sftp.chmod(remote_path, mode)
-                finally:
-                    try:
-                        sftp.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                    sftp.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
-                # Best-effort durability flush so a power cut right after
-                # the SFTP close doesn't lose the write.
-                stdin, stdout, stderr = client.exec_command("sync", timeout=30)
+            # Best-effort durability flush so a power cut right after
+            # the SFTP close doesn't lose the write.
+            stdin, stdout, stderr = client.exec_command("sync", timeout=30)
+            try:
+                stdout.channel.recv_exit_status()
+            finally:
                 try:
-                    stdout.channel.recv_exit_status()
-                finally:
-                    try:
-                        stdin.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-            except SSHError:
-                raise
-            except paramiko.AuthenticationException as exc:
-                raise AuthenticationError(str(exc)) from exc
-            except paramiko.SSHException as exc:
-                raise SSHConnectionError(str(exc)) from exc
-            except (socket.timeout, TimeoutError) as exc:
-                raise SSHConnectionError("sftp timed out") from exc
-            except (socket.error, OSError, IOError) as exc:
-                raise SSHError(f"sftp i/o failed: {exc}") from exc
+                    stdin.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        except (socket.timeout, TimeoutError) as exc:
+            raise SSHConnectionError("sftp timed out") from exc
+        except (socket.error, OSError, IOError) as exc:
+            raise SSHError(f"sftp i/o failed: {exc}") from exc
 
-        await asyncio.to_thread(_write)
+    try:
+        await ssh_pool.run_with_retry(server, _write)
+    except paramiko.AuthenticationException as exc:
+        raise AuthenticationError(str(exc)) from exc
+    except paramiko.SSHException as exc:
+        raise SSHConnectionError(str(exc) or exc.__class__.__name__) from exc
 
 
 def _best_effort_unlink(client: paramiko.SSHClient, path: str) -> None:
@@ -215,27 +214,28 @@ async def sftp_read_text(server: Server, remote_path: str) -> str:
     No scope check: admins may need to inspect files outside ``base_dir``
     (e.g. the legacy ``/root/seller-market/config.ini``).
     """
-    async with ssh_pool.session(server) as client:
-
-        def _read() -> str:
+    def _read(client: paramiko.SSHClient) -> str:
+        # ChannelException / SSHException propagate raw so run_with_retry
+        # can evict a stale transport and retry on a fresh one.
+        try:
+            sftp: paramiko.SFTPClient = client.open_sftp()
             try:
-                sftp: paramiko.SFTPClient = client.open_sftp()
+                with sftp.file(remote_path, "rb") as fh:
+                    data = fh.read()
+            finally:
                 try:
-                    with sftp.file(remote_path, "rb") as fh:
-                        data = fh.read()
-                finally:
-                    try:
-                        sftp.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                return data.decode("utf-8")
-            except paramiko.AuthenticationException as exc:
-                raise AuthenticationError(str(exc)) from exc
-            except paramiko.SSHException as exc:
-                raise SSHConnectionError(str(exc)) from exc
-            except (socket.timeout, TimeoutError) as exc:
-                raise SSHConnectionError("sftp timed out") from exc
-            except (socket.error, OSError, IOError) as exc:
-                raise SSHError(f"sftp i/o failed: {exc}") from exc
+                    sftp.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            return data.decode("utf-8")
+        except (socket.timeout, TimeoutError) as exc:
+            raise SSHConnectionError("sftp timed out") from exc
+        except (socket.error, OSError, IOError) as exc:
+            raise SSHError(f"sftp i/o failed: {exc}") from exc
 
-        return await asyncio.to_thread(_read)
+    try:
+        return await ssh_pool.run_with_retry(server, _read)
+    except paramiko.AuthenticationException as exc:
+        raise AuthenticationError(str(exc)) from exc
+    except paramiko.SSHException as exc:
+        raise SSHConnectionError(str(exc) or exc.__class__.__name__) from exc
