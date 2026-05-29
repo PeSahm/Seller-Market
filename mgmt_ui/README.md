@@ -6,6 +6,79 @@ manages multiple trading servers over SSH + `docker compose`. The UI exposes two
 their assigned bots only). Built with **FastAPI + PostgreSQL + HTMX/Jinja**, deployed
 as Docker.
 
+## What it manages
+
+The mgmt UI is the control plane for a fleet of trading-bot stacks running on
+remote VPSes. It owns the configuration in Postgres, renders each stack's
+`config.ini`, and ships it to the trading host over SSH — operators never edit
+files on the bot servers by hand.
+
+### Data model
+
+| Entity | What it is |
+|---|---|
+| **User** | A login. Role is `admin` (full fleet control) or `agent` (only their own customers/stacks). |
+| **Server** | A trading VPS reachable over SSH (host, port, user, auth, `base_dir`, host-key pin, `image_pull_policy`). |
+| **Stack** | One `docker compose` deployment of the bot on a Server, owned by an agent. Lives under `<base_dir>/<agent-uuid>/`. |
+| **Customer** | A broker **account** (`display_name`, `broker`, `username`, Fernet-encrypted `password`). Long-lived; assigned to a Server/Stack. |
+| **Trade Instruction** | "Trade ISIN X on side Y (Buy=1/Sell=2)" under a Customer. One Customer → many instructions. Each renders to one `[section]` in `config.ini`. |
+
+A Customer is account-shaped; the per-instrument details live on its Trade
+Instructions (split out in migration 0003). Both Customer and Trade Instruction
+edits use **optimistic locking** — the form echoes the row `version`, and a
+concurrent edit loses with HTTP 409 instead of silently clobbering.
+
+### config.ini auto-push
+
+Every change that affects what a stack should trade re-renders the **whole**
+`config.ini` for that stack and SFTPs it to the trading host immediately — no
+redeploy, no waiting for the next poll:
+
+- Trade Instruction **create / edit / delete** (both admin and agent routes)
+- Customer **edit** and **assignment / reassignment / unassignment**
+
+Trade Instruction delete is a **hard delete** — the row is gone (an audit-log
+entry keeps the pre-delete snapshot for forensics). There is no soft-delete /
+`enabled` flag and no "delete customer" action: to stop trading an account,
+delete its Trade Instructions. Pushes are best-effort — an SSH failure is
+logged but doesn't fail the request (the DB write already committed; the
+operator can re-push from the stack page).
+
+### Deploys over SSH
+
+Admins provision a stack and `docker compose up -d` it over SSH. The
+`--pull` flag is driven by each Server's **`image_pull_policy`**
+(`always` / `missing` / `never`). Hosts with restricted egress to `ghcr.io`
+(e.g. Iranian VPSes) are set to `never` and the bot image is pre-pulled from a
+mirror and retagged locally, so redeploys never touch the blocked registry.
+
+### SSH connection pool
+
+One pooled `paramiko` transport per `(user, host, port)`, with
+**trust-on-first-use host-key pinning** and **versioned-Fernet** credential
+storage. Channel operations (`run_command`, SFTP read/write) **evict a stale
+transport and retry once** on a transport-level failure, so a NAT timeout or a
+remote sshd restart self-heals instead of wedging the pool (issue #94).
+
+### Background workers
+
+Six in-process asyncio workers (each toggleable via settings):
+
+| Worker | Job |
+|---|---|
+| Server health | SSH/`docker` reachability ping per server |
+| Stack health | `docker compose ps` per stack |
+| Trade ingestor | Pull new `order_results/*.json` → `trade_results` rows |
+| Scheduled-run ingestor | Pull `run_results/` cron markers → Runs list |
+| Health scanner | Upsert per-stack health signals |
+| Janitor | Sweep old order results / run logs / health signals |
+
+### Audit log
+
+Every state-changing action writes an audit row. Payloads are **auto-redacted** —
+any key matching `password / secret / token / raw_pem / private_key / fernet /
+api_key` renders as `***` in audit and diff views.
+
 ## Production hardening (Phase 10)
 
 The mgmt UI is safe to expose on the public internet behind TLS. Defences in place:
@@ -232,8 +305,14 @@ pytest
 
 ```
 mgmt_ui/
-  app/              FastAPI app (routes, models, services, templates)
-  workers/          Background workers (ingest runner, SSH ops)
+  app/
+    routers/        HTTP routes (admin, agent, auth, ws)
+    models/         SQLAlchemy ORM models
+    schemas/        Pydantic request/response schemas
+    services/       Business logic (customers, trade_instructions, stacks, ssh/, rendering/)
+    workers/        Background asyncio workers (health, ingestors, janitor)
+    security/       CSRF, Fernet crypto, auth deps
+    templates/      Jinja/HTMX templates
   alembic/          DB migrations
   tests/
   pyproject.toml
