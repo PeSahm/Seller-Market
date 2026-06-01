@@ -11,9 +11,11 @@ deal with form parsing, validation, and template selection.
 """
 from __future__ import annotations
 
+import asyncio
 import difflib
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from typing import Optional
 from uuid import UUID
@@ -26,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.models.audit import AuditLog
+from app.models.fees import AgentFeeConfig
 from app.models.runs import StackRunLock
 from app.models.servers import ServerClockSkewSample
 from app.models.users import User
@@ -44,7 +47,10 @@ from app.security.deps import require_admin
 from app.services import agents as services_agents
 from app.services import audit as services_audit
 from app.services import broker_client
+from app.services import broker_orders as services_broker_orders
 from app.services import customers as services_customers
+from app.services import fee_export
+from app.services import profit_report as services_profit_report
 from app.services import distribution as services_distribution
 from app.services import health_signals as services_health
 from app.services import locust_configs as services_locust
@@ -2997,6 +3003,351 @@ async def admin_trade_detail(
     ctx["run"] = run
     ctx["raw_pretty"] = raw_pretty
     return templates.TemplateResponse("admin/trade_detail.html", ctx)
+
+
+# ---------------------------------------------------------------------------
+# Bot report — direct GetOrders + profit-share fee (Excel export)
+# ---------------------------------------------------------------------------
+#
+# Independent of the bot: the mgmt UI calls the broker GetOrders API itself
+# (services.broker_orders) to learn which orders executed, stores them in
+# broker_orders, and computes the operator's profit-share fee
+# (services.profit_report). The headline deliverable is the .xlsx export.
+
+
+def _bot_report_parse_date(s: Optional[str]) -> Optional[date]:
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _bot_report_parse_int(s: Optional[str]) -> Optional[int]:
+    if not s:
+        return None
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _bot_report_parse_uuid(s: Optional[str]) -> Optional[UUID]:
+    if not s:
+        return None
+    try:
+        return UUID(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _bot_report_resolve_time(param, default_str):
+    """Resolve a time-of-day window bound.
+
+    ``param is None`` (not in the query at all → first load) falls back to the
+    configured default; an explicit empty string (user cleared the input)
+    means "no bound"; anything else is parsed (garbage → no bound).
+    """
+    from datetime import time as _time
+
+    raw = default_str if param is None else param
+    if not raw:
+        return None
+    try:
+        return _time.fromisoformat(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+async def _bot_report_filters(db, *, since, until, window_start, window_end):
+    """Resolve the shared filter scaffold (date range + time window) with
+    settings-backed defaults. Returns the parsed values + the raw echoes."""
+    settings_map = await settings_store.get_all_settings(db)
+    p_since = _bot_report_parse_date(since) or _bot_report_parse_date(
+        settings_map.get("robot_start_date")
+    )
+    p_until = _bot_report_parse_date(until)
+    p_ws = _bot_report_resolve_time(window_start, settings_map.get("bot_window_start"))
+    p_we = _bot_report_resolve_time(window_end, settings_map.get("bot_window_end"))
+    return p_since, p_until, p_ws, p_we
+
+
+async def _bot_report_customer_map(db, customer_ids):
+    """Load a ``{customer_id: Customer}`` lookup for the given ids."""
+    out: dict[UUID, "Customer"] = {}
+    ids = [c for c in customer_ids if c]
+    if not ids:
+        return out
+    from app.models.customers import Customer
+
+    rows = await db.execute(select(Customer).where(Customer.id.in_(ids)))
+    for c in rows.scalars().all():
+        out[c.id] = c
+    return out
+
+
+@router.get("/bot-report")
+async def admin_bot_report(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    tab: Optional[str] = "orders",
+    agent_id: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    broker: Optional[str] = None,
+    symbol_or_isin: Optional[str] = None,
+    side: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    window_start: Optional[str] = None,
+    window_end: Optional[str] = None,
+    only_bot: Optional[str] = None,
+):
+    """Two-tab report over ``broker_orders``: "orders" (market-open burst) +
+    "fees" (per-buy profit/fee). Defensive param parsing mirrors admin_trades:
+    garbage degrades to "no filter", never 422.
+    """
+    p_agent = _bot_report_parse_uuid(agent_id)
+    p_customer = _bot_report_parse_uuid(customer_id)
+    p_since, p_until, p_ws, p_we = await _bot_report_filters(
+        db, since=since, until=until, window_start=window_start, window_end=window_end
+    )
+
+    agents = {
+        a.id: a for a in await services_agents.list_agents(db, include_deleted=True)
+    }
+    fee_report = None
+    orders: list = []
+    if tab == "fees":
+        fee_report = await services_profit_report.build_fee_report(
+            db,
+            agent_id=p_agent,
+            customer_id=p_customer,
+            broker=broker or None,
+            since=p_since,
+            until=p_until,
+            window_start=p_ws,
+            window_end=p_we,
+        )
+        cust_ids = {r.buy.customer_id for r in fee_report.buy_rows}
+    else:
+        orders = await services_broker_orders.list_orders(
+            db,
+            agent_id=p_agent,
+            customer_id=p_customer,
+            broker=broker or None,
+            symbol_or_isin=symbol_or_isin or None,
+            side=_bot_report_parse_int(side),
+            # broker_orders only ever holds fully-executed rows (we fetch with
+            # includeStatus=[3]); no state filter needed here.
+            state=None,
+            since=p_since,
+            until=p_until,
+            window_start=p_ws,
+            window_end=p_we,
+            only_bot=bool(only_bot),
+            limit=2000,
+        )
+        cust_ids = {o.customer_id for o in orders}
+
+    ctx = _ctx(request, user, current_tab="/admin/bot-report")
+    ctx["tab"] = "fees" if tab == "fees" else "orders"
+    ctx["orders"] = orders
+    ctx["fee_report"] = fee_report
+    ctx["agents_by_id"] = agents
+    ctx["customers_by_id"] = await _bot_report_customer_map(db, cust_ids)
+    ctx["all_agents"] = sorted(agents.values(), key=lambda a: a.username)
+    ctx["all_customers"] = await services_customers.list_customers(db)
+    ctx["filter_agent_id"] = agent_id
+    ctx["filter_customer_id"] = customer_id
+    ctx["filter_broker"] = broker
+    ctx["filter_symbol_or_isin"] = symbol_or_isin
+    ctx["filter_side"] = side
+    ctx["filter_since"] = since or (p_since.isoformat() if p_since else "")
+    ctx["filter_until"] = until or ""
+    ctx["filter_window_start"] = (
+        window_start if window_start is not None else (p_ws.isoformat() if p_ws else "")
+    )
+    ctx["filter_window_end"] = (
+        window_end if window_end is not None else (p_we.isoformat() if p_we else "")
+    )
+    ctx["filter_only_bot"] = bool(only_bot)
+    return templates.TemplateResponse("admin/bot_report.html", ctx)
+
+
+@router.post("/bot-report/refresh")
+async def admin_bot_report_refresh(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    agent_id: Optional[str] = Form(None),
+    customer_id: Optional[str] = Form(None),
+    since: Optional[str] = Form(None),
+    until: Optional[str] = Form(None),
+):
+    """Fire-and-forget a per-customer GetOrders fetch into ``broker_orders``.
+
+    Non-blocking: each login may cost a captcha solve, so we kick a background
+    task (its own sessions, bounded concurrency) and redirect immediately —
+    same fire-and-forget shape as the force-kill path above.
+    """
+    p_agent = _bot_report_parse_uuid(agent_id)
+    p_customer = _bot_report_parse_uuid(customer_id)
+
+    customers = await services_customers.list_customers(db, agent_id=p_agent)
+    if p_customer is not None:
+        customers = [c for c in customers if c.id == p_customer]
+    ids = [c.id for c in customers]
+
+    settings_map = await settings_store.get_all_settings(db)
+    p_since = _bot_report_parse_date(since) or _bot_report_parse_date(
+        settings_map.get("robot_start_date")
+    ) or date(2025, 11, 1)
+    p_until = _bot_report_parse_date(until) or date.today()
+
+    if ids:
+        asyncio.create_task(
+            services_broker_orders.refresh_orders_for_customers(
+                ids, from_date=p_since, to_date=p_until
+            ),
+            name=f"bot-report-refresh-{len(ids)}",
+        )
+        logger.info(
+            "bot-report refresh kicked for %d customer(s) %s..%s by %s",
+            len(ids), p_since, p_until, user.username,
+        )
+
+    target = "/admin/bot-report"
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target}
+    )
+
+
+@router.post("/bot-report/fee-config")
+async def admin_bot_report_fee_config(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    agent_id: str = Form(...),
+    fee_percent: str = Form(...),
+):
+    """Upsert a per-agent profit-share fee % override."""
+    p_agent = _bot_report_parse_uuid(agent_id)
+    if p_agent is None:
+        raise HTTPException(status_code=400, detail="invalid agent_id")
+    try:
+        pct = Decimal(fee_percent)
+    except (InvalidOperation, ValueError):
+        raise HTTPException(status_code=400, detail="fee_percent must be numeric")
+
+    existing = await db.get(AgentFeeConfig, p_agent)
+    prev_pct = existing.fee_percent if existing is not None else None
+    if existing is None:
+        db.add(
+            AgentFeeConfig(agent_id=p_agent, fee_percent=pct, updated_by=user.id)
+        )
+    else:
+        existing.fee_percent = pct
+        existing.updated_by = user.id
+        existing.updated_at = datetime.now(timezone.utc)
+    # Audit trail — mirror the setting.update / customer.* mutations so fee
+    # changes are attributable (who/when/what), not silently committed.
+    db.add(
+        AuditLog(
+            actor_user_id=user.id,
+            action="agent_fee_config.update",
+            target_type="agent_fee_config",
+            target_id=str(p_agent),
+            before_json={"fee_percent": str(prev_pct) if prev_pct is not None else None},
+            after_json={"fee_percent": str(pct)},
+            ts=datetime.now(timezone.utc),
+        )
+    )
+    await db.commit()
+
+    target = "/admin/bot-report?tab=fees"
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target}
+    )
+
+
+@router.get("/bot-report/export.xlsx")
+async def admin_bot_report_export(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    agent_id: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    broker: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    window_start: Optional[str] = None,
+    window_end: Optional[str] = None,
+):
+    """Stream the .xlsx fee report — the owner's primary deliverable."""
+    p_agent = _bot_report_parse_uuid(agent_id)
+    p_customer = _bot_report_parse_uuid(customer_id)
+    p_since, p_until, p_ws, p_we = await _bot_report_filters(
+        db, since=since, until=until, window_start=window_start, window_end=window_end
+    )
+
+    fee_report = await services_profit_report.build_fee_report(
+        db,
+        agent_id=p_agent,
+        customer_id=p_customer,
+        broker=broker or None,
+        since=p_since,
+        until=p_until,
+        window_start=p_ws,
+        window_end=p_we,
+    )
+    # Every stored order in range for the audit sheet (no time-window filter).
+    # broker_orders only holds fully-executed rows, so this is the executed
+    # buys AND sells — the raw reconciliation trail behind the fee numbers.
+    orders = await services_broker_orders.list_orders(
+        db,
+        agent_id=p_agent,
+        customer_id=p_customer,
+        broker=broker or None,
+        since=p_since,
+        until=p_until,
+        limit=20000,
+    )
+
+    agent_names = {
+        a.id: a.username
+        for a in await services_agents.list_agents(db, include_deleted=True)
+    }
+    cust_ids = {r.buy.customer_id for r in fee_report.buy_rows} | {
+        o.customer_id for o in orders
+    }
+    cust_map = await _bot_report_customer_map(db, cust_ids)
+    customer_names = {
+        cid: (c.display_name or c.username) for cid, c in cust_map.items()
+    }
+
+    xlsx = fee_export.build_fee_workbook(
+        fee_report,
+        orders,
+        agent_names=agent_names,
+        customer_names=customer_names,
+    )
+    fname = (
+        f"bot-fee-report_{(p_since.isoformat() if p_since else 'start')}"
+        f"_{(p_until.isoformat() if p_until else 'today')}.xlsx"
+    )
+    return Response(
+        content=xlsx,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,7 @@ from app.workers.janitor import run_janitor
 from app.workers.stack_health import run_stack_health_worker
 from app.workers.scheduled_run_ingestor import run_scheduled_run_ingest_worker
 from app.workers.trade_ingestor import run_trade_ingest_worker
+from app.workers.broker_order_reconciler import run_broker_order_reconcile_worker
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,11 @@ def create_app() -> FastAPI:
     # health_signals on a slow cadence via ``services.janitor.run_janitor_tick``.
     app.state.janitor_stop = asyncio.Event()
     app.state.janitor_task = None  # type: Optional[asyncio.Task[None]]
+    # Bot report: daily broker-order reconciler. Pulls a rolling recent window
+    # of GetOrders for every customer into broker_orders so the report stays
+    # current. Off by default (external broker calls) — see settings.
+    app.state.broker_order_reconcile_stop = asyncio.Event()
+    app.state.broker_order_reconcile_task = None  # type: Optional[asyncio.Task[None]]
 
     @app.on_event("startup")
     async def _start_health_worker() -> None:
@@ -253,6 +259,39 @@ def create_app() -> FastAPI:
             await asyncio.wait_for(task, timeout=5.0)
         except asyncio.TimeoutError:
             logger.warning("scheduled-run ingestor worker did not stop in 5s; cancelling")
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    @app.on_event("startup")
+    async def _start_broker_order_reconciler() -> None:
+        if not settings.enable_broker_order_reconciler:
+            logger.info("broker order reconciler disabled via settings")
+            return
+        # Fresh stop event so a second lifespan cycle on the same app instance
+        # (e.g. tests) doesn't inherit the previous shutdown's signaled event
+        # and exit the worker immediately.
+        app.state.broker_order_reconcile_stop = asyncio.Event()
+        app.state.broker_order_reconcile_task = asyncio.create_task(
+            run_broker_order_reconcile_worker(
+                app.state.broker_order_reconcile_stop,
+                interval_seconds=settings.broker_order_reconcile_interval_seconds,
+                lookback_days=settings.broker_order_reconcile_lookback_days,
+            ),
+            name="broker-order-reconcile-worker",
+        )
+
+    @app.on_event("shutdown")
+    async def _stop_broker_order_reconciler() -> None:
+        task: Optional[asyncio.Task[None]] = app.state.broker_order_reconcile_task
+        if task is None:
+            return
+        app.state.broker_order_reconcile_stop.set()
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
             task.cancel()
             try:
                 await task

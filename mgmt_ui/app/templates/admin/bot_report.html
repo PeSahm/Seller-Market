@@ -1,0 +1,262 @@
+{#
+  Bot report (GetOrders + profit-share fee).
+
+  Two sub-tabs over the broker_orders table:
+    - "Bot orders": executed orders, filtered by date range + a time-of-day
+      window (default 08:44:59–08:45:03 — the bot's market-open burst).
+      Columns: agent / customer / isin / date / volume / price.
+    - "Profit & fee": per-buy FIFO match against later sells → realized profit
+      and the operator's X% fee, with per-agent totals.
+
+  "Refresh from broker" kicks a background GetOrders fetch; "Export to Excel"
+  streams the headline .xlsx. Data is read from the stored broker_orders, so
+  the page itself is fast.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Bot report{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Bot report</h1>
+    <p class="text-muted text-small">
+      Executed orders pulled <strong>directly from the broker</strong>
+      (GetOrders) — independent of the bot's order_results feed, so completed
+      trades the Trades page misses show up here. The profit/fee tab matches
+      each bot buy against its later sell and bills your configured
+      profit-share percentage.
+    </p>
+  </div>
+</div>
+
+{# ---- Actions: refresh from broker + export ---- #}
+<div class="filter-bar" style="justify-content: space-between;">
+  <form method="post" action="/admin/bot-report/refresh" class="filter-bar" style="margin:0;">
+    {% include "partials/csrf.html" %}
+    <select name="agent_id" class="input" title="Limit refresh to one agent">
+      <option value="">All agents</option>
+      {% for a in all_agents %}
+        <option value="{{ a.id }}" {% if filter_agent_id and filter_agent_id == a.id|string %}selected{% endif %} dir="auto">
+          {{ a.username }}{% if a.deleted_at %} (deleted){% endif %}
+        </option>
+      {% endfor %}
+    </select>
+    <input type="date" name="since" class="input" value="{{ filter_since or '' }}" title="Fetch from (default: robot start)">
+    <input type="date" name="until" class="input" value="{{ filter_until or '' }}" title="Fetch to (default: today)">
+    <button class="btn btn--primary btn--sm" type="submit">Refresh from broker</button>
+  </form>
+
+  <a class="btn btn--sm"
+     href="/admin/bot-report/export.xlsx?{{ {
+        'agent_id': filter_agent_id or '',
+        'customer_id': filter_customer_id or '',
+        'broker': filter_broker or '',
+        'since': filter_since or '',
+        'until': filter_until or '',
+        'window_start': filter_window_start or '',
+        'window_end': filter_window_end or '',
+     }|urlencode }}">⬇ Export to Excel</a>
+</div>
+<p class="text-small text-muted">
+  Refresh runs in the background (each broker login may need a captcha solve);
+  reload in a minute to see new rows.
+</p>
+
+{# ---- Sub-tabs ---- #}
+<nav class="tabs" aria-label="Bot report sections">
+  <a class="tab{% if tab == 'orders' %} tab--active{% endif %}" href="/admin/bot-report?tab=orders">Bot orders</a>
+  <a class="tab{% if tab == 'fees' %} tab--active{% endif %}" href="/admin/bot-report?tab=fees">Profit &amp; fee</a>
+</nav>
+
+{# ---- Filter bar (GET) ---- #}
+<form method="get" action="/admin/bot-report" class="filter-bar">
+  <input type="hidden" name="tab" value="{{ tab }}">
+  {% if filter_customer_id %}
+    <input type="hidden" name="customer_id" value="{{ filter_customer_id }}">
+  {% endif %}
+  <input type="date" name="since" class="input" value="{{ filter_since or '' }}" title="Placed on or after">
+  <input type="date" name="until" class="input" value="{{ filter_until or '' }}" title="Placed on or before">
+  <select name="agent_id" class="input">
+    <option value="">All agents</option>
+    {% for a in all_agents %}
+      <option value="{{ a.id }}" {% if filter_agent_id and filter_agent_id == a.id|string %}selected{% endif %} dir="auto">
+        {{ a.username }}{% if a.deleted_at %} (deleted){% endif %}
+      </option>
+    {% endfor %}
+  </select>
+  <input type="text" name="broker" class="input" value="{{ filter_broker or '' }}" placeholder="broker" autocomplete="off">
+  <input type="time" step="1" name="window_start" class="input" value="{{ filter_window_start or '' }}" title="Market-open window start (HH:MM:SS)">
+  <input type="time" step="1" name="window_end" class="input" value="{{ filter_window_end or '' }}" title="Market-open window end (HH:MM:SS)">
+  {% if tab != 'fees' %}
+    <input type="text" name="symbol_or_isin" class="input" value="{{ filter_symbol_or_isin or '' }}" placeholder="symbol or ISIN" autocomplete="off">
+    <select name="side" class="input">
+      <option value="">Any side</option>
+      <option value="1" {% if filter_side == '1' %}selected{% endif %}>Buy</option>
+      <option value="2" {% if filter_side == '2' %}selected{% endif %}>Sell</option>
+    </select>
+    <label class="text-small" style="display:flex;align-items:center;gap:4px;">
+      <input type="checkbox" name="only_bot" value="1" {% if filter_only_bot %}checked{% endif %}> bot only
+    </label>
+  {% endif %}
+  <button class="btn btn--ghost btn--sm" type="submit">Apply</button>
+  <a class="btn btn--ghost btn--sm" href="/admin/bot-report?tab={{ tab }}">Clear</a>
+</form>
+
+{% if tab == 'fees' %}
+  {# ================= Profit & fee tab ================= #}
+  {% set fr = fee_report %}
+
+  {# Per-agent fee % override #}
+  <details class="card" style="margin-bottom: 12px;">
+    <summary class="text-small">Set an agent's profit-share fee %</summary>
+    <form method="post" action="/admin/bot-report/fee-config" class="filter-bar" style="margin-top:8px;">
+      {% include "partials/csrf.html" %}
+      <select name="agent_id" class="input" required>
+        <option value="">Select agent…</option>
+        {% for a in all_agents %}
+          <option value="{{ a.id }}" dir="auto">{{ a.username }}</option>
+        {% endfor %}
+      </select>
+      <input type="number" step="0.0001" min="0" name="fee_percent" class="input" placeholder="fee %" required title="Percent, e.g. 1.5 = 1.5%">
+      <button class="btn btn--sm" type="submit">Save fee %</button>
+    </form>
+  </details>
+
+  {% if not fr or not fr.buy_rows %}
+    <div class="card">
+      <p class="text-muted">No matched buys in scope.</p>
+      <p class="text-small text-muted">
+        Use <strong>Refresh from broker</strong> to pull order history, then
+        widen the date range. Only buys in the market-open window (or tagged
+        by the fire-log) count as bot buys.
+      </p>
+    </div>
+  {% else %}
+    {# Per-agent totals #}
+    <table class="table" style="margin-bottom: 16px;">
+      <thead>
+        <tr><th>Agent</th><th># buys</th><th>Matched buy value</th><th>Realized profit</th><th>Fee due</th><th>Open vol</th></tr>
+      </thead>
+      <tbody>
+        {% for ag_id, t in fr.per_agent.items() %}
+        {% set ag = agents_by_id.get(ag_id) %}
+        <tr>
+          <td dir="auto">{{ ag.username if ag else '—' }}</td>
+          <td class="text-small">{{ t.num_buys }}</td>
+          <td class="text-small">{{ '{:,.0f}'.format(t.total_buy_value) }}</td>
+          <td class="text-small">{{ '{:,.0f}'.format(t.realized_profit) }}</td>
+          <td class="text-small"><strong>{{ '{:,.0f}'.format(t.total_fee) }}</strong></td>
+          <td class="text-small">{{ t.open_volume }}</td>
+        </tr>
+        {% endfor %}
+        <tr>
+          <td><strong>TOTAL</strong></td><td></td><td></td>
+          <td class="text-small"><strong>{{ '{:,.0f}'.format(fr.grand_realized) }}</strong></td>
+          <td class="text-small"><strong>{{ '{:,.0f}'.format(fr.grand_fee) }}</strong></td>
+          <td></td>
+        </tr>
+      </tbody>
+    </table>
+
+    {# Per-buy detail #}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Agent</th><th>Customer</th><th>Symbol / ISIN</th>
+          <th>Buy date</th><th>Buy vol</th><th>Buy price</th>
+          <th>Sold</th><th>Sell value</th><th>Realized</th>
+          <th>Fee %</th><th>Fee</th><th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in fr.buy_rows %}
+        {% set o = r.buy %}
+        {% set cust = customers_by_id.get(o.customer_id) %}
+        {% set ag = agents_by_id.get(o.agent_id) %}
+        <tr>
+          <td dir="auto" class="text-small">{{ ag.username if ag else '—' }}</td>
+          <td class="text-small" dir="auto">{{ cust.display_name if cust else o.account_username }}</td>
+          <td>
+            {% if o.symbol %}<code class="text-small" dir="auto">{{ o.symbol }}</code><div class="text-small text-muted"><code>{{ o.isin }}</code></div>
+            {% else %}<code class="text-small">{{ o.isin }}</code>{% endif %}
+          </td>
+          <td class="text-small text-muted">{{ o.placed_at.strftime('%Y-%m-%d %H:%M:%S') if o.placed_at else '—' }}</td>
+          <td class="text-small">{{ '{:,}'.format(o.executed_volume) }}</td>
+          <td class="text-small">{{ '{:,.0f}'.format(o.price) if o.price is not none else '—' }}</td>
+          <td class="text-small">{{ '{:,}'.format(r.matched_volume) }}{% if r.open_volume %}<span class="text-muted"> / {{ '{:,}'.format(r.open_volume) }} open</span>{% endif %}</td>
+          <td class="text-small">{{ '{:,.0f}'.format(r.sell_value) }}</td>
+          <td class="text-small">{{ '{:,.0f}'.format(r.realized_profit) }}</td>
+          <td class="text-small">{{ r.fee_percent }}</td>
+          <td class="text-small"><strong>{{ '{:,.0f}'.format(r.fee) }}</strong></td>
+          <td>
+            {% if r.status == 'realized' %}<span class="badge badge--up">realized</span>
+            {% elif r.status == 'partial' %}<span class="badge badge--pending">partial</span>
+            {% else %}<span class="badge">open / possible sell</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if fr.unmatched_sell_qty %}
+      <p class="text-small text-muted">
+        {{ '{:,}'.format(fr.unmatched_sell_qty) }} sold share(s) had no matching bot buy in
+        range (pre-existing/manual holdings) — excluded from the fee.
+      </p>
+    {% endif %}
+  {% endif %}
+
+{% else %}
+  {# ================= Bot orders tab ================= #}
+  {% if not orders %}
+    <div class="card">
+      <p class="text-muted">No orders in scope.</p>
+      <p class="text-small text-muted">
+        Click <strong>Refresh from broker</strong> to pull GetOrders history,
+        or widen the date / time-window filters. The window defaults to the
+        bot's market-open burst (08:44:59–08:45:03).
+      </p>
+    </div>
+  {% else %}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Date</th><th>Agent</th><th>Customer</th><th>Symbol / ISIN</th>
+        <th>Side</th><th>Price</th><th>Volume</th><th>Executed</th>
+        <th>Exec amount</th><th>State</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for o in orders %}
+      {% set cust = customers_by_id.get(o.customer_id) %}
+      {% set ag = agents_by_id.get(o.agent_id) %}
+      <tr>
+        <td class="text-small text-muted">{{ o.placed_at.strftime('%Y-%m-%d %H:%M:%S') if o.placed_at else '—' }}</td>
+        <td class="text-small" dir="auto">{{ ag.username if ag else '—' }}</td>
+        <td class="text-small" dir="auto">
+          {% if cust %}{{ cust.display_name }}{% else %}{{ o.account_username }}{% endif %}
+          {% if o.is_bot %}<span class="badge badge--up" title="bot-fired">bot</span>{% endif %}
+        </td>
+        <td>
+          {% if o.symbol %}<code class="text-small" dir="auto">{{ o.symbol }}</code><div class="text-small text-muted"><code>{{ o.isin }}</code></div>
+          {% else %}<code class="text-small">{{ o.isin }}</code>{% endif %}
+        </td>
+        <td>
+          {% if o.order_side == 1 %}<span class="badge badge--up">Buy</span>
+          {% elif o.order_side == 2 %}<span class="badge badge--down">Sell</span>
+          {% else %}<span class="badge">side={{ o.order_side }}</span>{% endif %}
+        </td>
+        <td class="text-small">{{ '{:,.0f}'.format(o.price) if o.price is not none else '—' }}</td>
+        <td class="text-small">{{ '{:,}'.format(o.volume) }}</td>
+        <td class="text-small">{{ '{:,}'.format(o.executed_volume) }}</td>
+        <td class="text-small">{{ '{:,.0f}'.format(o.executed_amount) if o.executed_amount is not none else '—' }}</td>
+        <td>
+          {% if o.is_done %}<span class="badge badge--up" dir="auto">{{ o.state_desc or 'done' }}</span>
+          {% else %}<span class="badge badge--pending" dir="auto">{{ o.state_desc or o.state }}</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+{% endif %}
+{% endblock %}
