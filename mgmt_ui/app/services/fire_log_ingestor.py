@@ -248,8 +248,10 @@ async def ingest_stack_once(db: AsyncSession, *, stack_id: UUID) -> IngestResult
 # Reconciliation tags ``broker_orders.is_bot`` for executions that match a
 # fire two ways:
 #   1. SERIAL-EXACT — the bot captured the broker serialNumber from its
-#      NewOrder response; match it directly. This is the precise, preferred
-#      link and also tags the exact executed row.
+#      NewOrder response; match it WITHIN THE SAME CUSTOMER. serialNumber is
+#      not guaranteed globally unique across brokers, so scoping to the fire's
+#      customer_id (which pins one broker + one account) prevents cross-broker/
+#      cross-account mis-attribution while keeping the precise link.
 #   2. DATE-BASED — match (customer, isin, side, trading-date). The bot is the
 #      one firing at market open for that instrument, so all same-day executed
 #      orders for that (customer, isin, side) are its — this catches fires with
@@ -262,6 +264,8 @@ _RECONCILE_TAG_SERIAL_SQL = text(
     FROM order_fires f
     WHERE f.reconciled = false
       AND f.serial_number IS NOT NULL
+      AND f.customer_id IS NOT NULL
+      AND bo.customer_id = f.customer_id
       AND bo.serial_number = f.serial_number
       AND bo.is_bot = false
     """
@@ -286,8 +290,10 @@ _RECONCILE_MARK_SQL = text(
     SET reconciled = true
     WHERE f.reconciled = false
       AND (
-        (f.serial_number IS NOT NULL AND EXISTS (
-            SELECT 1 FROM broker_orders bo WHERE bo.serial_number = f.serial_number))
+        (f.serial_number IS NOT NULL AND f.customer_id IS NOT NULL AND EXISTS (
+            SELECT 1 FROM broker_orders bo
+            WHERE bo.customer_id = f.customer_id
+              AND bo.serial_number = f.serial_number))
         OR
         (f.customer_id IS NOT NULL AND EXISTS (
             SELECT 1 FROM broker_orders bo
