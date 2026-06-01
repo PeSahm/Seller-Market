@@ -141,13 +141,14 @@ def build_fee_workbook(
     ws3 = wb.create_sheet("Raw orders")
     _write_header(
         ws3,
-        ["Tracking #", "Agent", "Customer", "Broker", "ISIN", "Symbol",
+        ["Tracking #", "Serial #", "Agent", "Customer", "Broker", "ISIN", "Symbol",
          "Side", "State", "Placed at", "Executed vol", "Price",
          "Executed amount", "Total fee", "Net traded value", "Bot?"],
     )
     for o in orders:
         ws3.append([
             o.tracking_number,
+            getattr(o, "serial_number", None),
             agent_names.get(o.agent_id, "—") if o.agent_id else "—",
             customer_names.get(o.customer_id, o.account_username) if o.customer_id else o.account_username,
             o.broker,
@@ -163,8 +164,8 @@ def build_fee_workbook(
             _num(o.net_traded_value),
             "yes" if o.is_bot else "",
         ])
-    _apply_formats(ws3, date_cols=[9], money_cols=[11, 12, 13, 14], pct_cols=[], nrows=len(orders))
-    _autosize(ws3, [14, 16, 16, 10, 16, 10, 6, 18, 19, 12, 12, 16, 14, 16, 6])
+    _apply_formats(ws3, date_cols=[10], money_cols=[12, 13, 14, 15], pct_cols=[], nrows=len(orders))
+    _autosize(ws3, [14, 18, 16, 16, 10, 16, 10, 6, 18, 19, 12, 12, 16, 14, 16, 6])
 
     buf = BytesIO()
     wb.save(buf)

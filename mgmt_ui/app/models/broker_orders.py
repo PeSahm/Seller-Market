@@ -79,6 +79,11 @@ class BrokerOrder(Base):
     # The GetOrders row's own ``id`` field — kept for cross-referencing the
     # broker UI; NOT the dedup key (tracking_number is).
     broker_order_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # Broker ``serialNumber`` — the durable order identifier the bot captures
+    # from its NewOrder response and the fire-log reconciler matches on to tag
+    # this execution as the bot's. Indexed for that join; not unique (defensive
+    # against broker dupes).
+    serial_number: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     isin: Mapped[str] = mapped_column(String(64), nullable=False)
     symbol: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     symbol_title: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
@@ -142,4 +147,5 @@ class BrokerOrder(Base):
         ),
         sa.Index("ix_broker_orders_placed_at", "placed_at"),
         sa.Index("ix_broker_orders_agent_id_placed_at", "agent_id", "placed_at"),
+        sa.Index("ix_broker_orders_serial_number", "serial_number"),
     )

@@ -28,6 +28,7 @@ from app.workers.stack_health import run_stack_health_worker
 from app.workers.scheduled_run_ingestor import run_scheduled_run_ingest_worker
 from app.workers.trade_ingestor import run_trade_ingest_worker
 from app.workers.broker_order_reconciler import run_broker_order_reconcile_worker
+from app.workers.fire_log_ingestor import run_fire_log_ingest_worker
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,10 @@ def create_app() -> FastAPI:
     # current. Off by default (external broker calls) — see settings.
     app.state.broker_order_reconcile_stop = asyncio.Event()
     app.state.broker_order_reconcile_task = None  # type: Optional[asyncio.Task[None]]
+    # P3: bot fire-log ingestor. Pulls order_fires_*.jsonl into order_fires and
+    # reconciles broker_orders.is_bot. Internal SSH only — default on.
+    app.state.fire_log_ingest_stop = asyncio.Event()
+    app.state.fire_log_ingest_task = None  # type: Optional[asyncio.Task[None]]
 
     @app.on_event("startup")
     async def _start_health_worker() -> None:
@@ -259,6 +264,35 @@ def create_app() -> FastAPI:
             await asyncio.wait_for(task, timeout=5.0)
         except asyncio.TimeoutError:
             logger.warning("scheduled-run ingestor worker did not stop in 5s; cancelling")
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    @app.on_event("startup")
+    async def _start_fire_log_ingestor() -> None:
+        if not settings.enable_fire_log_ingestor:
+            logger.info("fire-log ingestor disabled via settings")
+            return
+        app.state.fire_log_ingest_stop = asyncio.Event()
+        app.state.fire_log_ingest_task = asyncio.create_task(
+            run_fire_log_ingest_worker(
+                app.state.fire_log_ingest_stop,
+                interval_seconds=settings.fire_log_ingest_interval_seconds,
+            ),
+            name="fire-log-ingest-worker",
+        )
+
+    @app.on_event("shutdown")
+    async def _stop_fire_log_ingestor() -> None:
+        task: Optional[asyncio.Task[None]] = app.state.fire_log_ingest_task
+        if task is None:
+            return
+        app.state.fire_log_ingest_stop.set()
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
             task.cancel()
             try:
                 await task
