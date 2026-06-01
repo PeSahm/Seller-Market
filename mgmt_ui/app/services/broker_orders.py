@@ -24,7 +24,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 from uuid import UUID
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, literal_column, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -205,6 +205,12 @@ async def _upsert_order(db: AsyncSession, values: dict) -> bool:
     ``ON CONFLICT (tracking_number) DO UPDATE`` keeps the row fresh as the
     broker fills the order across polls. ``fetched_at`` is bumped to now()
     on every update so the operator can see staleness.
+
+    Insert-vs-update is detected with the PostgreSQL ``(xmax = 0)`` idiom:
+    a freshly inserted tuple has ``xmax = 0``; a tuple updated via DO UPDATE
+    carries a non-zero ``xmax``. (We can't compare ``first_seen_at`` to
+    ``fetched_at`` — ``now()`` is constant within a transaction, so two
+    upserts in one txn would look identical.)
     """
     stmt = pg_insert(BrokerOrder).values(**values)
     set_ = {col: getattr(stmt.excluded, col) for col in _MUTABLE_ON_CONFLICT}
@@ -212,15 +218,9 @@ async def _upsert_order(db: AsyncSession, values: dict) -> bool:
     stmt = stmt.on_conflict_do_update(
         index_elements=[BrokerOrder.tracking_number],
         set_=set_,
-    ).returning(BrokerOrder.id, (BrokerOrder.first_seen_at == BrokerOrder.fetched_at))
-    res = (await db.execute(stmt)).first()
-    if res is None:
-        return False
-    # A fresh insert has first_seen_at == fetched_at (both server-default
-    # now() in the same statement). An update bumps fetched_at past the
-    # original first_seen_at, so the equality flag is False.
-    _id, is_fresh_insert = res
-    return bool(is_fresh_insert)
+    ).returning(literal_column("(xmax = 0)"))
+    inserted = (await db.execute(stmt)).scalar_one()
+    return bool(inserted)
 
 
 def _as_time(value: Any) -> Optional[time]:
