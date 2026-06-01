@@ -236,3 +236,67 @@ Other follow-ups worth filing if not yet:
 | `mgmt_ui/app/templates/admin/customers.html` | #76 | *Show disabled* filter chip + empty-state hint |
 | `mgmt_ui/app/services/rendering/compose_yaml.py` | #77 | `./run_results:/app/run_results` bind mount |
 | `CLAUDE.md` | #73 + this update | this file |
+
+---
+
+## Session 2 — Bot orders + profit-share fee report (PR #98, issue #99)
+
+The mgmt UI's `/admin/trades` page silently missed most completed trades, and there was no way to compute the operator's profit-share fee. Built a new **Bot report** that calls the broker **GetOrders** API directly (independent of the bot) and a FIFO buy↔sell profit/fee engine, with an **Excel (.xlsx) export** as the headline deliverable. Merged as squash commit `be1e81b`; start-date default later changed to `2026-05-19` in `c2c38e8`.
+
+### The bug it fixes (root cause)
+
+`/admin/trades` is fed ONLY by `order_results/*.json` SFTP'd from bots, which the bot writes from `get_open_orders()` ([api_client.py](SellerMarket/api_client.py) → `GetOpenOrders ?type=1`). **GetOpenOrders only returns OPEN orders** — once an order fully executes it leaves that feed forever, so completed trades never reach `trade_results`. `GetOrders` (with `includeStatus:[3]`) is the endpoint that returns them. The bot never called GetOrders (not even defined in `broker_enum.py`).
+
+### Broker GetOrders wire shape (confirmed)
+
+- **Auth**: accepts the same `Authorization: Bearer {token}` the bot uses for NewOrder/GetOpenOrders — NOT only the browser's `x-sessionId`. So the mgmt UI reuses the existing captcha→OCR→login→Bearer flow in `broker_client.py` (`_get_token`, 401-refresh, 30-min token cache).
+- **Endpoint**: ephoenix → `POST https://api-{broker}.ephoenix.ir/api/v2/orders/GetOrders`; ib → `POST https://api.ibtrader.ir/api/v2/orders/GetOrders` (NOT the api8 customer-info shard).
+- **Body**: `{page, pageSize, fromDate:"YYYY/MM/DD", toDate, side, isin, includeStatus:[3], pamCode:null}` — **Gregorian** dates, paginated (`page`/`pageSize`, response has `rows` + `totalRecords`).
+- **Row fields used**: `trackingNumber` (unique dedup key), `isin`, `symbol`/`symbolTitle`, `orderSide` (1=buy,2=sell), `date` (placed, wall-clock), `created` (sub-second placement), `executionDate`, `volume`/`executedVolume`, `price`, `totalFee`, `executedAmount`, `netTradedValue`, `state`(3)/`stateDesc`/`isDone`, `pamCode` (ENDS WITH the account username, e.g. `33094580090306` → `4580090306`).
+
+### Architecture (mgmt UI direct — no bot changes)
+
+- **New `broker_orders` table** (migration `0005`) — separate from `trade_results` (whose ingestor requires a `TradeInstruction`, which would drop sells). Holds buys AND sells. Upsert = `ON CONFLICT (tracking_number) DO UPDATE` (GetOrders polls mutable state). Insert-vs-update detected with the Postgres **`RETURNING (xmax = 0)`** idiom — NOT a `first_seen_at == fetched_at` compare (`now()` is constant within a transaction, so two upserts in one txn look identical). Money columns (`price`/`total_fee`/`executed_amount`/`net_traded_value`) are **`COALESCE`d** on conflict so a malformed re-fetch returning NULL can't wipe a good value.
+- **Attribution is implicit**: query GetOrders per customer with THAT customer's own token → every row is theirs (stamp `customer_id`). `pamCode.endswith(username)` is a defensive assertion only.
+- **`profit_matching.py`** — pure FIFO matcher (TDD), `fee_pct` is a PERCENT (`1.0` == 1%), fee = X% of POSITIVE realized lots (gross price diff, not net of broker fee). Handles partial fills, over-sell, open positions ("possible sell"), losses.
+- **`profit_report.build_fee_report`** — groups state=3 orders by `(customer_id, isin)`, classifies **bot buys** (`is_bot` OR the market-open time window), matches, rolls up ONE ROW PER BUY. Excludes NULL-price rows (would be coerced to 0 and inflate the fee). Resolves the **customer's CURRENT `agent_id`** (not the denormalized `broker_orders.agent_id` snapshot, which goes stale on reassignment).
+- **`agent_fee_configs` table** (migration `0006`) — per-agent fee override; resolver layers agent override → global `profit_fee_percent` setting → default.
+- **`fee_export.build_fee_workbook`** — openpyxl, 3 sheets (Buys & fees / Per-agent totals / Raw orders), real numeric money cells (Decimal→float; Rials are < 2^53 so exact), tz-aware datetimes stripped.
+- **Daily reconciler worker** (`workers/broker_order_reconciler.py`) — pulls a rolling recent window (`reconcile_all_recent`) for every customer so the report stays current. **OFF by default** (`ENABLE_BROKER_ORDER_RECONCILER`) — it makes external broker calls (captcha cost). Historical backfill is the operator-triggered **"Refresh from broker"** (fire-and-forget `asyncio.create_task`, own sessions, `Semaphore(3)`).
+- **Routes** (`/admin/bot-report`): GET (tabs `orders`|`fees`), POST `/refresh`, POST `/fee-config`, GET `/export.xlsx`.
+- **Settings** (`settings_store.DEFAULTS`): `profit_fee_percent` (1.0), `robot_start_date` (**2026-05-19** as of `c2c38e8`), `bot_window_start`/`bot_window_end` (08:44:59 / 08:45:03).
+
+### Bot-buy attribution (manual trading present)
+
+Operator confirmed accounts have **both robot and manual trades**. So the fee counts only buys identified as the robot's via the **market-open time window** on `created`/`date` (08:44:59–08:45:03 wall-clock). Manual buys outside the window are excluded. Exact attribution would need a **bot fire-log** (the bot logging which customer/broker it fired) joined by `trackingNumber` — that's the deferred **P3** (needs bot code change + redeploying every stack; can't fix history since the bot never logged fires in the past).
+
+### Deploy learnings (mgmt VPS 5.10.248.55) — IMPORTANT for next time
+
+- **ghcr.io is still blocked** from the mgmt host (`curl https://ghcr.io/v2/` → HTTP 000 / 12 s timeout, 2026-06). **A direct `docker pull ghcr.io/...` is MISLEADING** — it prints "Download complete" for cached old layers but the manifest fetch fails, so `:latest` does NOT update (revision stays old). **Must use the liara mirror.**
+- **Mirror lag is real**: after a fresh push, `ghcr-mirror.liara.ir/...:latest` keeps serving the OLD digest for a while (be1e81b: ~1 retry; c2c38e8: 4+ retries / several minutes) before it ingests the new image. **ALWAYS retry the mirror pull AND verify the image's `org.opencontainers.image.revision` label == the merge SHA BEFORE retag + `compose up`** — a stale mirror image would silently redeploy the old code. The runbook's plain `docker pull` is not enough; loop until the revision matches.
+- **Verify the revision label** — `docker image inspect ghcr.io/pesahm/seller-market-mgmt-ui:latest --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'` equals the merge commit SHA. The deployed image before this session was `8b5949f` (#96) — #97 (docs) was never deployed.
+- **Migrations run on container startup** (entrypoint `alembic upgrade head`). After deploy, confirm `SELECT version_num FROM alembic_version` (0005→0006) and the new tables exist. Postgres is untouched; only `api` is recreated.
+- **Host `curl http://127.0.0.1:8000/` returns 000** — port 8000 is NOT on the host loopback (the app is fronted). Verify with the container's own healthcheck or `docker exec ... curl 127.0.0.1:8000/health` (→ 200). New auth-gated routes return 401 (registered), not 404.
+- **Auto-mode classifier blocks** this session: creating a GitHub **issue** (deemed agent-added, even though requested — PR creation when explicitly requested WAS allowed); a **production DB write** via `docker exec ... set_setting` (not explicitly requested). Operational deploy (mirror-pull / retag / `compose up`) and read-only SSH were allowed. To set a live setting without redeploy, the operator must authorize the DB write (or add a Bash permission rule).
+- **github.com / api.github.com are intermittently unreachable** from this Windows host (TLS handshake timeout / connection refused) — wrap `git push` / `gh` in a retry loop.
+
+### Pre-existing issue surfaced (NOT from this change)
+
+mgmt UI logs show the `trade_ingestor` worker failing to SSH into the **trading VPS 185.232.152.246** (`user17290985243902@...:22` → "Connect failed" / "Channel closed" → paramiko `EOFError` tracebacks). That host's SSH appears down; the pool's evict-and-retry (#94/#95) is firing as designed. The bot-report is unaffected (it calls brokers over HTTPS directly, not via that host). Worth a separate look at that VPS's sshd.
+
+### Operating the report (runbook)
+
+1. Deploy the mgmt image (mirror-pull + verify revision + `compose up -d api` — see deploy learnings).
+2. Open `/admin/bot-report` → **Refresh from broker**, date range from `robot_start_date` (2026-05-19) — backfills `broker_orders` per customer.
+3. Confirm the mgmt host can reach `api-{broker}` first (the `api-ayandeh` DNS issue noted in Session 1 would make per-customer fetches fail — surfaced per-customer, not fatal).
+4. For the daily auto-pull, set `ENABLE_BROKER_ORDER_RECONCILER=true` in `/opt/seller-market-mgmt/.env` + `docker compose up -d api`.
+5. Per-agent fee override: **Set an agent's profit-share fee %** on the Profit & fee tab. Global default = `profit_fee_percent` setting.
+
+### Open follow-ups (Session 2)
+
+| # | Title | Why |
+|---|---|---|
+| **P3** | Bot fire-log (which customer/broker fired) + ingestor + reconciliation | Exact robot-vs-manual buy attribution going forward + "fired but didn't execute" visibility + daily customer-run roster. Needs bot change + redeploy all stacks. |
+| — | Fee-basis configurability | Matcher computes both `fee_on_positive` and `fee_on_net`; report hardcodes positive-lots (documented default). Make it a UI/setting toggle if needed. |
+| — | Fee-ledger billing snapshots | `build_fee_report` recomputes live; a persisted immutable "Bill" snapshot would make billed amounts auditable when later polls restate values. |
+| — | Trading VPS 185.232.152.246 sshd down | trade_ingestor can't reach it (see above). |
