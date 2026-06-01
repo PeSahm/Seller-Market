@@ -11,6 +11,8 @@ from app.models.customers import Customer, DistributionPolicy
 from app.models.scheduler import SchedulerJob, LocustConfig
 from app.models.runs import Run, StackRunLock, IngestCursor
 from app.models.trades import TradeResult
+from app.models.broker_orders import BrokerOrder
+from app.models.fees import AgentFeeConfig
 from app.models.health import HealthSignal
 from app.models.audit import AuditLog
 
@@ -29,6 +31,8 @@ __all__ = [
     "StackRunLock",
     "IngestCursor",
     "TradeResult",
+    "BrokerOrder",
+    "AgentFeeConfig",
     "HealthSignal",
     "AuditLog",
 ]

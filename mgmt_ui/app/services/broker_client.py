@@ -148,6 +148,10 @@ def _endpoints_for(broker_code: str) -> dict[str, str]:
             "login": f"https://identity{prefix}{domain}/api/v2/accounts/login",
             "customer_info": "https://api8.ibtrader.ir/api/party/getcustomerinfo",
             "market_data": "https://mdapi.ibtrader.ir/api/v2/instruments/full",
+            # GetOrders lives on the regular api host (api.ibtrader.ir),
+            # NOT the api8 customer-info shard — same host the bot fires
+            # NewOrder/GetOpenOrders against.
+            "orders": "https://api.ibtrader.ir/api/v2/orders/GetOrders",
         }
     # ephoenix family — same prefix shape as the bot. Note that
     # ``market_data`` is a SHARED host across the whole ephoenix family
@@ -162,6 +166,10 @@ def _endpoints_for(broker_code: str) -> dict[str, str]:
             "/api/party/getcustomerinfo"
         ),
         "market_data": "https://mdapi1.ephoenix.ir/api/v2/instruments/full",
+        # GetOrders is a sibling of NewOrder/GetOpenOrders on the per-broker
+        # ``api-{code}.ephoenix.ir`` host. Confirmed to accept the same
+        # ``Authorization: Bearer`` token as the bot's order calls.
+        "orders": f"https://api{prefix}{domain}/api/v2/orders/GetOrders",
     }
 
 
@@ -577,3 +585,143 @@ async def verify_isin(
             max_volume=i.get("maxeq"),
             min_volume=i.get("mineq"),
         )
+
+
+# Order-history pagination. The broker caps page size; 100 keeps each page
+# small enough to be reliable over Iranian-VPS latency while not making a
+# year of history into hundreds of round-trips. The page cap is a runaway
+# guard against a broker that returns an inconsistent ``totalRecords``.
+_ORDERS_PAGE_SIZE = 100
+_ORDERS_MAX_PAGES = 500
+_ORDERS_HTTP_TIMEOUT_S = 30.0
+
+
+async def get_orders(
+    broker_code: str,
+    username: str,
+    password: str,
+    ocr_service_url: str,
+    *,
+    from_date: str,
+    to_date: str,
+    side: Optional[int] = None,
+    isin: Optional[str] = None,
+    include_status: Optional[list[int]] = None,
+    page_size: int = _ORDERS_PAGE_SIZE,
+    max_pages: int = _ORDERS_MAX_PAGES,
+) -> tuple[list[dict], Optional[str]]:
+    """Fetch the account's order history from the broker's ``GetOrders``.
+
+    Reuses the same captcha→OCR→login→Bearer-token flow as
+    :func:`verify_credentials` (incl. the in-process token cache and the
+    401→refresh path). The endpoint accepts the same ``Authorization:
+    Bearer`` token the bot uses for NewOrder/GetOpenOrders, so we do NOT
+    need the browser's ``x-sessionId`` header.
+
+    ``from_date`` / ``to_date`` are ``"YYYY/MM/DD"`` Gregorian strings
+    (the broker's wire format — matches the documented request body).
+    ``include_status`` defaults to ``[3]`` (fully-executed) which is the
+    only state we care about for the fee report; pass ``[]`` for all
+    states. Paginates ``page``/``pageSize`` until every ``totalRecords``
+    row is consumed (capped at ``max_pages``).
+
+    Returns ``(rows, error)`` — ``rows`` is the flat list of raw GetOrders
+    row dicts (the caller maps them to ORM rows), ``error`` is a non-None
+    operator-facing string when the fetch could not complete. On a partial
+    failure mid-pagination we return the rows gathered so far AND an error
+    so the caller can surface "got N rows but the broker errored on page K".
+    """
+    if include_status is None:
+        include_status = [3]
+    endpoints = _endpoints_for(broker_code)
+    url = endpoints["orders"]
+
+    def _body(page: int) -> dict:
+        return {
+            "page": page,
+            "pageSize": page_size,
+            "fromDate": from_date,
+            "toDate": to_date,
+            "side": side,
+            "isin": isin,
+            "includeStatus": include_status,
+            "pamCode": None,
+        }
+
+    async def _post(client, token, page):
+        return await client.post(
+            url,
+            headers={
+                "authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                ),
+            },
+            json=_body(page),
+            timeout=_ORDERS_HTTP_TIMEOUT_S,
+        )
+
+    rows: list[dict] = []
+    async with httpx.AsyncClient() as client:
+        token, last_error = await _get_token(
+            client, broker_code, endpoints, username, password, ocr_service_url
+        )
+        if not token:
+            return [], (
+                last_error
+                or "Authentication failed — check username/password "
+                f"(captcha solve gave up after {_MAX_LOGIN_RETRIES} attempts)"
+            )
+
+        refreshed_once = False
+        page = 1
+        while page <= max_pages:
+            try:
+                resp = await _post(client, token, page)
+                if resp.status_code == 401 and not refreshed_once:
+                    # Cached token rejected — drop it, re-login once, retry
+                    # the SAME page. Mirrors verify_credentials' 401 path.
+                    logger.info(
+                        "cached token for %s@%s returned 401 on GetOrders — refreshing",
+                        username, broker_code,
+                    )
+                    _token_cache_drop(broker_code, username, password)
+                    token, last_error = await _get_token(
+                        client, broker_code, endpoints, username, password,
+                        ocr_service_url, force_refresh=True,
+                    )
+                    refreshed_once = True
+                    if not token:
+                        return rows, (
+                            last_error
+                            or "Authentication failed after token refresh"
+                        )
+                    continue
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                failed_url = getattr(getattr(exc, "request", None), "url", None)
+                err = (
+                    f"GetOrders page {page} failed "
+                    f"({type(exc).__name__} on {failed_url}): {exc}"
+                )
+                logger.warning(err)
+                return rows, err
+
+            try:
+                payload = resp.json() if resp.content else {}
+            except ValueError:
+                return rows, "broker returned non-JSON order history"
+
+            page_rows = payload.get("rows") or []
+            rows.extend(page_rows)
+
+            total = payload.get("totalRecords")
+            if not page_rows:
+                break
+            if isinstance(total, int) and page * page_size >= total:
+                break
+            page += 1
+
+    return rows, None
