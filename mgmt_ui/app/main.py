@@ -270,6 +270,10 @@ def create_app() -> FastAPI:
         if not settings.enable_broker_order_reconciler:
             logger.info("broker order reconciler disabled via settings")
             return
+        # Fresh stop event so a second lifespan cycle on the same app instance
+        # (e.g. tests) doesn't inherit the previous shutdown's signaled event
+        # and exit the worker immediately.
+        app.state.broker_order_reconcile_stop = asyncio.Event()
         app.state.broker_order_reconcile_task = asyncio.create_task(
             run_broker_order_reconcile_worker(
                 app.state.broker_order_reconcile_stop,

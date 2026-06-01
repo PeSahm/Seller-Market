@@ -40,4 +40,5 @@ class AgentFeeConfig(Base):
         sa.TIMESTAMP(timezone=True),
         nullable=False,
         server_default=sa.func.now(),
+        onupdate=sa.func.now(),
     )
