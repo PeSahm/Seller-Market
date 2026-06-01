@@ -3203,7 +3203,7 @@ async def admin_bot_report_refresh(
     settings_map = await settings_store.get_all_settings(db)
     p_since = _bot_report_parse_date(since) or _bot_report_parse_date(
         settings_map.get("robot_start_date")
-    ) or date(2025, 11, 1)
+    ) or date(2026, 5, 19)
     p_until = _bot_report_parse_date(until) or date.today()
 
     if ids:

@@ -49,11 +49,11 @@ DEFAULTS: dict[str, str] = {
     # Operator's profit-share fee as a PERCENT (so "1.0" == 1%). This is the
     # GLOBAL default; per-agent overrides live in ``agent_fee_configs``.
     "profit_fee_percent": "1.0",
-    # Earliest date the report/backfill queries the broker from. Code for
-    # automated order placement first shipped 2025-11-06; first proven live
-    # order 2025-11-29 — 2025-11-01 is a safe lower bound. The report then
-    # surfaces each account's true first executed order.
-    "robot_start_date": "2025-11-01",
+    # Earliest date the report/backfill queries the broker from. Set to the
+    # start of the period the operator actually wants to bill from for the
+    # currently-active accounts; the report then surfaces each account's true
+    # first executed order at/after this date.
+    "robot_start_date": "2026-05-19",
     # The bot fires at ~08:44:30 Tehran and orders land in this wall-clock
     # window at market open. Used as the default time-of-day filter on the
     # "Bot orders" tab and as the historical bot-attribution heuristic.
