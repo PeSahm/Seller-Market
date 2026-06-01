@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 from uuid import UUID
@@ -382,6 +382,33 @@ async def refresh_orders_for_customers(
     await asyncio.gather(*[_guarded(cid) for cid in customer_ids])
 
 
+async def reconcile_all_recent(
+    *, lookback_days: int = 3, today: Optional[date] = None
+) -> int:
+    """Daily auto-reconcile: pull a rolling recent window of GetOrders for
+    EVERY customer into ``broker_orders``. Returns the number of customers
+    swept.
+
+    Deliberately a SHORT window (default 3 days) so the daily sweep is cheap —
+    today's fills land within it. The full historical backfill (from the robot
+    start date) is the operator-triggered "Refresh from broker" action, not
+    this loop. Idempotent: existing rows are refreshed via DO UPDATE.
+    """
+    from app.db import AsyncSessionLocal
+
+    if today is None:
+        today = date.today()
+    from_date = today - timedelta(days=max(0, lookback_days))
+
+    async with AsyncSessionLocal() as db:
+        rows = await db.execute(select(Customer.id))
+        ids = [r[0] for r in rows.all()]
+
+    if ids:
+        await refresh_orders_for_customers(ids, from_date=from_date, to_date=today)
+    return len(ids)
+
+
 __all__ = [
     "FetchResult",
     "fetch_and_upsert_orders",
@@ -389,4 +416,5 @@ __all__ = [
     "list_orders",
     "in_time_window",
     "refresh_orders_for_customers",
+    "reconcile_all_recent",
 ]

@@ -72,6 +72,21 @@ class Settings(BaseSettings):
     scheduled_run_ingest_interval_seconds: int = Field(
         default=30, alias="SCHEDULED_RUN_INGEST_INTERVAL_SECONDS", ge=1
     )
+    # Daily broker-order reconciler (Bot report). Pulls a rolling recent window
+    # of GetOrders for every customer so the report stays current automatically.
+    # OFF by default: it makes EXTERNAL broker calls (captcha/OCR per login) —
+    # enable once the mgmt host can reach api-{broker} (see CLAUDE.md DNS note).
+    # Interval >= 1h; the default is daily. Lookback is the rolling window of
+    # days each tick re-pulls (today's fills land within it).
+    enable_broker_order_reconciler: bool = Field(
+        default=False, alias="ENABLE_BROKER_ORDER_RECONCILER"
+    )
+    broker_order_reconcile_interval_seconds: int = Field(
+        default=86400, alias="BROKER_ORDER_RECONCILE_INTERVAL_SECONDS", ge=3600
+    )
+    broker_order_reconcile_lookback_days: int = Field(
+        default=3, alias="BROKER_ORDER_RECONCILE_LOOKBACK_DAYS", ge=1
+    )
     # Phase 8 background workers. Intervals are validated at parse time
     # so a misconfigured env var can't turn the worker into a tight
     # retry loop; retention days are validated >= 0 so a negative value
