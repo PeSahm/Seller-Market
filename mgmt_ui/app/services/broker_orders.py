@@ -44,6 +44,7 @@ class FetchResult:
     fetched: int = 0
     inserted: int = 0
     updated: int = 0
+    skipped: int = 0  # rows dropped for an unusable tracking_number
     pam_mismatches: int = 0
     error: Optional[str] = None
 
@@ -159,7 +160,13 @@ async def fetch_and_upsert_orders(
     for row in rows:
         values = map_getorders_row(row, customer)
         if values["tracking_number"] <= 0:
-            # No usable dedup key — skip rather than collide on 0.
+            # No usable dedup key — skip rather than collide on 0. Count it so
+            # the loss is visible in the per-customer log, not silent.
+            result.skipped += 1
+            logger.warning(
+                "skipping order with non-positive tracking_number for %s@%s (isin=%s)",
+                customer.username, customer.broker, values.get("isin"),
+            )
             continue
         if values["pam_code"] and not values["pam_code"].endswith(customer.username):
             result.pam_mismatches += 1
@@ -197,6 +204,13 @@ _MUTABLE_ON_CONFLICT = (
     "raw_json",
 )
 
+# Money/price columns where a NULL in a later fetch must NOT clobber a
+# previously-good value — a malformed re-fetch would otherwise null out the
+# price and silently corrupt the fee report. COALESCE keeps the old value.
+_COALESCE_ON_CONFLICT = frozenset(
+    {"price", "total_fee", "executed_amount", "net_traded_value"}
+)
+
 
 async def _upsert_order(db: AsyncSession, values: dict) -> bool:
     """Insert one ``broker_orders`` row; ``True`` if newly inserted, else
@@ -213,7 +227,14 @@ async def _upsert_order(db: AsyncSession, values: dict) -> bool:
     upserts in one txn would look identical.)
     """
     stmt = pg_insert(BrokerOrder).values(**values)
-    set_ = {col: getattr(stmt.excluded, col) for col in _MUTABLE_ON_CONFLICT}
+    set_ = {}
+    for col in _MUTABLE_ON_CONFLICT:
+        excluded = getattr(stmt.excluded, col)
+        if col in _COALESCE_ON_CONFLICT:
+            # Never overwrite a stored money value with a NULL from a bad poll.
+            set_[col] = func.coalesce(excluded, getattr(BrokerOrder, col))
+        else:
+            set_[col] = excluded
     set_["fetched_at"] = func.now()
     stmt = stmt.on_conflict_do_update(
         index_elements=[BrokerOrder.tracking_number],
@@ -348,9 +369,9 @@ async def _refresh_one(
         )
         await db.commit()
         logger.info(
-            "bot-report refresh customer=%s fetched=%d ins=%d upd=%d pam_mismatch=%d err=%s",
+            "bot-report refresh customer=%s fetched=%d ins=%d upd=%d skip=%d pam_mismatch=%d err=%s",
             customer_id, res.fetched, res.inserted, res.updated,
-            res.pam_mismatches, res.error,
+            res.skipped, res.pam_mismatches, res.error,
         )
 
 
@@ -367,8 +388,14 @@ async def refresh_orders_for_customers(
     from app.db import AsyncSessionLocal
     from app.services import settings_store
 
-    async with AsyncSessionLocal() as db:
-        ocr_service_url = await settings_store.get_setting(db, "ocr_service_url")
+    try:
+        async with AsyncSessionLocal() as db:
+            ocr_service_url = await settings_store.get_setting(db, "ocr_service_url")
+    except Exception:  # noqa: BLE001 — honour the "never raises" contract
+        logger.exception(
+            "bot-report refresh: could not load OCR service URL; aborting sweep"
+        )
+        return
 
     sem = asyncio.Semaphore(_REFRESH_CONCURRENCY)
 
@@ -389,10 +416,12 @@ async def reconcile_all_recent(
     EVERY customer into ``broker_orders``. Returns the number of customers
     swept.
 
-    Deliberately a SHORT window (default 3 days) so the daily sweep is cheap —
-    today's fills land within it. The full historical backfill (from the robot
-    start date) is the operator-triggered "Refresh from broker" action, not
-    this loop. Idempotent: existing rows are refreshed via DO UPDATE.
+    Pulls ``[today - lookback_days, today]`` inclusive — i.e. ``lookback_days``
+    of overlap BEFORE today on top of today itself. The overlap is intentional:
+    it guarantees the boundary day is never missed across a timezone/cron
+    seam. The full historical backfill (from the robot start date) is the
+    operator-triggered "Refresh from broker" action, not this loop. Idempotent:
+    existing rows are refreshed via DO UPDATE.
     """
     from app.db import AsyncSessionLocal
 

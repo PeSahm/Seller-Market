@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.broker_orders import BrokerOrder
+from app.models.customers import Customer
 from app.models.fees import AgentFeeConfig
 from app.services import settings_store
 from app.services.broker_orders import in_time_window
@@ -144,6 +145,10 @@ async def build_fee_report(
     stmt = (
         select(BrokerOrder)
         .where(BrokerOrder.state == 3)
+        # A NULL price would be coerced to 0 by _leg and massively inflate
+        # realized profit (and the fee). A fully-executed order should always
+        # carry a price; exclude any that don't rather than corrupt the math.
+        .where(BrokerOrder.price.isnot(None))
         .order_by(BrokerOrder.placed_at)
         .limit(max_rows)
     )
@@ -164,6 +169,20 @@ async def build_fee_report(
 
     orders = list((await db.execute(stmt)).scalars().all())
 
+    # Resolve each customer's CURRENT agent. broker_orders.agent_id is a
+    # fetch-time snapshot; if a customer is reassigned to another agent it
+    # goes stale and would misattribute the profit/fee. Always bill the
+    # customer's current owner (review finding).
+    cust_agent: dict[UUID, Optional[UUID]] = {}
+    cust_ids_present = {o.customer_id for o in orders if o.customer_id is not None}
+    if cust_ids_present:
+        rows = await db.execute(
+            select(Customer.id, Customer.agent_id).where(
+                Customer.id.in_(cust_ids_present)
+            )
+        )
+        cust_agent = {cid: aid for cid, aid in rows.all()}
+
     # Group by (customer_id, isin). A null customer_id (unassigned account)
     # groups on its own so its orders still match among themselves.
     groups: dict[tuple, list[BrokerOrder]] = {}
@@ -175,7 +194,9 @@ async def build_fee_report(
     fee_pct_cache: dict[Optional[UUID], Decimal] = {}
 
     for (cust_id, _isin), group in groups.items():
-        agent_id_of_group = group[0].agent_id
+        agent_id_of_group = (
+            cust_agent.get(cust_id) if cust_id is not None else group[0].agent_id
+        )
         if agent_id_of_group not in fee_pct_cache:
             fee_pct_cache[agent_id_of_group] = await get_fee_percent(
                 db, agent_id_of_group

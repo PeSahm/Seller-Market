@@ -3139,7 +3139,9 @@ async def admin_bot_report(
             broker=broker or None,
             symbol_or_isin=symbol_or_isin or None,
             side=_bot_report_parse_int(side),
-            state=_bot_report_parse_int(None),
+            # broker_orders only ever holds fully-executed rows (we fetch with
+            # includeStatus=[3]); no state filter needed here.
+            state=None,
             since=p_since,
             until=p_until,
             window_start=p_ws,
@@ -3242,6 +3244,7 @@ async def admin_bot_report_fee_config(
         raise HTTPException(status_code=400, detail="fee_percent must be numeric")
 
     existing = await db.get(AgentFeeConfig, p_agent)
+    prev_pct = existing.fee_percent if existing is not None else None
     if existing is None:
         db.add(
             AgentFeeConfig(agent_id=p_agent, fee_percent=pct, updated_by=user.id)
@@ -3250,6 +3253,19 @@ async def admin_bot_report_fee_config(
         existing.fee_percent = pct
         existing.updated_by = user.id
         existing.updated_at = datetime.now(timezone.utc)
+    # Audit trail — mirror the setting.update / customer.* mutations so fee
+    # changes are attributable (who/when/what), not silently committed.
+    db.add(
+        AuditLog(
+            actor_user_id=user.id,
+            action="agent_fee_config.update",
+            target_type="agent_fee_config",
+            target_id=str(p_agent),
+            before_json={"fee_percent": str(prev_pct) if prev_pct is not None else None},
+            after_json={"fee_percent": str(pct)},
+            ts=datetime.now(timezone.utc),
+        )
+    )
     await db.commit()
 
     target = "/admin/bot-report?tab=fees"
@@ -3290,7 +3306,9 @@ async def admin_bot_report_export(
         window_start=p_ws,
         window_end=p_we,
     )
-    # All executed orders in range for the audit sheet (no time-window filter).
+    # Every stored order in range for the audit sheet (no time-window filter).
+    # broker_orders only holds fully-executed rows, so this is the executed
+    # buys AND sells — the raw reconciliation trail behind the fee numbers.
     orders = await services_broker_orders.list_orders(
         db,
         agent_id=p_agent,
