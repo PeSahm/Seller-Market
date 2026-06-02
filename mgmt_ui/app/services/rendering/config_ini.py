@@ -20,6 +20,7 @@ so we skip it. When there are zero customers we emit just the header comment
 
 from __future__ import annotations
 
+from app.services.brokers.registry import UnknownBrokerError, family_of
 from app.services.rendering import StackRenderContext
 
 
@@ -40,6 +41,15 @@ def render_config_ini(ctx: StackRenderContext) -> str:
         lines.append(f"username = {c.username}")
         lines.append(f"password = {c.password_plain}")
         lines.append(f"broker = {c.broker}")
+        # Data-driven family so the bot routes to the right adapter without a
+        # hardcoded enum. Additive + backward-compatible: the current bot image
+        # ignores unknown keys, so emitting this can't break existing stacks.
+        # Unknown / cold-cache codes default to ephoenix (the legacy behaviour).
+        try:
+            family = family_of(c.broker)
+        except UnknownBrokerError:
+            family = "ephoenix"
+        lines.append(f"broker_family = {family}")
         lines.append(f"isin = {c.isin}")
         lines.append(f"side = {c.side}")
     lines.append("")  # trailing newline

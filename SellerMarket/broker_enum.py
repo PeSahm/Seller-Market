@@ -43,6 +43,18 @@ class BrokerCode(Enum):
     def is_valid(cls, code: str) -> bool:
         """Check if broker code is valid."""
         return code in [b.value for b in cls]
+
+    @classmethod
+    def family(cls, code: str) -> str:
+        """Fallback broker family classifier.
+
+        The bot trusts the config-rendered ``broker_family`` (the mgmt UI emits
+        it per stack), so this is only consulted when that key is absent. Every
+        member of this enum is an ephoenix-family broker, so default to that.
+        Exir/Rayan-HamAfza brokers are not enumerated here; they arrive purely
+        via ``config_section['broker_family'] == 'exir'``.
+        """
+        return "ephoenix"
     
     def get_endpoints(self) -> dict:
         """Get API endpoints for this broker."""
