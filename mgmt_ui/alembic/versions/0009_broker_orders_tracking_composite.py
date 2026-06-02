@@ -1,6 +1,6 @@
 """broker_orders: scope the dedup key to (broker, tracking_number)
 
-Revision ID: 0009_broker_orders_tracking_composite
+Revision ID: 0009_bo_tracking_composite
 Revises: 0008_brokers
 Create Date: 2026-06-02 14:00:00.000000
 
@@ -24,7 +24,10 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "0009_broker_orders_tracking_composite"
+# NOTE: alembic_version.version_num is VARCHAR(32) — the revision id MUST be
+# <= 32 chars. The original id "0009_broker_orders_tracking_composite" (37) blew
+# that cap and crash-looped the container on startup; keep this short.
+revision: str = "0009_bo_tracking_composite"
 down_revision: Union[str, Sequence[str], None] = "0008_brokers"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
