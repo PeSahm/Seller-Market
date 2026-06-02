@@ -59,6 +59,11 @@ DEFAULTS: dict[str, str] = {
     # "Bot orders" tab and as the historical bot-attribution heuristic.
     "bot_window_start": "08:44:59",
     "bot_window_end": "08:45:03",
+    # Instruments to EXCLUDE from the bot report + fee — one ISIN or symbol per
+    # line (commas/semicolons also accepted). An order is excluded if its ISIN
+    # OR symbol matches any entry (case-insensitive). Use it to keep bonds the
+    # agents buy out of your report and fee. Empty = exclude nothing.
+    "excluded_instruments": "",
 }
 
 

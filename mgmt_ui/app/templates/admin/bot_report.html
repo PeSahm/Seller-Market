@@ -62,6 +62,29 @@
   reload in a minute to see new rows.
 </p>
 
+{# ---- Excluded instruments (persistent) ---- #}
+<details class="card" style="margin-bottom: 12px;"{% if excluded_count %} open{% endif %}>
+  <summary class="text-small">
+    Excluded instruments
+    {% if excluded_count %}<span class="badge">{{ excluded_count }}</span>{% endif %}
+    — ISINs / symbols kept out of the report &amp; fee
+  </summary>
+  <form method="post" action="/admin/bot-report/exclusions" style="margin-top:8px;">
+    {% include "partials/csrf.html" %}
+    <p class="text-small text-muted" style="margin:0 0 6px;">
+      One ISIN or symbol per line (e.g. a bond an agent buys). An order is
+      excluded from both tabs and the Excel export if its ISIN <em>or</em>
+      symbol matches — case-insensitive. Leave empty to exclude nothing.
+    </p>
+    <textarea name="excluded_instruments" class="input" rows="5"
+              style="width:100%; font-family:monospace;" dir="ltr"
+              placeholder="IRBxxxxxxxxxx&#10;صکوک ...">{{ excluded_instruments_raw or '' }}</textarea>
+    <div style="margin-top:6px;">
+      <button class="btn btn--sm" type="submit">Save exclusions</button>
+    </div>
+  </form>
+</details>
+
 {# ---- Sub-tabs ---- #}
 <nav class="tabs" aria-label="Bot report sections">
   <a class="tab{% if tab == 'orders' %} tab--active{% endif %}" href="/admin/bot-report?tab=orders">Bot orders</a>
