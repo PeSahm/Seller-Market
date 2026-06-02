@@ -3283,12 +3283,27 @@ async def admin_bot_report_fee_config(
     )
 
 
+def _bot_report_safe_next(next_url: Optional[str]) -> str:
+    """Constrain a post-save redirect to a local bot-report path so the
+    operator keeps their tab/filters, with no open-redirect surface."""
+    if (
+        next_url
+        and next_url.startswith("/admin/bot-report")
+        and "//" not in next_url
+        and "\\" not in next_url
+        and "\n" not in next_url
+    ):
+        return next_url
+    return "/admin/bot-report"
+
+
 @router.post("/bot-report/exclusions")
 async def admin_bot_report_exclusions(
     request: Request,
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     excluded_instruments: str = Form(""),
+    next_url: str = Form("", alias="next"),
 ):
     """Save the persistent instrument-exclusion list (ISINs/symbols to keep out
     of the report + fee). Stored as the ``excluded_instruments`` setting —
@@ -3303,7 +3318,7 @@ async def admin_bot_report_exclusions(
     )
     await db.commit()
 
-    target = "/admin/bot-report"
+    target = _bot_report_safe_next(next_url)
     if request.headers.get("HX-Request"):
         return Response(status_code=204, headers={"HX-Redirect": target})
     return Response(
