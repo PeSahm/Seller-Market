@@ -105,7 +105,7 @@ class _FakeSession:
 
 
 def _install_exir_fakes(monkeypatch, *, asset="1000000", holdings_rows=None, band=(200, 180), buy_fee=0.0):
-    """Patch ExirAdapter so login + signed reads + tsetmc never hit the network."""
+    """Patch ExirAdapter so login + signed reads + the RLC band never hit the network."""
     # Fresh module session cache each test.
     monkeypatch.setattr(exir_adapter, "_SESSION_CACHE", {}, raising=True)
 
@@ -115,9 +115,9 @@ def _install_exir_fakes(monkeypatch, *, asset="1000000", holdings_rows=None, ban
     # Session factory → our fake.
     monkeypatch.setattr(exir_adapter.requests, "Session", lambda: _FakeSession())
 
-    # tsetmc price band (ceiling, floor) — never hit the network.
+    # Broker-native RLC price band (ceiling, floor) — never hit the network.
     monkeypatch.setattr(
-        exir_adapter.tse_price, "get_price_band", lambda isin, timeout=15: band
+        exir_adapter.rlc_price, "get_price_band", lambda isin, timeout=15: band
     )
 
     # Signed GET reads: buying power via stockInfo.purchaseUpperBound, holdings.
@@ -207,16 +207,16 @@ def test_exir_sell_no_holdings_raises(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# ExirAdapter — price band from tsetmc (no config price)
+# ExirAdapter — price band from the broker's RLC gateway (no config price)
 # ---------------------------------------------------------------------------
 
-def test_exir_buy_uses_tsetmc_ceiling(monkeypatch):
+def test_exir_buy_uses_rlc_ceiling(monkeypatch):
     # band ceiling=9930 (BUY price), asset 993000 → volume 993000//9930 == 100.
     _install_exir_fakes(monkeypatch, asset="993000", band=(9930, 9370))
     a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
     po = a.prepare_order(isin="IRO1SROD0001", side=1, config_section={})  # NO config price
     body = json.loads(po.body)
-    assert body["price"] == "9930.0"       # BUY → tsetmc ceiling
+    assert body["price"] == "9930.0"       # BUY → RLC ceiling
     assert po.volume == 100
     assert body["quantity"] == "100"
 
@@ -232,31 +232,31 @@ def test_exir_buy_volume_is_fee_adjusted(monkeypatch):
     assert po.volume == 601
 
 
-def test_exir_sell_uses_tsetmc_floor(monkeypatch):
+def test_exir_sell_uses_rlc_floor(monkeypatch):
     rows = [{"insMaxLcode": "IRO1SROD0001", "asset": 50}]
     _install_exir_fakes(monkeypatch, holdings_rows=rows, band=(9930, 9370))
     a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
     po = a.prepare_order(isin="IRO1SROD0001", side=2, config_section={})  # NO config price
     body = json.loads(po.body)
-    assert body["price"] == "9370.0"       # SELL → tsetmc floor
+    assert body["price"] == "9370.0"       # SELL → RLC floor
     assert po.volume == 50
 
 
 def test_exir_no_band_raises(monkeypatch):
     _install_exir_fakes(monkeypatch)
     monkeypatch.setattr(
-        exir_adapter.tse_price, "get_price_band",
-        lambda isin, timeout=15: (_ for _ in ()).throw(ValueError("no tsetmc price band")),
+        exir_adapter.rlc_price, "get_price_band",
+        lambda isin, timeout=15: (_ for _ in ()).throw(ValueError("no rlc price band")),
     )
     a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
     try:
         a.prepare_order(isin="ZZZ", side=1, config_section={})
-        raise AssertionError("expected ValueError when tsetmc has no band")
+        raise AssertionError("expected ValueError when RLC has no band")
     except ValueError as e:
-        assert "tsetmc price band" in str(e)
+        assert "rlc price band" in str(e)
 
 
-def test_exir_config_price_overrides_tsetmc(monkeypatch):
+def test_exir_config_price_overrides_rlc(monkeypatch):
     # An explicit config price is honoured as an override (band ignored).
     _install_exir_fakes(monkeypatch, asset="1000000", band=(9930, 9370))
     a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")

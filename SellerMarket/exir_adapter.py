@@ -2,9 +2,12 @@
 
 Unlike ephoenix (static Bearer header), Exir authenticates with a cookie session
 plus a per-request, second-granular ``X-App-N`` signature computed from the login
-``nt`` seed. Exir has NO instrument-price endpoint (its prices stream over
-Lightstreamer), so the daily allowed price band comes from tsetmc.com — free TSE
-market data, see :mod:`tse_price`. BUY fires at the ceiling, SELL at the floor.
+``nt`` seed. Exir streams live prices over Lightstreamer and has no per-instrument
+REST price endpoint of its own, but the broker's *own* RLC market-data backend
+exposes a public band handler — see :mod:`rlc_price`. The daily allowed price band
+therefore comes from the broker's infrastructure (no tsetmc, no cross-VPS relay),
+reachable directly from each trading host. BUY fires at the ceiling, SELL at the
+floor.
 
 Confirmed live (Phase-0 spike against khobregan — see
 ``scratch/EXIR_FINDINGS.md``):
@@ -36,7 +39,7 @@ from typing import Any, Callable, Optional
 
 import requests
 
-import tse_price
+import rlc_price
 from broker_adapters import BrokerAdapter, PreparedOrder
 from captcha_utils import decode_captcha as _default_decode_captcha
 from exir_token import build_app_n, make_signer, pw_fingerprint
@@ -275,18 +278,18 @@ class ExirAdapter(BrokerAdapter):
         side = int(side)
         config_section = config_section or {}
 
-        # Exir has no price endpoint (its prices stream over Lightstreamer), so the
-        # daily allowed price band comes from tsetmc (free TSE market data): BUY
-        # fires at the ceiling (limit-up), SELL at the floor (limit-down) to sit
+        # The daily allowed price band comes from the broker's own RLC market-data
+        # gateway (see rlc_price) — direct, no tsetmc, no cross-VPS relay: BUY fires
+        # at the ceiling (limit-up), SELL at the floor (limit-down) to sit
         # head-of-queue. A config `price` is honoured only as an explicit override.
         override = config_section.get("price")
         if override:
             ceiling = floor = float(override)
         else:
-            ceiling, floor = tse_price.get_price_band(isin)
+            ceiling, floor = rlc_price.get_price_band(isin)
         price = float(ceiling if side == 1 else floor)
         if price <= 0:
-            raise ValueError(f"no tsetmc price band for {isin}")
+            raise ValueError(f"no rlc price band for {isin}")
 
         try:
             descriptor = self._session()

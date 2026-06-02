@@ -460,3 +460,48 @@ The Angular SPA bundle has every API path: `curl {tenant}/exir/index.html` → b
 | — | **Finish the canary** (steps above) | Recreate Mostafa's stack on `6b92c31`, add the سرود/khobregan Exir customer, watch Wed open, then roll the other 6 stacks. |
 | — | Exir fire-log reconciliation | Sync order resp has no id → relies on the mgmt date-based reconcile. Confirm an Exir buy shows up in `/admin/bot-report` after the run. |
 | — | tsetmc reachability + caching on the bot hosts | `tse_price.py` caches MarketWatchInit 5 min; confirm `old.tsetmc.com` reachable from both VPSes at market open. |
+
+---
+
+## Session 6 — Exir price goes broker-native (drop tsetmc); PR #105
+
+The canary stalled in Session 5 because **tsetmc is unreachable from the PouyanIt mgmt/bot VPS** (5.10.248.55). Pivoted the Exir price source from tsetmc to the **broker's own RLC market-data backend**, so each VPS is fully self-contained (operator's call: *"be independent of tsetmc… as ephoenix uses its own"* + *"I don't want to make VPS depend on each other"*). PR **#105** (`feat/exir-broker-native-price`).
+
+### The tsetmc block (fully diagnosed, do NOT re-debug)
+- `old.tsetmc.com` / `cdn.tsetmc.com` IPs (212.16.x / 86.104.x / 94.182.x / 46.102.x) are **TCP-blocked at tsetmc's own edge from PouyanIt** — TCP traceroute to `212.16.73.241:443` dies after the Iranian backbone hop; `ibtrader 185.78.20.118:443` (a control) connects fine from the same host. It is **tsetmc-side IP filtering**, not DNS, not the proxy, not a local firewall. Trying a different DNS only changes which (still-blocked) IP you get. A new VPS IP would only help if it's a *different egress range* tsetmc hasn't blocked — not worth it.
+- tsetmc IS reachable from the **Tebyan** trading host (185.232.152.246) — but relaying price PouyanIt→Tebyan is exactly the cross-VPS dependency the operator rejected.
+
+### Broker-native price (the fix) — RLC REST band handler, LIVE-CONFIRMED
+The Exir/Rayan-HamAfza platform's market data is served by the shared **RLC** backend (`*.tadbirrlc.com`, an Iranian host). It streams via Lightstreamer (`push*.rhbroker.ir`) **but also exposes a public REST band handler** — far simpler than implementing Lightstreamer:
+
+```
+GET https://core.tadbirrlc.com//StockInformationHandler
+    ?{'Type':'getstockprice2','la':'Fa','arr':'<ISIN[,ISIN...]>'}&jsoncallback=
+```
+- **Public, no auth** (no Bearer, no cookie, no rlcAuthHeader). JSON array, one obj per instrument.
+- **Keyed by the ISIN itself** — `nc` (returned) == the ISIN we queried. **No NSC-code mapping needed.**
+- Band fields: **`hap`** = upper allowed price (**BUY ceiling**), **`lap`** = lower (**SELL floor**). `cp`/`ltp`/`pcp` = close/last/yesterday (unused).
+- `arr` accepts comma-separated ISINs → batch in one GET.
+- Live: سرود `IRO1SROD0001` → `hap=9930 lap=9370` — **identical** to tsetmc's `psGelStaMax/Min`, so byte-clean drop-in.
+- Sibling handlers (from decompiled `CheetahRobot.BrokerApi.Shared/TadbirSymbolDataFetcher.cs`): `StockFutureInfoHandler?…getLightSymbolInfoAndQueue&nscCode=<ISIN>` → `symbolinfo.ht/lt` (same band, single symbol + queue); `StocksHandler.ashx?{"Type":"ALL21"}` → every symbol. We use `StockInformationHandler` (band + batch).
+
+### Reachability — the proxy gotcha (CRITICAL)
+- `core.tadbirrlc.com` (193.34.245.250):443 is reachable **DIRECT** from PouyanIt: `curl --noproxy '*'` → **HTTP 200** (TLS 1.86s). Through the Xray HTTP proxy (127.0.0.1:10809, foreign exit) it **times out** — the foreign exit can't reach this Iranian host.
+- **The PouyanIt SSH shell inherits `http_proxy`/`https_proxy` from `/etc/environment`** (even non-interactive `ssh host cmd`), so a naive `curl https://core.tadbirrlc.com/…` from SSH goes through the proxy and **times out** — misleading. Always test with `--noproxy '*'`. (`NO_PROXY` there already lists `.ir,tsetmc.com,…` but `tadbirrlc.com` is a `.com`, so it was NOT exempt.)
+- **The bot container has NO proxy env** (`http_proxy` unset) → Python `requests` reaches it directly. Confirmed live from inside `sm-agent-89bb891e-…-bot`: `requests.get(...)` → **200**, `hap/lap` returned. This is the real runtime path and it works.
+- Belt-and-suspenders in code: `rlc_price._session.trust_env = False` so the fetch is **always** direct, never routed through a foreign proxy even if some host sets `http_proxy`.
+
+### Code changes (PR #105, bot only — Exir-scoped, ephoenix untouched)
+- **new `SellerMarket/rlc_price.py`** — `get_price_band(isin) -> (ceiling, floor)` from `StockInformationHandler`; per-ISIN TTL cache (300 s; bands static intraday); dedicated `requests.Session(trust_env=False)` + browser UA; `prefetch([isins])` for batch warm; `clear_cache()`. Parses `hap`→ceiling, `lap`→floor, skips zero/malformed rows.
+- **`exir_adapter.py`** — `import tse_price`→`rlc_price`; price-band call + comment + error string (`no rlc price band`); docstring. **BUY=ceiling/`hap`, SELL=floor/`lap`; config `price` override unchanged.**
+- **removed `SellerMarket/tse_price.py`** (retired).
+- **tests** — new `test_rlc_price.py` (url-encode / parse hap-lap / cache-hit / proxy-bypass `trust_env is False` / unknown-ISIN raises / prefetch); `test_broker_adapters.py` repointed `tse_price`→`rlc_price` (band values unchanged 9930/9370). **Full bot suite: 98 passed.** ruff clean.
+
+### Resume here (canary is now VIABLE on PouyanIt)
+With the price broker-native + reachable from PouyanIt, the Session-5 canary is unblocked:
+1. **Merge #105** (await CodeRabbit, fix, reply `@coderabbitai`) → bot image rebuilds via `docker-publish.yml`.
+2. **Stage the new bot image** on 5.10.248.55 (ghcr was reachable there last session; else mirror-pull **by digest** per Session-3 lesson) + verify the running container's `org.opencontainers.image.revision` label == the merge SHA ("up" is NOT proof).
+3. **Recreate Mostafa's stack** (`83619dcd`, dir `…/agents/89bb891e-…/`) on the new image; ephoenix ayandeh buy unaffected (byte-identical path).
+4. **Add the Exir customer** in the mgmt UI: broker `khobregan` (exir, seeded), user `4580090306`, ISIN `IRO1SROD0001` (سرود), side 1 → assign to Mostafa's stack; redeploy so config.ini carries both sections + `broker_family = exir`.
+5. **Wed ~08:45 Tehran**: watch the run; confirm a clean Exir order (ceiling price from RLC, fee-adjusted volume) + the fire-log, then roll the other 6 stacks.
+- **No Exir order fired yet.** All validated read-only.
