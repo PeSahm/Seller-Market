@@ -296,7 +296,58 @@ mgmt UI logs show the `trade_ingestor` worker failing to SSH into the **trading 
 
 | # | Title | Why |
 |---|---|---|
-| **P3** | Bot fire-log (which customer/broker fired) + ingestor + reconciliation | Exact robot-vs-manual buy attribution going forward + "fired but didn't execute" visibility + daily customer-run roster. Needs bot change + redeploy all stacks. |
+| **P3** | ~~Bot fire-log + ingestor + reconciliation~~ — **DONE (PR #100, deployed fleet-wide)**. See Session 3. | Exact robot-vs-manual buy attribution via the bot serial number. |
 | — | Fee-basis configurability | Matcher computes both `fee_on_positive` and `fee_on_net`; report hardcodes positive-lots (documented default). Make it a UI/setting toggle if needed. |
 | — | Fee-ledger billing snapshots | `build_fee_report` recomputes live; a persisted immutable "Bill" snapshot would make billed amounts auditable when later polls restate values. |
-| — | Trading VPS 185.232.152.246 sshd down | trade_ingestor can't reach it (see above). |
+| — | ~~Trading VPS 185.232.152.246 sshd down~~ | **Resolved** — it was transient/post-restart; direct SSH works (see Session 3 deploy learnings). |
+
+---
+
+## Session 3 — P3 fire-log (built + fleet-deployed) + exclusion filter + fleet-redeploy lessons
+
+Finished P3 (the deferred bot fire-log), shipped an instrument-exclusion filter, deployed the mgmt UI (`b4f7fb4b`, migration `0007`), and redeployed **all 7 bot stacks** onto the fire-log image (`902a3dd`). PR map: **#98** GetOrders report (merged) · **#99** issue · **#100** P3 fire-log (merged) · **#101** exclusion filter (merged).
+
+### P3 — bot fire-log + serial-number reconciliation (PR #100)
+
+Authoritatively tags which executed buys were the bot's (vs the agent's manual trades), replacing the market-open time-window heuristic on covered days.
+
+- **Design pivots (learned the hard way)**:
+  - Do NOT log at `prepare_order_data` — that records *intent*; the run may never actually fire.
+  - Log only orders that **actually succeeded (HTTP 200)**.
+  - **Hot path is sacred**: `place_order` is spammed 1000+×/run in the head-of-queue race. It does ONLY a dict-membership check + store of the *first* successful `response.content` per account (`_FIRED_SUCCESS` in `locustfile_new.py`) — **no file I/O, no JSON parse**. Parsing + the JSONL write happen once in `on_test_stop` (`_flush_order_fires`).
+  - Each fire carries the broker **`serial_number`** (the durable, queryable reconciliation key) + the **full NewOrder response**. Serial/tracking extraction (`_extract_order_ids`) is best-effort; the full response is saved so extraction can be refined mgmt-side **without a bot redeploy**.
+- **mgmt UI**: `order_fires` table + `broker_orders.serial_number` (migration **`0007`**, additive); `services/fire_log_ingestor.py` SFTP-reads `run_results/order_fires_<date>.jsonl` (the bot APPENDS — so re-read the most-recent ~7 files only, NO delete-on-consume, dedup on `fire_uid` via `ON CONFLICT DO NOTHING`); reconciles `broker_orders.is_bot` two ways — **serial-exact** and **date-based** `(customer, isin, side, trading-date)`. Worker `ENABLE_FIRE_LOG_INGESTOR` (default on, internal SSH only). `profit_report._is_bot_buy` already prefers `is_bot`, so reconciled fires sharpen attribution automatically.
+- **CodeRabbit fix**: serial reconciliation is scoped to **`customer_id`** — `serialNumber` is NOT globally unique across brokers; a `customer_id` pins exactly one broker + one account (tighter than broker+agent and avoids the stale denormalized `agent_id`).
+
+### Instrument exclusion filter (PR #101)
+
+Keep instruments agents buy (e.g. bonds) out of the report + fee.
+
+- Persistent **`excluded_instruments`** setting (multi-line ISIN/symbol; commas/semicolons accepted). **No migration** — uses the `settings` table.
+- `broker_orders.parse_exclusions()` + `is_excluded()` match **ISIN, symbol, OR symbol_title** (case-insensitive). Applied in `list_orders`, `build_fee_report` (dropped BEFORE matching so a bond never touches profit/fee), and the Excel export.
+- `POST /admin/bot-report/exclusions` saves it (audit via `settings_store.set_setting`); a textarea editor on the page round-trips a validated `next` redirect (`_bot_report_safe_next` — local `/admin/bot-report` only, no open-redirect).
+
+### Fleet-redeploy learnings — CRITICAL for next time
+
+- **The fleet is 7 stacks, not 4**: `5.10.248.55` → Mostafa `83619dcd`, hamid `e4d0db56`, `6b577238` (`sm-agent-05684fc8`); `185.232.152.246` → `c6f3b84a`, `724a310a`, `0fceec29`, `7bd17604`. All now on bot image **`902a3dd`** (the #100 fire-log build).
+- **`ghcr.io` reachability is INTERMITTENT, not permanently blocked.** This time it was reachable from `5.10.248.55` (its `pull always` redeploy got `902a3dd` straight from ghcr) but still blocked from `185.232.152.246`. Don't assume it's always down.
+- **A `never`-pull host's "redeploy" only restarts the LOCAL image.** `docker compose up -d --pull never` returns "up" whether the locally-tagged `:latest` is the new OR old image — so clicking redeploy in the panel SILENTLY restarted `185`'s 4 stacks on the OLD `599c16c`. **Stage the new image on the host FIRST, then verify the *running container's* revision label — "up" is not proof.**
+- **The mirror's `:latest` can be STALE.** `ghcr-mirror.liara.ir/...seller-market:latest` served the OLD bot image (`599c16c`) and `docker pull` said "Image is up to date". **Fix = pull by IMMUTABLE DIGEST**:
+  1. On a host that already has the new image: `docker image inspect ghcr.io/pesahm/seller-market:latest --format '{{index .RepoDigests 0}}'` → `…@sha256:9e660f8d…`.
+  2. On the blocked host: `docker pull ghcr-mirror.liara.ir/pesahm/seller-market@sha256:9e660f8d…` (bypasses the cached `:latest`, fetches the exact image), then `docker tag … ghcr.io/pesahm/seller-market:latest`.
+  3. Verify `…revision == 902a3dd`, then per stack: `cd /root/seller-market/agents/<agent-uuid> && docker compose up -d --pull never`; confirm the container's image label revision is `902a3dd`.
+- **`185.232.152.246` SSH works directly** as `user17290985243902@185.232.152.246` (key-based; `hostname`=`tebian`; has docker access + can read the `/root/seller-market/agents/<id>/` stack dirs). The mgmt UI's transient `'NoneType' object has no attribute 'open_session'` tracebacks were post-restart noise that self-cleared (port 22 was open throughout).
+- **#101's bot image build (`b4f7fb4b`) FAILED** (a mgmt_ui-only change tripped the semver/tag logic) — but harmless: bot `:latest` stays at `902a3dd` from #100's successful build. Don't chase it.
+
+### Verify the fire-log is flowing (after the next market-open run)
+
+No fires until a bot actually runs. Then `run_results/order_fires_<date>.jsonl` appears, the ingestor upserts + reconciles, and `is_bot` gets tagged. Check:
+`docker exec seller-market-mgmt-postgres-1 psql -U mgmt -d mgmt_ui -tAc "SELECT count(*), max(fired_at) FROM order_fires;"` and the `fire_log_ingest stack=…` log lines.
+
+### Open follow-ups (Session 3)
+
+| # | Title | Why |
+|---|---|---|
+| — | Harden `fire_log_ingestor` SSH error handling | An unreachable host currently logs a full paramiko traceback per tick (the `open_session` AttributeError isn't an `SSHError`, so it hits the outer `except`). Catch broader → one-line warning. |
+| — | Confirm real NewOrder response shape | So `_extract_order_ids` pulls `serialNumber`/`trackingNumber` exactly. The full response is already saved, so this is a mgmt-side refinement — no bot redeploy. |
+| — | Redeploy the bot images automatically | Operator still manually mirror-pulls/retags + redeploys per host on each bot image rebuild (Session-1 follow-up #2 still open, now compounded by the stale-`:latest`/pull-by-digest dance). |
