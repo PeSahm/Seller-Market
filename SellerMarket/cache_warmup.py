@@ -21,7 +21,7 @@ Run this script 5-10 minutes before market opens to ensure all data is fresh.
 import argparse
 import configparser
 import logging
-from typing import List, Dict, Any
+from typing import Dict
 from datetime import datetime
 
 from broker_enum import BrokerCode
@@ -40,6 +40,49 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _warmup_exir(config_section: Dict[str, str], cache: TradingCache) -> bool:
+    """Warm up / validate an Exir (Rayan-HamAfza) account.
+
+    Exir uses a cookie + per-request ``X-App-N`` session (not the ephoenix Bearer
+    token cache), and its prices come from the broker's own RLC band handler —
+    none of which is market-hours gated. We exercise the FULL prepare path
+    (login → buying power → RLC price band → buy fee → volume) exactly as the
+    locust run will, WITHOUT placing an order, so the account can be validated
+    ahead of the open. The adapter keeps its own in-memory session/price caches
+    (it does not use the on-disk ``TradingCache``), so this is a health check /
+    validation rather than a cross-process pre-cache.
+    """
+    from broker_adapters import get_adapter
+
+    username = config_section['username']
+    broker_code = config_section['broker']
+    password = config_section['password']
+    isin = config_section['isin']
+    side = int(config_section['side'])
+
+    logger.info("Exir family — validating via adapter (login + buying power + RLC price band + fee)...")
+    try:
+        adapter = get_adapter(
+            broker_code,
+            username=username,
+            password=password,
+            config_section=config_section,
+            captcha_decoder=decode_captcha,
+            cache=cache,
+        )
+        prepared = adapter.prepare_order(isin=isin, side=side, config_section=config_section)
+        logger.info(
+            f"✓ Exir prepare OK: {username}@{broker_code} "
+            f"{'Buy' if side == 1 else 'Sell'} {isin} "
+            f"price={prepared.price:,} vol={prepared.volume:,}"
+        )
+        logger.info(f"\n✓✓✓ Exir warmup successful for {username}@{broker_code} ✓✓✓\n")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Exir warmup failed for {username}@{broker_code}: {e}")
+        return False
 
 
 def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
@@ -64,6 +107,14 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
     logger.info(f"{'='*80}")
     
     try:
+        # Exir (Rayan HamAfza) uses a different protocol; divert to the adapter
+        # (mirrors locustfile_new.py's order path). Family is data-driven from the
+        # rendered config's broker_family, falling back to ephoenix for legacy
+        # configs that predate it.
+        from broker_adapters import resolve_family
+        if resolve_family(broker_code, config_section) == "exir":
+            return _warmup_exir(config_section, cache)
+
         # Validate broker code
         if not BrokerCode.is_valid(broker_code):
             logger.error(f"Invalid broker code: {broker_code}")
@@ -86,7 +137,7 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
         # Step 1: Authenticate and cache token
         logger.info("Step 1: Authenticating and caching token...")
         try:
-            token = api_client.authenticate()
+            api_client.authenticate()
             logger.info("✓ Token cached (expires in 2 hours)")
         except Exception as e:
             logger.error(f"❌ Authentication failed for {username}@{broker_code}: {e}")
