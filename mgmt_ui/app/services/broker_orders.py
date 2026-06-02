@@ -97,6 +97,9 @@ def map_getorders_row(row: dict, customer: Customer) -> dict:
         "pam_code": (str(row.get("pamCode")) if row.get("pamCode") is not None else None),
         "tracking_number": int(row.get("trackingNumber") or 0),
         "broker_order_id": (int(row["id"]) if row.get("id") is not None else None),
+        "serial_number": (
+            int(row["serialNumber"]) if row.get("serialNumber") is not None else None
+        ),
         "isin": row.get("isin") or "",
         "symbol": row.get("symbol") or None,
         "symbol_title": row.get("symbolTitle") or None,
@@ -201,14 +204,17 @@ _MUTABLE_ON_CONFLICT = (
     "execution_date",
     "symbol",
     "symbol_title",
+    "serial_number",
     "raw_json",
 )
 
-# Money/price columns where a NULL in a later fetch must NOT clobber a
-# previously-good value — a malformed re-fetch would otherwise null out the
-# price and silently corrupt the fee report. COALESCE keeps the old value.
+# Columns where a NULL in a later fetch must NOT clobber a previously-good
+# value — a malformed re-fetch would otherwise null out the price (corrupting
+# the fee report) or the serial (breaking fire-log reconciliation). COALESCE
+# keeps the old value. ``serial_number`` is here too so a re-fetch backfills
+# it on rows stored before the column existed, without ever wiping it.
 _COALESCE_ON_CONFLICT = frozenset(
-    {"price", "total_fee", "executed_amount", "net_traded_value"}
+    {"price", "total_fee", "executed_amount", "net_traded_value", "serial_number"}
 )
 
 

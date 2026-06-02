@@ -78,6 +78,16 @@ class Settings(BaseSettings):
     # enable once the mgmt host can reach api-{broker} (see CLAUDE.md DNS note).
     # Interval >= 1h; the default is daily. Lookback is the rolling window of
     # days each tick re-pulls (today's fills land within it).
+    # Bot fire-log ingestor (P3). Pulls run_results/order_fires_*.jsonl over
+    # SFTP into order_fires and reconciles broker_orders.is_bot. Internal SSH
+    # only (no external broker calls), so safe to default ON like the other
+    # ingestors. Interval >= 1s.
+    enable_fire_log_ingestor: bool = Field(
+        default=True, alias="ENABLE_FIRE_LOG_INGESTOR"
+    )
+    fire_log_ingest_interval_seconds: int = Field(
+        default=60, alias="FIRE_LOG_INGEST_INTERVAL_SECONDS", ge=1
+    )
     enable_broker_order_reconciler: bool = Field(
         default=False, alias="ENABLE_BROKER_ORDER_RECONCILER"
     )

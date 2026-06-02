@@ -15,9 +15,10 @@ import requests
 import configparser
 import logging
 from collections import namedtuple
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import os
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from broker_enum import BrokerCode
@@ -105,6 +106,128 @@ def send_telegram_notification(message: str):
             
     except Exception as e:
         logger.error(f"Error sending Telegram notification: {e}")
+
+
+# --- Order fire-log (mgmt UI reconciliation) ------------------------------
+# One JSONL record per account per run is appended here, recording WHICH
+# customer/broker/isin/side the bot fired an order for. The mgmt UI's
+# fire_log_ingestor pulls these back over SFTP and reconciles them against the
+# broker GetOrders history to authoritatively tag which executed buys were the
+# bot's (vs the agent's manual trades). We emit ONCE per account in
+# prepare_order_data — NOT in the place_order task, which is spammed 1000+
+# times per run in the head-of-queue race. Reuses the run_results/ bind mount
+# (same dir the scheduler drops its markers in).
+_FIRE_LOG_SCHEMA = 1
+_RUN_RESULTS_DIR = os.path.join(os.path.dirname(__file__), "run_results")
+try:
+    os.makedirs(_RUN_RESULTS_DIR, exist_ok=True)
+except OSError:
+    pass
+
+
+# In-memory capture of the FIRST successful order response per account.
+# Populated in the place_order HOT PATH with nothing but a dict membership
+# check + one reference store (no I/O, no parse — performance is critical at
+# market open), then flushed to the fire-log once in on_test_stop. Keyed by
+# (username, broker_code, isin, side) -> raw response bytes.
+_FIRED_SUCCESS: Dict[Any, bytes] = {}
+
+
+def _extract_order_ids(resp: Any) -> tuple:
+    """Best-effort ``(serial_number, tracking_number)`` from a NewOrder response.
+
+    The serial number is the durable key we reconcile against the later
+    GetOrders execution (``serialNumber``). Field locations vary by broker, so
+    we probe a few names at the top level and a nested ``result``. Either may
+    be ``None`` — the full response is saved regardless, so extraction can be
+    refined later without a bot redeploy.
+    """
+    def _pick(d: dict, *names: str):
+        for n in names:
+            v = d.get(n)
+            if v not in (None, ""):
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    pass
+        return None
+
+    if not isinstance(resp, dict):
+        return None, None
+    nested = resp.get("result") if isinstance(resp.get("result"), dict) else {}
+    serial = _pick(resp, "serialNumber", "serial", "serialNo") or _pick(
+        nested, "serialNumber", "serial", "serialNo"
+    )
+    tracking = _pick(resp, "trackingNumber", "tracking", "trackingNo") or _pick(
+        nested, "trackingNumber", "tracking", "trackingNo"
+    )
+    return serial, tracking
+
+
+def _emit_order_fire(
+    username: str,
+    broker_code: str,
+    isin: str,
+    side: int,
+    *,
+    serial_number: Optional[int] = None,
+    tracking_number: Optional[int] = None,
+    order_response: Any = None,
+) -> None:
+    """Append one order-fire record to ``run_results/order_fires_<YYYYMMDD>.jsonl``.
+
+    Records a SUCCESSFUL order placement — the broker's ``serial_number`` (the
+    durable reconciliation key) plus the full response. Best-effort and never
+    raises. Called once per account from on_test_stop — NOT from the
+    place_order hot path. A single small JSON line in append mode (O_APPEND) is
+    written atomically across locust processes. The mgmt UI dedups on
+    ``fire_uid``.
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        record = {
+            "schema_version": _FIRE_LOG_SCHEMA,
+            "fire_uid": uuid.uuid4().hex,
+            "username": username,
+            "broker_code": broker_code,
+            "isin": isin,
+            "side": side,
+            "fired_at": now.isoformat(),
+            "serial_number": serial_number,
+            "tracking_number": tracking_number,
+            "order_response": order_response,
+        }
+        path = os.path.join(
+            _RUN_RESULTS_DIR, f"order_fires_{now.strftime('%Y%m%d')}.jsonl"
+        )
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001 — fire-log I/O must never break trading
+        pass
+
+
+def _flush_order_fires() -> None:
+    """Write one fire-log line per account that placed a successful order this
+    run. Parses the captured responses HERE (off the hot path) to pull the
+    serial / tracking number, and saves the full response. Called once from
+    on_test_stop."""
+    for (username, broker_code, isin, side), content in list(_FIRED_SUCCESS.items()):
+        order_resp: Any = None
+        serial = tracking = None
+        try:
+            order_resp = json.loads(content)
+            serial, tracking = _extract_order_ids(order_resp)
+        except Exception:  # noqa: BLE001 — non-JSON / odd body: keep it raw
+            try:
+                order_resp = {"raw": content.decode("utf-8", "replace")[:4000]}
+            except Exception:  # noqa: BLE001
+                order_resp = None
+        _emit_order_fire(
+            username, broker_code, isin, side,
+            serial_number=serial, tracking_number=tracking,
+            order_response=order_resp,
+        )
+    _FIRED_SUCCESS.clear()
 
 
 def prepare_order_data(config_section: dict) -> Dict[str, Any]:
@@ -235,8 +358,8 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
     logger.info(f"  Volume: {volume:,} shares")
     logger.info(f"  Total: {price * volume:,.0f} Rials")
     logger.info(f"{'='*80}\n")
-    
-    OrderData = namedtuple('OrderData', 'order_url token data username broker_code isin api_client')
+
+    OrderData = namedtuple('OrderData', 'order_url token data username broker_code isin side api_client')
     return OrderData(
         order_url=endpoints['order'],
         token=token,
@@ -244,6 +367,7 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
         username=username,
         broker_code=broker_code,
         isin=isin,
+        side=side,
         api_client=api_client
     )
 
@@ -267,6 +391,7 @@ class TradingUser(HttpUser):
         self.username = order_data.username
         self.broker_code = order_data.broker_code
         self.isin = order_data.isin
+        self.side = order_data.side
         self.api_client = order_data.api_client
     
     @task
@@ -303,6 +428,13 @@ class TradingUser(HttpUser):
             if response.status_code == 200:
                 task_logger.info(f"✓ Order placed successfully for {self.username}@{self.broker_code}")
                 task_logger.debug(f"Response: {response.text}")
+                # Capture the FIRST successful response per account — a single
+                # dict membership check + reference store. No I/O, no JSON parse
+                # here (that happens once in on_test_stop). The bytes are the
+                # raw body already read for this response.
+                _fire_key = (self.username, self.broker_code, self.isin, self.side)
+                if _fire_key not in _FIRED_SUCCESS:
+                    _FIRED_SUCCESS[_fire_key] = response.content
             else:
                 task_logger.error(f"✗ Order failed for {self.username}@{self.broker_code}: "
                            f"Status {response.status_code}")
@@ -375,7 +507,18 @@ def on_test_stop(environment, **kwargs):
     logger.info("\n" + "="*80)
     logger.info("TEST STOPPED - Fetching order results...")
     logger.info("="*80 + "\n")
-    
+
+    # Flush the order fire-log first (off the hot path): one record per account
+    # that placed a successful order this run, carrying the broker serial number
+    # + full response for the mgmt UI to reconcile against GetOrders.
+    try:
+        _fired_count = len(_FIRED_SUCCESS)
+        _flush_order_fires()
+        if _fired_count:
+            logger.info(f"Order fire-log: wrote {_fired_count} successful-order record(s).")
+    except Exception as e:  # noqa: BLE001 — never let fire-log flush break teardown
+        logger.error(f"Order fire-log flush failed: {e}")
+
     total_orders = 0
     total_executed = 0
     total_volume = 0
