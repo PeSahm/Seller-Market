@@ -104,8 +104,8 @@ class _FakeSession:
         })
 
 
-def _install_exir_fakes(monkeypatch, *, asset="1000000", holdings_rows=None):
-    """Patch ExirAdapter so login + signed reads never hit the network."""
+def _install_exir_fakes(monkeypatch, *, asset="1000000", holdings_rows=None, band=(200, 180), buy_fee=0.0):
+    """Patch ExirAdapter so login + signed reads + tsetmc never hit the network."""
     # Fresh module session cache each test.
     monkeypatch.setattr(exir_adapter, "_SESSION_CACHE", {}, raising=True)
 
@@ -115,11 +115,19 @@ def _install_exir_fakes(monkeypatch, *, asset="1000000", holdings_rows=None):
     # Session factory → our fake.
     monkeypatch.setattr(exir_adapter.requests, "Session", lambda: _FakeSession())
 
-    # Signed GET reads (asset / portfoReport).
+    # tsetmc price band (ceiling, floor) — never hit the network.
+    monkeypatch.setattr(
+        exir_adapter.tse_price, "get_price_band", lambda isin, timeout=15: band
+    )
+
+    # Signed GET reads: buying power via stockInfo.purchaseUpperBound, holdings.
     def fake_get(url, headers=None, cookies=None, timeout=None, **kw):
         assert "X-App-N" in headers
-        if url.endswith("/api/v1/user/asset"):
-            return _FakeResp(status=200, json_data={"accountNumber": "x", "asset": asset})
+        if url.endswith("/api/v1/user/stockInfo"):
+            return _FakeResp(status=200, json_data={"purchaseUpperBound": asset})
+        if "/api/v2/wages/instrument/" in url:
+            isin = url.rsplit("/", 1)[-1]
+            return _FakeResp(status=200, json_data={isin: {"SIDE_BUY": buy_fee, "SIDE_SALE": 0.0088}})
         if url.endswith("/api/v1/user/portfoReport"):
             return _FakeResp(status=200, json_data={"result": holdings_rows or []})
         raise AssertionError(f"unexpected requests.get({url})")
@@ -199,18 +207,63 @@ def test_exir_sell_no_holdings_raises(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# ExirAdapter — missing price
+# ExirAdapter — price band from tsetmc (no config price)
 # ---------------------------------------------------------------------------
 
-def test_exir_requires_price(monkeypatch):
-    _install_exir_fakes(monkeypatch)
+def test_exir_buy_uses_tsetmc_ceiling(monkeypatch):
+    # band ceiling=9930 (BUY price), asset 993000 → volume 993000//9930 == 100.
+    _install_exir_fakes(monkeypatch, asset="993000", band=(9930, 9370))
     a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
-    for cfg in ({}, {"price": 0}, {"price": "0"}, {"price": None}):
-        try:
-            a.prepare_order(isin="IRO3SMBZ0001", side=1, config_section=cfg)
-            raise AssertionError(f"expected ValueError for cfg={cfg!r}")
-        except ValueError as e:
-            assert "requires a 'price'" in str(e)
+    po = a.prepare_order(isin="IRO1SROD0001", side=1, config_section={})  # NO config price
+    body = json.loads(po.body)
+    assert body["price"] == "9930.0"       # BUY → tsetmc ceiling
+    assert po.volume == 100
+    assert body["quantity"] == "100"
+
+
+def test_exir_buy_volume_is_fee_adjusted(monkeypatch):
+    # BP=6,000,000, ceiling=9930, buy fee 0.3712% → floor(6e6/(9930*1.003712)) == 601
+    # (the naive 6e6//9930 == 604 would over-spend the buying power and be rejected;
+    # 602 already overshoots by ~49 Rials, so the correct floor is 601 — matches live).
+    _install_exir_fakes(monkeypatch, asset="6000000", band=(9930, 9370), buy_fee=0.003712)
+    a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
+    po = a.prepare_order(isin="IRO1SROD0001", side=1, config_section={})
+    assert po.volume == int(6000000 / (9930 * 1.003712))   # == 601
+    assert po.volume == 601
+
+
+def test_exir_sell_uses_tsetmc_floor(monkeypatch):
+    rows = [{"insMaxLcode": "IRO1SROD0001", "asset": 50}]
+    _install_exir_fakes(monkeypatch, holdings_rows=rows, band=(9930, 9370))
+    a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
+    po = a.prepare_order(isin="IRO1SROD0001", side=2, config_section={})  # NO config price
+    body = json.loads(po.body)
+    assert body["price"] == "9370.0"       # SELL → tsetmc floor
+    assert po.volume == 50
+
+
+def test_exir_no_band_raises(monkeypatch):
+    _install_exir_fakes(monkeypatch)
+    monkeypatch.setattr(
+        exir_adapter.tse_price, "get_price_band",
+        lambda isin, timeout=15: (_ for _ in ()).throw(ValueError("no tsetmc price band")),
+    )
+    a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
+    try:
+        a.prepare_order(isin="ZZZ", side=1, config_section={})
+        raise AssertionError("expected ValueError when tsetmc has no band")
+    except ValueError as e:
+        assert "tsetmc price band" in str(e)
+
+
+def test_exir_config_price_overrides_tsetmc(monkeypatch):
+    # An explicit config price is honoured as an override (band ignored).
+    _install_exir_fakes(monkeypatch, asset="1000000", band=(9930, 9370))
+    a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
+    po = a.prepare_order(isin="IRO1SROD0001", side=1, config_section={"price": "200"})
+    body = json.loads(po.body)
+    assert body["price"] == "200.0"        # override, not the 9930 ceiling
+    assert po.volume == 5000               # 1000000 // 200
 
 
 # ---------------------------------------------------------------------------

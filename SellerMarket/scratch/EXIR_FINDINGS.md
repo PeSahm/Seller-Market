@@ -55,10 +55,27 @@ Source of truth for the adapter. (Spike: `scratch/exir_spike.py`, read-only, no 
   - **Implication:** `insMaxLCode` is an ISIN → the ephoenix `isin`-keyed schema fits with NO hack
     and NO migration. Map `state` = 3 for filled rows so `profit_report`'s `state==3` filter passes.
 
-## Open for Phase 2 (not needed for Phase-1 reads/report)
-- **buyingPower**: `GET /api/v2/user/buyingPower` returned **HTTP 406** errorCode 4047
-  "service is not acceptable" — a BUSINESS error (the token was accepted; orderbook proved it),
-  i.e. wrong path/version for this broker. Find the correct buyingPower path before Phase-2 BUY sizing
-  (candidates: `/api/v3/user/livePortfoReport`, a different buyingPower version, or carry price in config).
-- Order placement: `POST /api/v1/order` (decompiled) — confirm `insMaxLcode`=ISIN there too, and the
-  `brokerCode:116` numeric id; response has no order id (ids via `wss://…/sle`). NOT exercised by the spike.
+## Phase 2 — order-firing endpoints (RESOLVED, all live-confirmed)
+Found by mining the Angular bundle (`main-es2015.*.js`) + live probing + the decompiled
+`CheetahRobot.Tse` code. The bare `/api/v2/user/buyingPower` 406 was just the wrong path.
+
+- **Buying power**: `GET /api/v1/user/stockInfo` → `purchaseUpperBound` (= the spendable cash;
+  e.g. 6,000,000). (`/api/v1/user/buyingPower/detail`→`buyingPowerFixIncome` and
+  `/api/v1/user/customerRemain`→`usableCredit` corroborate.) X-App-N, cookie auth.
+- **Buy fee (commission)**: `GET /api/v2/wages/instrument/{ISIN}` →
+  `{"<ISIN>":{"SIDE_BUY":0.003712,"SIDE_SALE":0.0088}}`. BUY volume must be FEE-ADJUSTED:
+  `floor(BP / (price × (1 + SIDE_BUY)))` (mirrors ephoenix `CalculateOrderParam`). Naive `BP//price`
+  over-spends → broker rejects.
+- **Price band (no Exir REST endpoint — prices stream over Lightstreamer)**: use **tsetmc.com** (free,
+  public, no auth), as the decompiled `CheetahRobot.Tse.TseDataFetcher` does. One call —
+  `GET https://old.tsetmc.com/tsev2/data/MarketWatchInit.aspx?h=0&r=0` — returns every instrument;
+  section[2] rows (full, len>20): `f[1]`=ISIN, `f[19]`=**upper band (BUY ceiling)**, `f[20]`=lower band
+  (SELL floor), `f[13]`=yesterday close. (Confirmed == `cdn.tsetmc.com/api/Instrument/GetInstrumentInfo/{insCode}`
+  → `instrumentInfo.staticThreshold.psGelStaMax/psGelStaMin`; سرود 9930/9370.) See `tse_price.py`.
+- **Order id (`brokerCode`)**: from the **`rlcAuthHeader`** JWT `"b"` claim (= 116 for khobregan) —
+  NOT the `authToken` (no `b`); fallback = response-username prefix (`"1164580090306"` − account).
+- **Holdings (SELL)**: `GET /api/v1/user/portfoReport` → `result[].insMaxLcode == ISIN` → `asset`/`remainQty`.
+- **Order placement**: `POST /api/v1/order` (decompiled) — `insMaxLcode`=ISIN, `brokerCode`=116,
+  `side` SIDE_BUY/SIDE_SALE, `price`/`quantity` as strings, `orderType=ORDER_TYPE_LIMIT`,
+  `validityType=VALIDITY_TYPE_DAY`. Sync response has no order id (ids via `wss://…/sle`).
+  prepare_order validated live end-to-end (login → stockInfo → wages → tsetmc → body); NO order fired.

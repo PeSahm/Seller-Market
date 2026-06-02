@@ -2,8 +2,9 @@
 
 Unlike ephoenix (static Bearer header), Exir authenticates with a cookie session
 plus a per-request, second-granular ``X-App-N`` signature computed from the login
-``nt`` seed. There is NO instrument-price endpoint, so the limit price is carried
-in config.
+``nt`` seed. Exir has NO instrument-price endpoint (its prices stream over
+Lightstreamer), so the daily allowed price band comes from tsetmc.com — free TSE
+market data, see :mod:`tse_price`. BUY fires at the ceiling, SELL at the floor.
 
 Confirmed live (Phase-0 spike against khobregan — see
 ``scratch/EXIR_FINDINGS.md``):
@@ -15,9 +16,10 @@ Confirmed live (Phase-0 spike against khobregan — see
   → ``nt`` (signing seed), ``authToken`` (JWT; ``"b"`` claim = numeric broker id),
   ``validity`` (minutes), session cookies.
 * Reads use ``X-App-N`` over the full path+query, UTC clock.
-* ``GET /api/v1/user/asset`` → ``{"accountNumber","asset"}`` (asset = spendable
-  cash) — the working buying-power endpoint (the spike's ``/api/v2/user/buyingPower``
-  returned a 406 business error).
+* ``GET /api/v1/user/stockInfo`` → ``purchaseUpperBound`` — the buying-power /
+  account-credit endpoint the web app uses (the bare ``/api/v2/user/buyingPower``
+  406s for this account; ``stockInfo`` returns the same field the decompiled
+  ``GetBalance`` read).
 * ``GET /api/v1/user/portfoReport`` → ``{"result":[{... insMaxLcode:<ISIN>,
   asset/remainQty:<qty>}]}`` for holdings.
 * Order placement: ``POST /api/v1/order`` with the symbol/ISIN-keyed body below.
@@ -34,6 +36,7 @@ from typing import Any, Callable, Optional
 
 import requests
 
+import tse_price
 from broker_adapters import BrokerAdapter, PreparedOrder
 from captcha_utils import decode_captcha as _default_decode_captcha
 from exir_token import build_app_n, make_signer, pw_fingerprint
@@ -62,36 +65,39 @@ def _b64url_json(segment: str) -> dict:
     return json.loads(raw.decode("utf-8", "replace"))
 
 
-def _decode_broker_id(auth_token: Optional[str], username: str) -> Any:
-    """Extract the numeric broker id (``"b"`` claim) from the ``authToken`` JWT.
+def _decode_broker_id(
+    rlc_token: Optional[str],
+    auth_token: Optional[str],
+    response_username: Optional[str],
+    login_username: str,
+) -> Any:
+    """Extract the numeric broker id for the order payload's ``brokerCode``.
 
-    Best-effort: on any decode failure, fall back to the leading numeric prefix
-    of the username (Exir usernames are prefixed with the broker id, e.g.
-    ``"116..."`` → ``116``). Returns ``None`` only if nothing is recoverable.
+    CONFIRMED live: the ``"b"`` claim (e.g. khobregan → ``116``) lives in the
+    ``rlcAuthHeader`` JWT, NOT the ``authToken`` (which carries no ``b``). We try
+    rlcAuthHeader, then authToken, then derive it from the broker-prefixed login
+    *response* username (``"1164580090306"`` == ``116`` + the account
+    ``"4580090306"``). Returns ``None`` only if nothing is recoverable.
     """
-    if auth_token:
+    for tok in (rlc_token, auth_token):
+        if not tok:
+            continue
         try:
-            parts = auth_token.split(".")
+            parts = tok.split(".")
             if len(parts) >= 2:
-                claims = _b64url_json(parts[1])
-                b = claims.get("b")
+                b = _b64url_json(parts[1]).get("b")
                 if b is not None:
                     return b
-        except Exception as e:  # noqa: BLE001 — fall through to username heuristic
-            logger.debug(f"exir: authToken 'b' decode failed ({e}); falling back to username prefix")
+        except Exception as e:  # noqa: BLE001 — fall through to the username heuristic
+            logger.debug(f"exir: broker-id JWT 'b' decode failed ({e})")
 
-    # Fallback: leading digit run of the username.
-    digits = ""
-    for ch in str(username):
-        if ch.isdigit():
-            digits += ch
-        else:
-            break
-    if digits:
-        try:
-            return int(digits)
-        except ValueError:
-            return digits
+    # Derive from the response username = brokerId + account (strip the account
+    # we logged in with). E.g. "1164580090306" minus "4580090306" → "116".
+    ru, lu = str(response_username or ""), str(login_username or "")
+    if ru and lu and ru != lu and ru.endswith(lu):
+        prefix = ru[: len(ru) - len(lu)]
+        if prefix.isdigit():
+            return int(prefix)
     return None
 
 
@@ -165,8 +171,12 @@ class ExirAdapter(BrokerAdapter):
 
             nt = login_json.get("nt")
             if nt:
-                auth_token = login_json.get("authToken")
-                broker_id = _decode_broker_id(auth_token, self.username)
+                broker_id = _decode_broker_id(
+                    login_json.get("rlcAuthHeader"),
+                    login_json.get("authToken"),
+                    login_json.get("username"),
+                    self.username,
+                )
                 validity_min = login_json.get("validity") or 0
                 try:
                     ttl = max(_MIN_TTL_SECONDS, int(float(validity_min)) * 60)
@@ -224,9 +234,26 @@ class ExirAdapter(BrokerAdapter):
         return resp.json()
 
     def _buying_power(self, descriptor: dict) -> float:
-        """Spendable cash via ``GET /api/v1/user/asset`` → ``json["asset"]``."""
-        data = self._get("/api/v1/user/asset", descriptor)
-        return float(data["asset"])
+        """Spendable cash via ``GET /api/v1/user/stockInfo`` → ``purchaseUpperBound``.
+
+        (The bare ``/api/v2/user/buyingPower`` 406s for this account; ``stockInfo``
+        is the account-credit endpoint the web app uses and carries the same
+        ``purchaseUpperBound`` the decompiled ``GetBalance`` read.)
+        """
+        data = self._get("/api/v1/user/stockInfo", descriptor)
+        return float(data.get("purchaseUpperBound") or 0)
+
+    def _buy_fee_rate(self, isin: str, descriptor: dict) -> float:
+        """Per-instrument BUY commission rate via ``GET /api/v2/wages/instrument/{isin}``.
+
+        Response shape: ``{"<isin>": {"SIDE_BUY": 0.003712, "SIDE_SALE": 0.0088}}``.
+        The bot needs this so the BUY volume is fee-adjusted (the ephoenix family
+        gets the same from the broker's ``CalculateOrderParam``); without it, the
+        order would over-spend the buying power and the broker would reject it.
+        """
+        data = self._get(f"/api/v2/wages/instrument/{isin}", descriptor)
+        entry = (data or {}).get(isin) or {}
+        return float(entry.get("SIDE_BUY") or 0.0)
 
     def _holdings(self, isin: str, descriptor: dict) -> int:
         """Whole-share holdings for ``isin`` via ``GET /api/v1/user/portfoReport``."""
@@ -248,25 +275,35 @@ class ExirAdapter(BrokerAdapter):
         side = int(side)
         config_section = config_section or {}
 
-        # Price is REQUIRED from config — Exir exposes no instrument-price endpoint.
-        price = float(config_section.get("price") or 0)
+        # Exir has no price endpoint (its prices stream over Lightstreamer), so the
+        # daily allowed price band comes from tsetmc (free TSE market data): BUY
+        # fires at the ceiling (limit-up), SELL at the floor (limit-down) to sit
+        # head-of-queue. A config `price` is honoured only as an explicit override.
+        override = config_section.get("price")
+        if override:
+            ceiling = floor = float(override)
+        else:
+            ceiling, floor = tse_price.get_price_band(isin)
+        price = float(ceiling if side == 1 else floor)
         if price <= 0:
-            raise ValueError(
-                "Exir order requires a 'price' in config (no instrument price endpoint)"
-            )
+            raise ValueError(f"no tsetmc price band for {isin}")
 
         try:
             descriptor = self._session()
 
-            if side == 1:  # BUY — size from spendable cash.
+            if side == 1:  # BUY — size from spendable cash, NET OF the buy fee.
                 bp = self._buying_power(descriptor)
-                volume = int(bp // price)
+                fee = self._buy_fee_rate(isin, descriptor)
+                # floor(BP / (price * (1 + buyFee))) — mirrors the ephoenix
+                # CalculateOrderParam fee-adjustment so the order can't over-spend
+                # the buying power (which the broker would reject).
+                volume = int(bp / (price * (1.0 + fee)))
                 max_volume = config_section.get("max_volume")
                 if max_volume:
                     volume = min(volume, int(max_volume))
                 logger.info(
                     f"exir BUY {isin} ({self.username}@{self.broker_code}): "
-                    f"bp={bp:,.0f}, price={price}, volume={volume:,}"
+                    f"bp={bp:,.0f}, price={price}, fee={fee}, volume={volume:,}"
                 )
             else:  # SELL — size from real holdings; fail-fast on nothing held.
                 volume = self._holdings(isin, descriptor)
