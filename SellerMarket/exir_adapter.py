@@ -315,6 +315,14 @@ class ExirAdapter(BrokerAdapter):
                 )
 
             broker_id = descriptor["broker_id"]
+            if broker_id is None:
+                # _decode_broker_id exhausted every source — never POST a null
+                # brokerCode (the broker would mis-route/reject it). Fail-fast
+                # off the hot path so it shows in the run summary.
+                raise ValueError(
+                    f"Exir broker_id unresolved for {self.username}@{self.broker_code}; "
+                    "cannot build order"
+                )
             body = json.dumps({
                 "bankAccountId": -1,
                 "brokerCode": broker_id,

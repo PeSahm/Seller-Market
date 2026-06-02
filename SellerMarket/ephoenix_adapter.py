@@ -90,7 +90,7 @@ class EphoenixAdapter(BrokerAdapter):
         except Exception as e:
             logger.error(f"❌ Authentication failed for {username}@{broker_code}: {e}")
             if broker_code == 'gs':
-                logger.warning(f"⚠️  GS broker captcha issue - skipping this account")
+                logger.warning("⚠️  GS broker captcha issue - skipping this account")
             raise  # This will mark the task as failed in Locust
 
         # Step 2: Get buying power
@@ -163,7 +163,7 @@ class EphoenixAdapter(BrokerAdapter):
 
         order_json = json.dumps(order_payload)
 
-        logger.info(f"✓ Order prepared:")
+        logger.info("✓ Order prepared:")
         logger.info(f"  ISIN: {isin}")
         logger.info(f"  Side: {'Buy' if side == 1 else 'Sell'}")
         logger.info(f"  Price: {price:,} Rials")
