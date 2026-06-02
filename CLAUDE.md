@@ -351,3 +351,48 @@ No fires until a bot actually runs. Then `run_results/order_fires_<date>.jsonl` 
 | — | Harden `fire_log_ingestor` SSH error handling | An unreachable host currently logs a full paramiko traceback per tick (the `open_session` AttributeError isn't an `SSHError`, so it hits the outer `except`). Catch broader → one-line warning. |
 | — | Confirm real NewOrder response shape | So `_extract_order_ids` pulls `serialNumber`/`trackingNumber` exactly. The full response is already saved, so this is a mgmt-side refinement — no bot redeploy. |
 | — | Redeploy the bot images automatically | Operator still manually mirror-pulls/retags + redeploys per host on each bot image rebuild (Session-1 follow-up #2 still open, now compounded by the stale-`:latest`/pull-by-digest dance). |
+
+---
+
+## Session 4 — Exir / Rayan HamAfza broker family + UI-managed brokers (Phase 1, issue #102)
+
+Added a SECOND broker protocol family — **Exir / Rayan HamAfza (`*.exirbroker.com`)** — and moved broker selection from hardcoded lists to a **DB-managed `brokers` table**. Branch `feat/exir-broker-family`: commit `c40d168` (feature) + `c81f853` (review fixes). Phased: Phase 1 = mgmt UI manage/read side (done); **Phase 2 = bot order-firing for Exir (designed, NOT built)**.
+
+### The big realization
+All 11 prior brokers (gs, ib, ayandeh, …) are **ONE software family** ("ephoenix/MTS") — adding any was just a URL branch in `broker_enum.get_endpoints()` / `broker_client._endpoints_for`. **Exir is a fundamentally different protocol**, so it needed a real **broker-adapter abstraction** (none existed). Captcha/OCR service is reused; everything else differs.
+
+### Exir wire shape — CONFIRMED LIVE (read-only spike, no orders), see `SellerMarket/scratch/EXIR_FINDINGS.md`
+- Per-tenant subdomain `https://{tenant}.exirbroker.com` (tenant = broker code, e.g. `khobregan`). Angular SPA.
+- Auth = **cookies, NOT Bearer**: `GET /exir` (cookiesession1) → `GET /captcha` (**JPEG** + `client_login_id` header→cookie) → `POST /api/v2/login {username,password,captcha:<int>,otp:""}` → `{authToken, nt, validity(480min), accountNumberList[0].bourseAccountName, ...}`. Captcha is a **JSON number**. OCR (the existing `/ocr/captcha-easy-base64`) decodes the 5-digit JPEG fine.
+- **Per-request `X-App-N` signature** = `BuildAppNToken(nt, path)` ported to Python (`exir_token.py`). **CONFIRMED: UTC time basis + signed over the FULL path INCLUDING query string** (a 200 on `orderbookReport` proved it; recompute every second).
+- Reads: `orderbookReport?...&orderStatusId=3` (filled). **`insMaxLCode` is an ISIN** (e.g. `IRO1SROD0001`) → maps straight onto the existing `isin` column, **no symbol-vs-ISIN problem**. Persian status/side (`خريد`/`فروش` — match first letter, Arabic-vs-Persian yeh). `entryDateTime` is **Jalali** `YYYY/MM/DD-HH:mm:ss`. `mmtpOrderId` is the dedup id. Broker numeric id = **116** (JWT `b` claim) — Phase-2 order payload needs it.
+- **`buyingPower` is an OPEN gap**: `GET /api/v2/user/buyingPower` returned `406` errorCode 4047 (business "service not acceptable", NOT auth — the token scheme was validated by the orderbook 200). Find the right path before Phase-2 BUY sizing.
+
+### Architecture (Phase 1, mgmt UI only)
+- New package `app/services/brokers/`: `base.py` (`BrokerAdapter` Protocol + `VerifyResult`/`IsinInfo`), `registry.py` (DB-backed `{code:family}` cache warmed at startup + on CRUD; `get_adapter` factory), `ephoenix.py` (thin delegator), `exir.py` (`ExirAdapter`), `_jalali.py`, `exir_token.py`.
+- `broker_client.py` is now a **family-routing dispatcher**: the ephoenix bodies stay in-place (renamed `_ephoenix_*`), and `verify_credentials`/`verify_isin`/`get_orders` route to the Exir adapter when `family_of(code)=="exir"`, **defaulting to ephoenix on a cold/unknown cache** — so the 11 brokers + their 14 tests are byte-for-byte unchanged. (Did NOT move ephoenix into `ephoenix.py` precisely to keep the test monkeypatch targets — `_endpoints_for`/`_TOKEN_CACHE` etc. — at their original path.)
+- `brokers` table (migration **0008**, seeds 11 ephoenix + `khobregan` + any existing distinct `customers`/`broker_orders.broker` values so nothing orphans), `models/brokers.py`, `schemas/broker.py` (`family` is a closed `Literal["ephoenix","exir"]` — families are code-bound), `services/brokers_admin.py` (CRUD + in-use guards), `/admin/brokers` CRUD page. **`family` is the ONLY thing that picks the adapter** and is resolved LIVE (no denormalized family on customers/broker_orders).
+- Customer `broker` validation moved from a Pydantic `Literal` to **DB-backed** (`get_broker_by_code`, enabled-check); dropdowns are grouped optgroups from `list_enabled_grouped`.
+
+### Adversarial review caught 8 real bugs (commit `c81f853`) — patterns to remember
+- **The PR-#73 `MissingGreenlet` landmine bites ANY pre-fetched ORM list on a service-rollback error path.** `admin_customer_update` pre-fetched `broker_groups` (ORM) before `update_customer`'s duplicate-tuple `db.rollback()` expired them → the sync optgroup render lazy-loaded → 500. Fix: re-fetch AFTER the rollback (the create/agent paths already did). **Rule: anything the sync error-renderer touches must be fetched/snapshotted post-rollback.**
+- **`broker_orders.tracking_number` was GLOBALLY UNIQUE — wrong once a second id namespace exists.** Exir `mmtpOrderId` ⟂ ephoenix `trackingNumber`; a collision on `ON CONFLICT (tracking_number)` silently overwrites another customer's money/attribution row (excluded `customer_id/isin` stay, mutable money fields get clobbered). Fixed → composite `UNIQUE(broker, tracking_number)` (migration **0009** drops the old single-col unique via inspector, adds the composite; upsert `index_elements=[broker, tracking_number]`). **Rule: a per-broker id is only unique per broker.**
+- **Cross-family timezone basis must match.** Exir `parse_jalali_datetime` returns Tehran +03:30; ephoenix `_parse_dt` stores wall-clock **labeled UTC**. The date-range filters compare absolute instants on a `timestamptz`, so mixing bases misclassifies near Tehran midnight. Fix: `.replace(tzinfo=timezone.utc)` on the Exir dt (keep numerals, relabel UTC).
+- **`update_broker` family flip was unguarded** (disable/delete were guarded) → could silently reroute live customers to the wrong adapter. Guard family change when in-use.
+- Lows: Exir `get_orders` now filled-only (reject non-3 so the hardcoded `state=3` can't mislabel); Exir session **evicted + re-login retried once on a non-200** (ephoenix already drops its token on 401); in-use guard counts customers **case-insensitively** (`func.lower`).
+
+### Gotchas / learnings
+- **Bot Dockerfile is `COPY *.py ./` (flat)** → bot-side Phase-2 adapters MUST be top-level modules, a `brokers/` subpackage would be silently excluded. mgmt_ui copies `app/` wholesale, so its package is fine.
+- **Phase-0 spike is the highest-value step** — it converted a fiddly token/captcha/cookie design from guesswork into confirmed facts (UTC-vs-Tehran and path-vs-path+query were the two knobs; the live 200 pinned both) and revealed `insMaxLCode`=ISIN, collapsing a whole planned workstream.
+- **pytest `-q` to a redirected file BUFFERS** — a backgrounded run shows an empty output file mid-run; run foreground for a definitive pass/fail. The Windows fail-once flakes are real: a **different** test errored each full run (`test_stacks_scheduler_locust_push`, then `test_janitor_filters`), each **passes in isolation** — re-run solo to confirm, never chase.
+- **Test creds are already in the repo** (`SellerMarket/test_integration.py`, README, CLAUDE.md use `4580090306` / `Mm@12345`) — but the new spike reads creds from `EXIR_*` env vars anyway (don't add another hardcoded copy); the one live `nt` in a unit test was swapped for a synthetic value.
+- **Parallel subagents with DISJOINT file ownership** integrate cleanly into one tree (no worktrees needed): WS1 brokers-table, WS2 dispatcher, WS3 ExirAdapter, WS4+5 consumer side — then adversarially review the merged diff.
+
+### Open follow-ups (Session 4)
+
+| # | Title | Why |
+|---|---|---|
+| #102 | **Phase 2 — bot order-firing for Exir** | Flat adapter modules in `SellerMarket/`, thin `EphoenixAdapter` over the unmodified `api_client.py`, I/O-free hot-path `X-App-N` signer, render `broker_family` into `config.ini` (data-driven bot, no enum). Designed in the plan; not built. |
+| — | Real Exir `buyingPower` path | The `/api/v2/user/buyingPower` `406` blocks Phase-2 BUY volume sizing — find the right endpoint/version, or carry an explicit price in config for Exir. |
+| — | Confirm Exir order-placement contract | `POST /api/v1/order` (decompiled): confirm `insMaxLcode`=ISIN there too + the numeric `brokerCode` (116); the sync response has no order id (ids via `wss://…/sle`) → Phase-2 fire-log keys on the date-based reconciliation, not serial. |
+| — | Per-broker endpoint overrides + verify-instrument for Exir | Operator chose metadata-only CRUD (code/family/label/enabled/sort); URL quirks (ib shard, gs rate-limit) still live in code. Exir `verify_isin` is a Phase-1 stub (ISIN echoed, no metadata fetch). |
