@@ -249,7 +249,44 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
     logger.info(f"{'='*80}")
     logger.info(f"Preparing order for {username}@{broker_code} - ISIN: {isin}")
     logger.info(f"{'='*80}")
-    
+
+    # --- exir family (Rayan HamAfza): cookie + X-App-N adapter. The ephoenix
+    # path below is left BYTE-FOR-BYTE unchanged; only non-ephoenix codes divert
+    # here. Family is data-driven from the rendered config (broker_family).
+    from broker_adapters import get_adapter, resolve_family
+    if resolve_family(broker_code, config_section) == "exir":
+        adapter = get_adapter(
+            broker_code,
+            username=username,
+            password=password,
+            config_section=config_section,
+            captcha_decoder=decode_captcha,
+            cache=cache_manager,
+        )
+        prepared = adapter.prepare_order(isin=isin, side=side, config_section=config_section)
+        logger.info(
+            f"✓ Exir order prepared: {username}@{broker_code} "
+            f"{'Buy' if side == 1 else 'Sell'} {isin} "
+            f"price={prepared.price:,} vol={prepared.volume:,}"
+        )
+        logger.info(f"{'='*80}\n")
+        OrderData = namedtuple(
+            'OrderData',
+            'order_url token data username broker_code isin side api_client signer cookies',
+        )
+        return OrderData(
+            order_url=prepared.order_url,
+            token=prepared.bearer_token,
+            data=prepared.body,
+            username=username,
+            broker_code=broker_code,
+            isin=isin,
+            side=side,
+            api_client=None,
+            signer=prepared.signer,
+            cookies=prepared.cookies,
+        )
+
     # Validate broker code
     if not BrokerCode.is_valid(broker_code):
         raise ValueError(f"Invalid broker code: {broker_code}")
@@ -359,7 +396,10 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
     logger.info(f"  Total: {price * volume:,.0f} Rials")
     logger.info(f"{'='*80}\n")
 
-    OrderData = namedtuple('OrderData', 'order_url token data username broker_code isin side api_client')
+    OrderData = namedtuple(
+        'OrderData',
+        'order_url token data username broker_code isin side api_client signer cookies',
+    )
     return OrderData(
         order_url=endpoints['order'],
         token=token,
@@ -368,16 +408,32 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
         broker_code=broker_code,
         isin=isin,
         side=side,
-        api_client=api_client
+        api_client=api_client,
+        signer=None,    # ephoenix uses a static Bearer header (no per-request signer)
+        cookies=None,
     )
 
 # Market open timing threshold (parsed once at module level)
 MARKET_OPEN_THRESHOLD = datetime.strptime('08:44:58.500', '%H:%M:%S.%f').time()
 class TradingUser(HttpUser):
     """Base Locust user for trading operations."""
-    
+
     abstract = True
-    
+
+    # Defaults so place_order's family branch is safe even if populate() isn't
+    # called: ephoenix leaves these None (static Bearer header); exir overrides
+    # them with a per-request X-App-N signer + the login cookies.
+    signer = None
+    exir_cookies = None
+
+    def on_start(self):
+        """Carry the exir login cookies onto the locust HTTP client once, off the
+        hot path. No-op for ephoenix (exir_cookies is None)."""
+        cookies = getattr(self, "exir_cookies", None)
+        if cookies:
+            for _k, _v in cookies.items():
+                self.client.cookies.set(_k, _v)
+
     def populate(self, order_data: namedtuple):
         """
         Populate user with order data.
@@ -393,7 +449,9 @@ class TradingUser(HttpUser):
         self.isin = order_data.isin
         self.side = order_data.side
         self.api_client = order_data.api_client
-    
+        self.signer = getattr(order_data, "signer", None)
+        self.exir_cookies = getattr(order_data, "cookies", None)
+
     @task
     def place_order(self):
         """
@@ -412,17 +470,30 @@ class TradingUser(HttpUser):
         try:
             task_logger.info(f"Placing order for {self.username}@{self.broker_code}")
 
-            response = self.client.request(
-                method="POST",
-                url=self.order_url,
-                name=f"{self.username}@{self.broker_code}",
-                data=self.order_json,
-                headers={
+            if self.signer is None:
+                # EPHOENIX — static Bearer header (unchanged from before the split).
+                headers = {
                     "authorization": f"Bearer {self.token}",
                     'Content-Type': 'application/json',
                     'Accept': 'application/json',
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 }
+            else:
+                # EXIR — cookie auth (carried onto self.client in on_start) plus a
+                # FRESH per-request X-App-N signature (pure arithmetic, no I/O).
+                headers = {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                }
+                headers.update(self.signer())
+
+            response = self.client.request(
+                method="POST",
+                url=self.order_url,
+                name=f"{self.username}@{self.broker_code}",
+                data=self.order_json,
+                headers=headers
             )
 
             if response.status_code == 200:
@@ -688,7 +759,15 @@ def _create_user_classes():
                 'username': order_data.username,
                 'broker_code': order_data.broker_code,
                 'isin': order_data.isin,
+                'side': order_data.side,  # read by place_order's fire-log key
                 'api_client': order_data.api_client,
+                # exir per-request X-App-N signer — staticmethod so ``self.signer``
+                # is NOT bound (we call it with no args). None for ephoenix.
+                'signer': (
+                    staticmethod(order_data.signer)
+                    if order_data.signer is not None else None
+                ),
+                'exir_cookies': order_data.cookies,  # set onto self.client in on_start
                 '__module__': __name__,  # Explicitly set module
                 '__qualname__': unique_class_name,  # Explicitly set qualified name
             })

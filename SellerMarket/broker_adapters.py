@@ -1,0 +1,120 @@
+"""Broker-adapter abstraction for the trading bot (Phase 2 of the Exir feature).
+
+This is the bot-side seam that lets one locust hot path drive two structurally
+different broker families:
+
+* **ephoenix** — static ``Authorization: Bearer`` header; order body is the
+  ISIN-keyed NewOrder payload. The adapter is a thin wrapper around the existing
+  :class:`EphoenixAPIClient` flow, reproducing today's ``prepare_order_data``
+  byte-for-byte so nothing about the live ephoenix path changes.
+* **exir** — cookie session + a per-request, second-granular ``X-App-N``
+  signature (no Bearer). Price has no instrument endpoint, so it is carried in
+  config.
+
+The seam is :class:`PreparedOrder`: a family-agnostic description of exactly
+one order request. The hot-path caller (in ``locustfile_new.py``, owned by the
+parent agent) reads ``order_url``/``body`` and applies whichever auth mechanism
+is populated — ``bearer_token`` for ephoenix, or ``signer()`` + ``cookies`` for
+exir. Whichever the family doesn't use is ``None``.
+
+This package is a FLAT layout (the Dockerfile does ``COPY *.py ./``), so this is
+a top-level module, not a sub-package.
+"""
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
+
+from broker_enum import BrokerCode
+
+
+@dataclass
+class PreparedOrder:
+    """Family-agnostic description of a single ready-to-fire order request.
+
+    The locust hot path turns this into one HTTP POST. Exactly one auth
+    mechanism is populated per family; the other fields are ``None``:
+
+    * ephoenix → ``bearer_token`` set, ``signer``/``cookies`` ``None``.
+    * exir     → ``signer`` + ``cookies`` set, ``bearer_token`` ``None``.
+    """
+
+    order_url: str
+    body: str                                 # json-encoded order payload
+    bearer_token: Optional[str]               # ephoenix: the Bearer; exir: None
+    signer: Optional[Callable[[], dict]]      # exir: ()->{"X-App-N": ...}; ephoenix: None
+    cookies: Optional[dict]                   # exir: session cookies for self.client; ephoenix: None
+    price: float
+    volume: int
+
+
+class BrokerAdapter(ABC):
+    """Common contract for a broker family.
+
+    Subclasses set :attr:`family` and implement :meth:`prepare_order`, which does
+    all the slow, network-bound work (auth, sizing, payload build) OFF the hot
+    path and returns a :class:`PreparedOrder`. ``prepare_order`` is allowed to
+    raise on any failure (auth/credentials/no-holdings/missing-price); the caller
+    marks the locust user failed, exactly as the current ephoenix auth failure
+    does today.
+    """
+
+    family: str
+
+    @abstractmethod
+    def prepare_order(self, *, isin: str, side: int, config_section: dict) -> PreparedOrder:
+        ...
+
+
+def resolve_family(broker_code: str, config_section: dict) -> str:
+    """Resolve the broker family for ``broker_code``.
+
+    Data-driven: trust ``config_section['broker_family']`` when present (the mgmt
+    UI renders it per stack), otherwise fall back to
+    :meth:`BrokerCode.family`, which defaults to ``"ephoenix"``.
+    """
+    fam = (config_section or {}).get("broker_family")
+    if fam:
+        return str(fam).strip().lower()
+    return BrokerCode.family(broker_code)
+
+
+def get_adapter(
+    broker_code: str,
+    *,
+    username: str,
+    password: str,
+    config_section: dict,
+    captcha_decoder: Callable[[str], str],
+    cache: Any = None,
+) -> BrokerAdapter:
+    """Factory: pick + construct the adapter for ``broker_code``.
+
+    Resolves the family (config-first, enum fallback) and returns the matching
+    adapter. Imports of the concrete adapters are local so importing this module
+    stays cheap and avoids any import cycle.
+    """
+    family = resolve_family(broker_code, config_section)
+
+    if family == "exir":
+        from exir_adapter import ExirAdapter
+
+        return ExirAdapter(
+            broker_code=broker_code,
+            username=username,
+            password=password,
+            captcha_decoder=captcha_decoder,
+            cache=cache,
+        )
+
+    # Default / "ephoenix": preserve today's behaviour for every known broker.
+    from ephoenix_adapter import EphoenixAdapter
+
+    return EphoenixAdapter(
+        broker_code=broker_code,
+        username=username,
+        password=password,
+        captcha_decoder=captcha_decoder,
+        cache=cache,
+    )
