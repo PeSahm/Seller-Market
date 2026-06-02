@@ -33,6 +33,8 @@ from app.models.broker_orders import BrokerOrder
 from app.models.customers import Customer
 from app.security import crypto
 from app.services import broker_client
+from app.services.brokers._jalali import parse_jalali_datetime
+from app.services.brokers.registry import UnknownBrokerError, family_of
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +89,30 @@ def _parse_dt(value: Optional[str]) -> Optional[datetime]:
 def map_getorders_row(row: dict, customer: Customer) -> dict:
     """Map one raw GetOrders row to ``broker_orders`` column values.
 
+    Family-aware dispatcher: the wire shape of the row differs by broker
+    family (ephoenix vs exir), but both map onto the SAME ``broker_orders``
+    column set. We resolve the family from the customer's broker code via the
+    warm registry cache and route to the matching mapper. An unknown code
+    (cache miss / brand-new broker) falls back to the ephoenix shape, which
+    is the historical default.
+
     Attribution: ``customer`` is the account we queried with, so it owns
-    every row. We still record ``pam_code`` for audit.
+    every row regardless of family. We still record ``pam_code`` for audit.
+    """
+    try:
+        fam = family_of(customer.broker)
+    except UnknownBrokerError:
+        fam = "ephoenix"
+    if fam == "exir":
+        return _map_exir_row(row, customer)
+    return _map_ephoenix_row(row, customer)
+
+
+def _map_ephoenix_row(row: dict, customer: Customer) -> dict:
+    """Map one ephoenix ``GetOrders`` row to ``broker_orders`` column values.
+
+    This is the original, unchanged ephoenix mapping (the only family before
+    Exir). Field names match the ephoenix GetOrders wire shape.
     """
     return {
         "customer_id": customer.id,
@@ -117,6 +141,96 @@ def map_getorders_row(row: dict, customer: Customer) -> dict:
         "placed_at": _parse_dt(row.get("date")),
         "created_at_broker": _parse_dt(row.get("created")),
         "execution_date": _parse_dt(row.get("executionDate")),
+        "raw_json": row,
+    }
+
+
+def _int_or_zero(value: Any) -> int:
+    """Coerce a JSON-ish numeric to ``int``; 0 on junk/None (mirrors the
+    ephoenix mapper's ``int(row.get(...) or 0)`` tolerance for the Exir
+    rows, whose quantities arrive as native numbers but may be absent)."""
+    if value is None:
+        return 0
+    try:
+        return int(Decimal(str(value)))
+    except (InvalidOperation, ValueError, TypeError):
+        return 0
+
+
+def _map_exir_row(row: dict, customer: Customer) -> dict:
+    """Map one Exir ``orderbookReport`` row to ``broker_orders`` column values.
+
+    Returns the SAME dict shape as :func:`_map_ephoenix_row` so the upsert and
+    the downstream report don't care which family produced the row. Field
+    sources are the Exir wire keys documented in ``scratch/EXIR_FINDINGS.md``.
+
+    Exir has no global serial in the orderbook report (``serial_number`` =
+    ``None``) and no separate broker order id distinct from the dedup key, so
+    ``broker_order_id`` mirrors ``mmtpOrderId``. Datetimes arrive as Jalali
+    ``"YYYY/MM/DD-HH:mm:ss"`` strings and are parsed to tz-aware Gregorian via
+    :func:`parse_jalali_datetime`.
+    """
+    tracking = _int_or_zero(row.get("mmtpOrderId"))
+    isin = row.get("insMaxLCode") or ""
+    # orderSideName: "خريد"/"خرید" = buy (خ), "فروش" = sell (ف). Match on the
+    # first letter so the Arabic-vs-Persian yeh spelling doesn't matter.
+    side_name = str(row.get("orderSideName", ""))
+    # Map ONLY explicit prefixes: خ = buy (خريد/خرید), ف = sell (فروش). Anything
+    # else (blank / unexpected) → 0 = unknown side. 0 won't be matched as a buy
+    # or a sell by profit matching, which is safer than defaulting an unknown
+    # value to a (false) sell.
+    order_side = 1 if side_name.startswith("خ") else (2 if side_name.startswith("ف") else 0)
+    # entryDateTime is the only timestamp Exir gives us; use it for placement
+    # AND sub-second placement (no separate "created"). Filled rows have no
+    # explicit execution timestamp in the report → execution_date stays None.
+    # parse_jalali_datetime returns a Tehran-aware (+03:30) datetime. Re-label it
+    # UTC WITHOUT shifting the wall-clock numerals so it matches the ephoenix
+    # convention (_parse_dt also stores Tehran wall-clock labeled UTC). Otherwise
+    # the two families' placed_at would be 3.5h apart in absolute terms and the
+    # UTC-boundary date-range filters (list_orders / build_fee_report) would
+    # classify the same local date inconsistently near midnight.
+    entry_dt = parse_jalali_datetime(row.get("entryDateTime") or "")
+    if entry_dt is not None:
+        entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+    # remainingQuantity == 0 means fully filled (ephoenix's isDone equivalent).
+    is_done = _int_or_zero(row.get("remainingQuantity")) == 0
+    return {
+        "customer_id": customer.id,
+        "agent_id": customer.agent_id,
+        "broker": customer.broker,
+        "account_username": customer.username,
+        # Exir's accountNumber ends with the username — same role as ephoenix
+        # pamCode (audit only; attribution is by the queried customer).
+        "pam_code": (
+            str(row.get("accountNumber")) if row.get("accountNumber") is not None else None
+        ),
+        "tracking_number": tracking,
+        # No distinct broker order id field; reuse the dedup key for the
+        # cross-reference column rather than leave it null.
+        "broker_order_id": tracking or None,
+        "serial_number": None,  # Exir orderbookReport carries no serialNumber
+        "isin": isin,
+        # insMaxLCode IS the ISIN; Exir has no short ticker in this feed, so we
+        # use the same code for ``symbol`` and the Persian name for the title.
+        "symbol": isin or None,
+        "symbol_title": row.get("farsiName") or None,
+        "order_side": order_side,
+        "price": _decimal_from(row.get("price")),
+        "volume": _int_or_zero(row.get("quantity")),
+        "executed_volume": _int_or_zero(row.get("tradedQuantity")),
+        # Exir reports no per-order fee in the orderbook; the fee report
+        # COALESCEs NULLs, so None is safe (won't be coerced to 0).
+        "total_fee": None,
+        "executed_amount": _decimal_from(row.get("totalValue")),
+        "net_traded_value": _decimal_from(row.get("pureValue")),
+        # We only ingest filled rows for the report; stamp state=3 to satisfy
+        # profit_report's ``state == 3`` filter (matches EXIR_FINDINGS note).
+        "state": 3,
+        "state_desc": row.get("mmtpOrderStatusName") or None,
+        "is_done": is_done,
+        "placed_at": entry_dt,
+        "created_at_broker": entry_dt,
+        "execution_date": None,  # no execution timestamp in the orderbook feed
         "raw_json": row,
     }
 
@@ -244,7 +358,11 @@ async def _upsert_order(db: AsyncSession, values: dict) -> bool:
             set_[col] = excluded
     set_["fetched_at"] = func.now()
     stmt = stmt.on_conflict_do_update(
-        index_elements=[BrokerOrder.tracking_number],
+        # Per-broker dedup: Exir mmtpOrderId and ephoenix trackingNumber are
+        # independent id namespaces, so a GLOBAL unique on tracking_number could
+        # match (and overwrite) a different broker's/customer's row. Scope the
+        # conflict to (broker, tracking_number) — see migration 0009.
+        index_elements=[BrokerOrder.broker, BrokerOrder.tracking_number],
         set_=set_,
     ).returning(literal_column("(xmax = 0)"))
     inserted = (await db.execute(stmt)).scalar_one()

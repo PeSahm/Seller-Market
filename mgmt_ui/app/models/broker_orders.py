@@ -39,11 +39,17 @@ class BrokerOrder(Base):
       ``executed_amount``, ``net_traded_value``, ``pam_code``) that the fee
       report needs.
 
-    Idempotency: ``tracking_number`` is UNIQUE and the reconciler upserts with
-    ``ON CONFLICT (tracking_number) DO UPDATE`` — GetOrders is a poll of
-    mutable broker state (``executed_volume`` / ``state`` / fees change as an
-    order fills), so we refresh the mutable fields on each fetch but never
-    rewrite the immutable ``created_at_broker`` / ``first_seen_at``.
+    Idempotency: the dedup key is ``(broker, tracking_number)`` (UNIQUE) and the
+    reconciler upserts with ``ON CONFLICT (broker, tracking_number) DO UPDATE`` —
+    GetOrders is a poll of mutable broker state (``executed_volume`` / ``state`` /
+    fees change as an order fills), so we refresh the mutable fields on each fetch
+    but never rewrite the immutable ``created_at_broker`` / ``first_seen_at``.
+
+    The key is scoped to ``broker`` (not globally unique on ``tracking_number``)
+    because different broker families assign order ids from INDEPENDENT namespaces
+    (ephoenix ``trackingNumber`` vs Exir ``mmtpOrderId``); a global unique would
+    let an Exir id collide with — and silently overwrite — a different broker's /
+    customer's row (migration 0009).
     """
 
     __tablename__ = "broker_orders"
@@ -73,9 +79,9 @@ class BrokerOrder(Base):
     broker: Mapped[str] = mapped_column(String(255), nullable=False)
     account_username: Mapped[str] = mapped_column(String(255), nullable=False)
     pam_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    tracking_number: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, unique=True
-    )
+    # NOT globally unique — uniqueness is scoped to ``(broker, tracking_number)``
+    # via the table-level constraint below (see class docstring / migration 0009).
+    tracking_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # The GetOrders row's own ``id`` field — kept for cross-referencing the
     # broker UI; NOT the dedup key (tracking_number is).
     broker_order_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
@@ -138,6 +144,11 @@ class BrokerOrder(Base):
     )
 
     __table_args__ = (
+        # Per-broker dedup key (see migration 0009). Order ids are only unique
+        # within the broker that issued them, not across families.
+        sa.UniqueConstraint(
+            "broker", "tracking_number", name="uq_broker_orders_broker_tracking"
+        ),
         sa.Index(
             "ix_broker_orders_customer_isin_side_state",
             "customer_id",

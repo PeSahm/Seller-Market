@@ -8,6 +8,7 @@ from app.models.servers import Server, ServerClockSkewSample
 from app.models.settings import Setting
 from app.models.stacks import AgentStack
 from app.models.customers import Customer, DistributionPolicy
+from app.models.brokers import Broker
 from app.models.scheduler import SchedulerJob, LocustConfig
 from app.models.runs import Run, StackRunLock, IngestCursor
 from app.models.trades import TradeResult
@@ -26,6 +27,7 @@ __all__ = [
     "AgentStack",
     "Customer",
     "DistributionPolicy",
+    "Broker",
     "SchedulerJob",
     "LocustConfig",
     "Run",

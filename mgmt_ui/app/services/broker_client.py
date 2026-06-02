@@ -31,10 +31,16 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from dataclasses import dataclass
 from typing import Optional
 
 import httpx
+
+# VerifyResult / IsinInfo historically lived in this module. They now live in
+# app.services.brokers.base (shared across families); re-export them here so
+# existing callers/tests that do ``from app.services.broker_client import
+# VerifyResult`` keep working unchanged.
+from app.services.brokers.base import IsinInfo, VerifyResult  # noqa: F401  (re-export)
+from app.services.brokers import registry
 
 logger = logging.getLogger(__name__)
 
@@ -89,46 +95,6 @@ def _token_cache_put(broker_code: str, username: str, password: str, token: str)
 def _token_cache_drop(broker_code: str, username: str, password: str) -> None:
     key = (broker_code, username, _password_fingerprint(password))
     _TOKEN_CACHE.pop(key, None)
-
-
-@dataclass
-class VerifyResult:
-    """Outcome of a credential verification.
-
-    Exactly one of ``ok=True`` (with ``full_name`` populated) or
-    ``ok=False`` (with ``error`` populated) holds. The other broker-side
-    sanity fields are populated only on success.
-    """
-
-    ok: bool
-    full_name: Optional[str] = None
-    national_id: Optional[str] = None
-    bourse_code: Optional[str] = None
-    type_: Optional[str] = None
-    message: Optional[str] = None  # broker's human-readable status, even on success
-    error: Optional[str] = None  # operator-facing error explanation
-
-
-@dataclass
-class IsinInfo:
-    """Outcome of an ISIN lookup against the broker's market_data endpoint.
-
-    Same ``ok=True`` / ``ok=False`` shape as :class:`VerifyResult`. On
-    success the operator sees the broker-side ``symbol`` + ``title`` so
-    they can confirm they typed the right instrument; price + volume
-    bounds round out the sanity card.
-    """
-
-    ok: bool
-    isin: Optional[str] = None
-    symbol: Optional[str] = None
-    title: Optional[str] = None
-    last_price: Optional[float] = None
-    min_price: Optional[float] = None
-    max_price: Optional[float] = None
-    max_volume: Optional[int] = None
-    min_volume: Optional[int] = None
-    error: Optional[str] = None
 
 
 def _endpoints_for(broker_code: str) -> dict[str, str]:
@@ -367,7 +333,7 @@ async def _fetch_customer_info(
     )
 
 
-async def verify_credentials(
+async def _ephoenix_verify_credentials(
     broker_code: str,
     username: str,
     password: str,
@@ -453,7 +419,7 @@ async def verify_credentials(
         )
 
 
-async def verify_isin(
+async def _ephoenix_verify_isin(
     broker_code: str,
     username: str,
     password: str,
@@ -596,7 +562,7 @@ _ORDERS_MAX_PAGES = 500
 _ORDERS_HTTP_TIMEOUT_S = 30.0
 
 
-async def get_orders(
+async def _ephoenix_get_orders(
     broker_code: str,
     username: str,
     password: str,
@@ -725,3 +691,163 @@ async def get_orders(
             page += 1
 
     return rows, None
+
+
+# ---------------------------------------------------------------------------
+# Family routing dispatchers
+# ---------------------------------------------------------------------------
+#
+# All 11 current brokers are the ephoenix family (the implementations above).
+# A new "exir" family is dispatched to ``app.services.brokers.exir``. The
+# public function names + signatures below are UNCHANGED from before the
+# family split, so callers/tests that ``from app.services.broker_client import
+# verify_credentials`` keep working.
+#
+# ``_family`` resolves a broker code to its family via the registry. The ephoenix
+# bodies stay in THIS module, so tests that patch internals like
+# ``broker_client._solve_captcha`` / ``broker_client._endpoints_for`` continue to
+# affect the ephoenix branch as before.
+
+
+# The 11 brokers that predate the DB-managed ``brokers`` table. They are the ONLY
+# codes allowed to fall back to ephoenix when the registry can't resolve a family
+# (cold cache / DB unavailable). Any other code — notably an Exir tenant — is NOT
+# in this set, so a resolution failure SURFACES as an error instead of silently
+# routing a non-ephoenix broker through the wrong adapter (CodeRabbit). Unit tests
+# that don't seed the brokers table use these codes (e.g. "ayandeh").
+_LEGACY_EPHOENIX_CODES = frozenset(
+    {
+        "gs", "bbi", "shahr", "ib", "karamad", "tejarat",
+        "ebb", "hbc", "rabin", "ayandeh", "farabi",
+    }
+)
+
+
+async def _family(broker_code: str) -> str:
+    """Resolve a broker code to its family via the registry.
+
+    On the normal path the warm DB-backed cache returns the family. If
+    resolution is unavailable (cold cache / DB down / unknown code) we fall back
+    to ``"ephoenix"`` ONLY for a known legacy ephoenix code — for any other code
+    the error propagates so the dispatchers below return a clean per-call error
+    rather than silently misrouting (e.g.) an Exir broker through ephoenix.
+    """
+    try:
+        await registry.ensure_family_cache()
+        return registry.family_of(broker_code)
+    except Exception:
+        if broker_code in _LEGACY_EPHOENIX_CODES:
+            return "ephoenix"
+        raise
+
+
+async def verify_credentials(
+    broker_code: str,
+    username: str,
+    password: str,
+    ocr_service_url: str,
+) -> VerifyResult:
+    """Verify broker credentials, routing by broker family.
+
+    ephoenix (the default) keeps its in-module implementation; exir is
+    delegated to its adapter. Signature is identical to the pre-split public
+    ``verify_credentials``.
+    """
+    try:
+        family = await _family(broker_code)
+    except Exception as exc:  # noqa: BLE001 — surface, don't misroute
+        return VerifyResult(
+            ok=False,
+            error=f"could not resolve broker family for {broker_code!r}: {exc}",
+        )
+    if family == "exir":
+        from app.services.brokers.exir import ExirAdapter
+
+        return await ExirAdapter(broker_code).verify_credentials(
+            username, password, ocr_service_url
+        )
+    return await _ephoenix_verify_credentials(
+        broker_code, username, password, ocr_service_url
+    )
+
+
+async def verify_isin(
+    broker_code: str,
+    username: str,
+    password: str,
+    isin: str,
+    ocr_service_url: str,
+) -> IsinInfo:
+    """Look up an instrument, routing by broker family.
+
+    Signature is identical to the pre-split public ``verify_isin``.
+    """
+    try:
+        family = await _family(broker_code)
+    except Exception as exc:  # noqa: BLE001 — surface, don't misroute
+        return IsinInfo(
+            ok=False,
+            error=f"could not resolve broker family for {broker_code!r}: {exc}",
+        )
+    if family == "exir":
+        from app.services.brokers.exir import ExirAdapter
+
+        return await ExirAdapter(broker_code).verify_isin(
+            username, password, isin, ocr_service_url
+        )
+    return await _ephoenix_verify_isin(
+        broker_code, username, password, isin, ocr_service_url
+    )
+
+
+async def get_orders(
+    broker_code: str,
+    username: str,
+    password: str,
+    ocr_service_url: str,
+    *,
+    from_date: str,
+    to_date: str,
+    side: Optional[int] = None,
+    isin: Optional[str] = None,
+    include_status: Optional[list[int]] = None,
+    page_size: int = _ORDERS_PAGE_SIZE,
+    max_pages: int = _ORDERS_MAX_PAGES,
+) -> tuple[list[dict], Optional[str]]:
+    """Fetch the account's order history, routing by broker family.
+
+    Signature (incl. the keyword-only block) is identical to the pre-split
+    public ``get_orders``.
+    """
+    try:
+        family = await _family(broker_code)
+    except Exception as exc:  # noqa: BLE001 — surface, don't misroute the sweep
+        return [], f"could not resolve broker family for {broker_code!r}: {exc}"
+    if family == "exir":
+        from app.services.brokers.exir import ExirAdapter
+
+        return await ExirAdapter(broker_code).get_orders(
+            username,
+            password,
+            ocr_service_url,
+            from_date=from_date,
+            to_date=to_date,
+            side=side,
+            isin=isin,
+            include_status=include_status,
+            page_size=page_size,
+            max_pages=max_pages,
+        )
+    return await _ephoenix_get_orders(
+        broker_code,
+        username,
+        password,
+        ocr_service_url,
+        from_date=from_date,
+        to_date=to_date,
+        side=side,
+        isin=isin,
+        include_status=include_status,
+        page_size=page_size,
+        max_pages=max_pages,
+    )

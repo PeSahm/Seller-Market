@@ -15,6 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.models.users import User
 from app.routers import admin as admin_router
 from app.routers import agent as agent_router
+from app.routers import brokers_admin as brokers_admin_router
 from app.routers import auth as auth_router
 from app.routers import health as health_router
 from app.routers.ws import run_stream as ws_run_stream
@@ -71,6 +72,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router.router)
     app.include_router(auth_router.router)
     app.include_router(admin_router.router)
+    app.include_router(brokers_admin_router.router)
     app.include_router(agent_router.router)
     app.include_router(ws_run_stream.router)
 
@@ -115,6 +117,15 @@ def create_app() -> FastAPI:
             "found" if part2_present else "missing(dev fallback)",
             settings.fernet_key_part2_path,
         )
+
+    @app.on_event("startup")
+    async def _warm_broker_family_cache() -> None:
+        from app.services.brokers.registry import warm_family_cache
+
+        try:
+            await warm_family_cache()
+        except Exception:
+            logger.exception("failed to warm broker family cache at startup")
 
     # --------------------------------------------------------------
     # Background workers

@@ -48,6 +48,7 @@ from app.services import agents as services_agents
 from app.services import audit as services_audit
 from app.services import broker_client
 from app.services import broker_orders as services_broker_orders
+from app.services import brokers_admin
 from app.services import customers as services_customers
 from app.services import fee_export
 from app.services import profit_report as services_profit_report
@@ -674,6 +675,11 @@ async def admin_customers(
     ctx["filter_broker"] = broker
     ctx["filter_q"] = q or ""
     ctx["all_agents"] = list(agents.values())
+    # The LIST filter must include disabled brokers so operators can still
+    # filter down to legacy accounts that reference a now-disabled broker.
+    # (Create/edit forms keep ``list_enabled_grouped`` — they must only offer
+    # enabled brokers.)
+    ctx["broker_groups"] = await brokers_admin.list_all_grouped(db)
     return templates.TemplateResponse("admin/customers.html", ctx)
 
 
@@ -712,6 +718,7 @@ async def admin_customer_new(
     agents = await services_agents.list_agents(db)
     ctx = _ctx(request, user, current_tab="/admin/customers")
     ctx["agents"] = agents
+    ctx["broker_groups"] = await brokers_admin.list_enabled_grouped(db)
     ctx["form_error"] = None
     ctx["form_values"] = {}
     ctx["mode"] = "create"
@@ -754,6 +761,7 @@ async def admin_customer_create(
         agents = await services_agents.list_agents(db)
         ctx = _ctx(request, user, current_tab="/admin/customers")
         ctx["agents"] = agents
+        ctx["broker_groups"] = await brokers_admin.list_enabled_grouped(db)
         ctx["form_error"] = (
             "Invalid input. Please review the form fields and try again."
         )
@@ -781,6 +789,7 @@ async def admin_customer_create(
         agents = await services_agents.list_agents(db)
         ctx = _ctx(request, user, current_tab="/admin/customers")
         ctx["agents"] = agents
+        ctx["broker_groups"] = await brokers_admin.list_enabled_grouped(db)
         ctx["form_error"] = str(exc)
         ctx["form_values"] = sticky
         ctx["mode"] = "create"
@@ -1028,6 +1037,7 @@ async def admin_customer_edit_form(
     ctx = _ctx(request, user, current_tab="/admin/customers")
     ctx["customer"] = customer
     ctx["agent"] = agent
+    ctx["broker_groups"] = await brokers_admin.list_enabled_grouped(db)
     ctx["form_error"] = None
     ctx["form_values"] = form_values
     ctx["mode"] = "edit"
@@ -1082,6 +1092,10 @@ async def admin_customer_update(
         "version": customer.version,
     }
     _agent_username_snap = agent.username if agent is not None else None
+    # Fetch the grouped broker list once up-front; the (sync) error renderer
+    # closure below can't await, and re-rendering the form needs it for the
+    # dropdown's optgroups.
+    _broker_groups = await brokers_admin.list_enabled_grouped(db)
 
     def _render_with_error(message: str, code: int):
         form_values = {
@@ -1094,6 +1108,7 @@ async def admin_customer_update(
         ctx = _ctx(request, user, current_tab="/admin/customers")
         ctx["customer"] = SimpleNamespace(**_customer_snap)
         ctx["agent"] = SimpleNamespace(username=_agent_username_snap) if agent is not None else None
+        ctx["broker_groups"] = _broker_groups
         ctx["form_error"] = message
         ctx["form_values"] = form_values
         ctx["mode"] = "edit"
@@ -1130,6 +1145,11 @@ async def admin_customer_update(
         # ``page_shell.html`` will trigger a sync lazy-load that explodes.
         # Refresh proactively so the renderer never reaches for the wire.
         await db.refresh(user)
+        # The duplicate-tuple rollback inside update_customer ALSO expired the
+        # pre-fetched ``_broker_groups`` Broker ORM rows (rollback expires every
+        # loaded instance). Re-fetch them post-rollback so the sync optgroup
+        # render doesn't lazy-load and re-trigger the PR #73 MissingGreenlet 500.
+        _broker_groups = await brokers_admin.list_enabled_grouped(db)
         return _render_with_error(str(exc), status.HTTP_400_BAD_REQUEST)
 
     # Push the updated config.ini so the next bot run reads the new field

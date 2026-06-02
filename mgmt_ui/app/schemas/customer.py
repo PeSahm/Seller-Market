@@ -22,9 +22,17 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# The Iranian brokers supported by SellerMarket today. Kept in sync with
-# :class:`SellerMarket.broker_enum.BrokerCode` — if a broker is added there
-# this tuple (and the ``Broker`` ``Literal``) must be widened too.
+# NOTE: the source of truth for valid brokers is now the ``brokers`` DB table
+# (see :mod:`app.models.brokers` / :mod:`app.services.brokers_admin`). The
+# customer schemas validate ``broker`` as a free string (``min_length>=1``) and
+# the SERVICE layer (:func:`app.services.customers.create_customer` /
+# ``update_customer``) checks it against that table — so DB-managed codes
+# (including Exir tenants and any operator-added broker) validate without a code
+# change here. The ``BROKERS`` tuple and ``Broker`` ``Literal`` below are kept
+# only for backwards-compat imports (e.g. existing tests); they are NO LONGER
+# used for field validation.
+#
+# Historical list, kept in sync with :class:`SellerMarket.broker_enum.BrokerCode`.
 BROKERS = (
     "gs",
     "bbi",
@@ -66,7 +74,9 @@ class CustomerCreate(BaseModel):
     """
 
     display_name: str = Field(min_length=1, max_length=255)
-    broker: Broker
+    # Free-string broker code: validated against the ``brokers`` table in the
+    # service layer (not a closed Literal here) so DB-managed codes pass.
+    broker: str = Field(min_length=1, max_length=64)
     username: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=1, max_length=512)
 
@@ -88,7 +98,8 @@ class CustomerUpdate(BaseModel):
     """
 
     display_name: Optional[str] = Field(default=None, min_length=1, max_length=255)
-    broker: Optional[Broker] = None
+    # Free-string broker code (DB-validated in the service layer; see above).
+    broker: Optional[str] = Field(default=None, min_length=1, max_length=64)
     username: Optional[str] = Field(default=None, min_length=1, max_length=255)
     # ``password`` is only set when the caller chose to rotate it. The service
     # layer Fernet-encrypts the value into ``password_enc``.

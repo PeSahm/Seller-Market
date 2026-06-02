@@ -1,0 +1,86 @@
+{% extends "partials/page_shell.html" %}
+{% set is_edit = (mode == "edit") %}
+{% block page_title %}{{ "Edit broker" if is_edit else "Add broker" }}{% endblock %}
+
+{% block page_body %}
+<h1 class="h1">{{ "Edit broker" if is_edit else "Add broker" }}</h1>
+<p class="text-muted text-small">
+  {% if is_edit %}
+    The <code>code</code> is immutable — customers reference it by value.
+    You can change the label, family, sort order, and enabled state.
+  {% else %}
+    Register a broker within a known family. Adding a broker is a pure DB
+    insert — no image rebuild. The <code>code</code> is lowercased and must be
+    unique.
+  {% endif %}
+</p>
+
+{% if form_error %}
+<div class="flash flash--error">
+  <strong>✗ Could not save</strong>
+  <p class="text-small">{{ form_error }}</p>
+</div>
+{% endif %}
+
+{% set fv = form_values|default({}) %}
+
+<form class="broker-form" method="post"
+      action="{{ ('/admin/brokers/' ~ broker.id) if is_edit else '/admin/brokers' }}">
+  {% include "partials/csrf.html" %}
+
+  <div class="field">
+    <label class="label" for="code">Code</label>
+    <input class="input" id="code" name="code"
+           value="{{ fv.code|default('') }}"
+           {% if is_edit %}readonly{% else %}required{% endif %}
+           placeholder="e.g. gs or khobregan" maxlength="64">
+    <p class="text-small text-muted">
+      Lowercased + trimmed. {% if is_edit %}Immutable after create.{% else %}
+      Must be unique.{% endif %}
+    </p>
+  </div>
+
+  <div class="field">
+    <label class="label" for="family">Family</label>
+    {% set fam = fv.family|default('ephoenix') %}
+    <select class="input" id="family" name="family">
+      <option value="ephoenix" {{ 'selected' if fam == 'ephoenix' else '' }}>ephoenix</option>
+      <option value="exir" {{ 'selected' if fam == 'exir' else '' }}>exir</option>
+    </select>
+    <p class="text-small text-muted">
+      Selects the adapter + URL shape. Families are code-bound — adding a new
+      one is a code change, not a DB value.
+    </p>
+  </div>
+
+  <div class="field">
+    <label class="label" for="label">Label</label>
+    <input class="input" id="label" name="label" required dir="auto"
+           value="{{ fv.label|default('') }}"
+           placeholder="e.g. Ghadir Shahr (Ganjine)" maxlength="255">
+    <p class="text-small text-muted">Human-friendly name shown in dropdowns.</p>
+  </div>
+
+  <div class="field">
+    <label class="radio-row">
+      <input type="checkbox" name="enabled" value="1"
+             {{ 'checked' if fv.enabled|default(True) else '' }}>
+      Enabled (appears in the create-customer dropdown)
+    </label>
+  </div>
+
+  <div class="field field--narrow">
+    <label class="label" for="sort_order">Sort order</label>
+    <input class="input" id="sort_order" name="sort_order" type="number"
+           value="{{ fv.sort_order|default(0) }}" min="0" max="9999">
+    <p class="text-small text-muted">Lower sorts first within a family.</p>
+  </div>
+
+  <div class="form-actions">
+    <a class="btn btn--ghost" href="/admin/brokers">Cancel</a>
+    <button class="btn btn--primary" type="submit">
+      {{ "Save changes" if is_edit else "Add broker" }}
+    </button>
+  </div>
+</form>
+{% endblock %}

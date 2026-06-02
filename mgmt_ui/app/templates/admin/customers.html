@@ -38,8 +38,12 @@
   </select>
   <select name="broker" class="input">
     <option value="">Any broker</option>
-    {% for b in ['gs','bbi','shahr','ib','karamad','tejarat','ebb','hbc','rabin','ayandeh','farabi'] %}
-      <option value="{{ b }}" {% if filter_broker == b %}selected{% endif %}>{{ b }}</option>
+    {% for family, brokers in broker_groups|default([]) %}
+      <optgroup label="{{ family }}">
+        {% for broker in brokers %}
+          <option value="{{ broker.code }}" {% if filter_broker == broker.code %}selected{% endif %}>{{ broker.label }}</option>
+        {% endfor %}
+      </optgroup>
     {% endfor %}
   </select>
   <button class="btn btn--ghost btn--sm" type="submit">Filter</button>

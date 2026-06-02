@@ -39,7 +39,6 @@ from app.models.stacks import AgentStack
 from app.models.users import User
 from app.routers.dashboard import _ctx, templates
 from app.schemas.customer import (
-    BROKERS,
     CustomerCreate,
     CustomerUpdate,
 )
@@ -51,6 +50,7 @@ from app.schemas.locust import LocustUpsert
 from app.schemas.scheduler import SchedulerJobUpsert
 from app.security.deps import get_current_user
 from app.services import agents as services_agents
+from app.services import brokers_admin
 from app.services import customers as services_customers
 from app.services import health_signals as services_health
 from app.services import locust_configs as services_locust
@@ -352,13 +352,14 @@ async def agent_customers(
 async def agent_customer_new(
     request: Request,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Render the "add customer" form with empty values."""
     _require_agent_or_admin(user)
     ctx = _ctx(request, user, current_tab="/agent/customers")
     ctx["form_error"] = None
     ctx["form_values"] = {}
-    ctx["brokers"] = BROKERS
+    ctx["broker_groups"] = await brokers_admin.list_enabled_grouped(db)
     ctx["mode"] = "create"
     return templates.TemplateResponse("agent/customer_form.html", ctx)
 
@@ -401,7 +402,7 @@ async def agent_customer_create(
             else str(exc)
         )
         ctx["form_values"] = sticky
-        ctx["brokers"] = BROKERS
+        ctx["broker_groups"] = await brokers_admin.list_enabled_grouped(db)
         ctx["mode"] = "create"
         return templates.TemplateResponse(
             "agent/customer_form.html",
@@ -418,7 +419,7 @@ async def agent_customer_create(
         ctx = _ctx(request, user, current_tab="/agent/customers")
         ctx["form_error"] = str(exc)
         ctx["form_values"] = sticky
-        ctx["brokers"] = BROKERS
+        ctx["broker_groups"] = await brokers_admin.list_enabled_grouped(db)
         ctx["mode"] = "create"
         return templates.TemplateResponse(
             "agent/customer_form.html",
@@ -489,7 +490,7 @@ async def agent_customer_edit_form(
         "broker": customer.broker,
         "username": customer.username,
     }
-    ctx["brokers"] = BROKERS
+    ctx["broker_groups"] = await brokers_admin.list_enabled_grouped(db)
     ctx["mode"] = "edit"
     return templates.TemplateResponse("agent/customer_form.html", ctx)
 
@@ -553,7 +554,7 @@ async def agent_customer_update(
             else str(exc)
         )
         ctx["form_values"] = sticky
-        ctx["brokers"] = BROKERS
+        ctx["broker_groups"] = await brokers_admin.list_enabled_grouped(db)
         ctx["mode"] = "edit"
         ctx["customer"] = customer
         return templates.TemplateResponse(
@@ -575,7 +576,7 @@ async def agent_customer_update(
             "Another change won the race. Reload the page and try again."
         )
         ctx["form_values"] = sticky
-        ctx["brokers"] = BROKERS
+        ctx["broker_groups"] = await brokers_admin.list_enabled_grouped(db)
         ctx["mode"] = "edit"
         ctx["customer"] = fresh
         return templates.TemplateResponse(
@@ -588,7 +589,7 @@ async def agent_customer_update(
         ctx = _ctx(request, user, current_tab="/agent/customers")
         ctx["form_error"] = str(exc)
         ctx["form_values"] = sticky
-        ctx["brokers"] = BROKERS
+        ctx["broker_groups"] = await brokers_admin.list_enabled_grouped(db)
         ctx["mode"] = "edit"
         # Use the snapshot taken before update_customer — the live ``customer``
         # object's attrs are expired after the rollback (see comment above).

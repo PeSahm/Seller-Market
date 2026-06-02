@@ -47,10 +47,25 @@
 
   <div class="field">
     <label class="label" for="broker">Broker</label>
+    {% set ns = namespace(has_selected=false) %}
     <select class="input" id="broker" name="broker" required>
-      {% for b in brokers %}
-      <option value="{{ b }}" {% if fv.broker == b %}selected{% endif %}>{{ b }}</option>
+      {% if not fv.broker %}
+      <option value="" disabled selected>— pick a broker —</option>
+      {% endif %}
+      {% for family, brokers in broker_groups|default([]) %}
+      <optgroup label="{{ family }}">
+        {% for broker in brokers %}
+        {% if fv.broker == broker.code %}{% set ns.has_selected = true %}{% endif %}
+        <option value="{{ broker.code }}" {% if fv.broker == broker.code %}selected{% endif %}>{{ broker.label }}</option>
+        {% endfor %}
+      </optgroup>
       {% endfor %}
+      {# If the customer's current broker isn't among the enabled options
+         (e.g. it was disabled after assignment), keep it so editing the
+         account doesn't silently switch its broker to the first option. #}
+      {% if fv.broker and not ns.has_selected %}
+      <option value="{{ fv.broker }}" selected>{{ fv.broker }} (current)</option>
+      {% endif %}
     </select>
   </div>
 
