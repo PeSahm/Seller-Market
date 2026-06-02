@@ -409,3 +409,54 @@ All 11 prior brokers (gs, ib, ayandeh, …) are **ONE software family** ("ephoen
 | #102 | Real Exir `buyingPower` path | The `/api/v2/user/buyingPower` `406` blocks Phase-2 BUY volume sizing — find the right endpoint/version, or carry an explicit price in config for Exir. |
 | #102 | Confirm Exir order-placement contract | `POST /api/v1/order` (decompiled): confirm `insMaxLcode`=ISIN there too + the numeric `brokerCode` (116); the sync response has no order id (ids via `wss://…/sle`) → Phase-2 fire-log keys on the date-based reconciliation, not serial. |
 | #102 | Per-broker endpoint overrides + verify-instrument for Exir | Operator chose metadata-only CRUD (code/family/label/enabled/sort); URL quirks (ib shard, gs rate-limit) still live in code. Exir `verify_isin` is a Phase-1 stub (ISIN echoed, no metadata fetch). |
+
+---
+
+## Session 5 — Exir Phase 2 (bot order-firing) built + reviewed + merged; canary mid-rollout
+
+PR map: **#103** Phase-1 mgmt (merged + **deployed live**) · **#104** Phase-2 bot order-firing (**merged**, commit `6b92c31`). Both CodeRabbit-reviewed + fixed. Branches `feat/exir-broker-family` (P1) and `feat/exir-phase2-bot` (P2).
+
+### Deploy state (where things are RIGHT NOW)
+- **mgmt UI**: `5.10.248.55:/opt/seller-market-mgmt` on revision **`019f974`** (Phase 1 + all 19 CodeRabbit fixes + the 0009 migration-id hotfix). Migrations at **`0009_bo_tracking_composite`**; `brokers` table seeded (11 ephoenix + `khobregan` exir). `/health` ok. Ephoenix acceptance verified (every customer.broker resolves in `brokers`).
+- **Bot image**: merge `6b92c31` built by `docker-publish.yml` → `ghcr.io/pesahm/seller-market:latest`. **Already pulled/staged on `5.10.248.55`** (ghcr WAS reachable from this host; `:latest` locally == `6b92c31…`). The 7 live stacks still run the OLD **`902a3dd`** until recreated.
+- **Mostafa's own stack** (`83619dcd`, dir `/root/seller-market/agents/89bb891e-ffb7-41dd-b838-56c4a1c82f59/`): running `902a3dd` healthy; config has ONE ephoenix customer `[a89bb891e_…_ayandeh_IRO1PNES0001_s1]` (ayandeh buy). It's **Mostafa's own account, not a customer's**, so it's the canary.
+
+### CANARY — the in-flight task (resume here)
+Operator approved: **keep the ayandeh ephoenix customer AND add an Exir customer**, test BOTH at the next market open (~08:45 Tehran; it was 23:14 Tue when set up → fires Wed AM). Exir test instrument = **سرود `IRO1SROD0001`** (validated; currently limit-up so a ceiling buy queues, low risk). Steps left:
+1. `cd <Mostafa stack dir> && docker compose up -d` (recreate on the staged `6b92c31`); verify the running container's revision label == `6b92c31` + healthy. (ephoenix path is byte-for-byte unchanged, so the ayandeh buy is unaffected.)
+2. In the mgmt UI: add an Exir customer — broker `khobregan` (family exir, already seeded), username `4580090306`, the password, ISIN `IRO1SROD0001`, side 1 (buy) — assign to **Mostafa's** stack; the renderer writes `broker_family = exir` into config.ini. (creds are Mostafa's own; same as repo test data.)
+3. Re-render/redeploy that stack so config.ini carries both sections; verify `broker_family = exir` line present.
+4. Wed ~08:45: watch `cache_warmup.log` + the run; confirm a clean Exir order (ceiling price, fee-adjusted vol) + the fire-log; then roll the other 6 stacks (canary → fleet).
+- **NOT yet fired any Exir order.** Everything validated read-only.
+
+### Phase-2 architecture (bot, flat top-level modules — Dockerfile `COPY *.py ./`)
+- `broker_adapters.py` (ABC + `PreparedOrder` + `get_adapter` + `resolve_family`: config `broker_family` first, ephoenix fallback), `ephoenix_adapter.py` (wraps the UNMODIFIED `api_client.py`), `exir_adapter.py`, `exir_token.py` (`build_app_n` + `make_signer` hot-path closure), `tse_price.py`.
+- `locustfile_new.py`: non-ephoenix codes divert to the adapter (**ephoenix inline block untouched**); `place_order` branches headers on `self.signer` (None ⇒ identical ephoenix Bearer; else cookie + per-request X-App-N); `on_start` puts Exir cookies on `self.client`; dynamic user class carries `side`/`signer`(**staticmethod**, else `self`-binds)/`exir_cookies`.
+- mgmt `rendering/config_ini.py` renders `broker_family` (additive; old bot ignores unknown keys → safe).
+- 15 hermetic adapter tests; ephoenix order request byte-identical.
+
+### Exir order-firing endpoints — ALL LIVE-CONFIRMED (the gold; found via Angular bundle + live probe + decompiled `CheetahRobot.Tse`)
+- **Buying power**: `GET /api/v1/user/stockInfo` → `purchaseUpperBound` (6,000,000 for khobregan acct). NOT `/api/v2/user/buyingPower` (that 406s). (`buyingPower/detail`→`buyingPowerFixIncome`, `customerRemain`→`usableCredit` corroborate.)
+- **Buy fee**: `GET /api/v2/wages/instrument/{ISIN}` → `{"<ISIN>":{"SIDE_BUY":0.003712,"SIDE_SALE":0.0088}}`. **BUY volume MUST be fee-adjusted**: `floor(BP/(price*(1+SIDE_BUY)))` (ephoenix gets this from `CalculateOrderParam`). Naive `BP//price` over-spends → broker rejects. (Live: 6M/9930 naive=604 but fee-adj=**601**.)
+- **Price band** (Exir has NO REST price — streams via Lightstreamer): use **tsetmc.com** (free, no auth), like the decompiled `TseDataFetcher`. `tse_price.py`: `GET https://old.tsetmc.com/tsev2/data/MarketWatchInit.aspx?h=0&r=0` once → parse section[2] full rows (len>20): `f[1]`=ISIN, `f[19]`=**upper band (BUY ceiling)**, `f[20]`=lower (SELL floor), `f[13]`=yest close. Values like `"9930.00"` → `int(float(x))`. (== `cdn.tsetmc.com/api/Instrument/GetInstrumentInfo/{insCode}` → `instrumentInfo.staticThreshold.psGelStaMax/Min`; GetInstrumentInfo needs the numeric insCode, NOT the ISIN.) BUY fires at ceiling, SELL at floor.
+- **`brokerCode`** (order payload): the `"b"` claim is in the **`rlcAuthHeader`** JWT (=116), NOT the `authToken` (no `b`). Fallback = response-username prefix (`"1164580090306"` − account `"4580090306"` = `116`). Guard: fail-fast if unresolved (never POST `brokerCode:null`).
+- **Holdings (SELL)**: `GET /api/v1/user/portfoReport` → `result[].insMaxLcode == ISIN` → `asset`/`remainQty`.
+- Order: `POST /api/v1/order` (decompiled) — `insMaxLcode`=ISIN, string `price`/`quantity`, `side` SIDE_BUY/SIDE_SALE, `orderType=ORDER_TYPE_LIMIT`, `validityType=VALIDITY_TYPE_DAY`. Sync resp has NO order id (ids via `wss://…/sle`) → Exir fire-log reconciles date-based, not serial.
+- Auth recap: `GET /exir` (cookiesession1) → `GET /captcha` (JPEG + `client_login_id` header→cookie) → `POST /api/v2/login {username,password,captcha:<int>,otp:""}` → `nt` seed + cookies. Every authed call needs `X-App-N` = UTC + full path+query. OCR reuses `/ocr/captcha-easy-base64`.
+
+### Discovery method (reuse next time a broker hides an endpoint)
+The Angular SPA bundle has every API path: `curl {tenant}/exir/index.html` → bundle names; `curl …/exir/main-es2015.*.js` → `grep -oE '/api/v[0-9]…'` and field names (e.g. `wages/instrument`, `purchaseUpperBound`, `maxPriceEdge`). Then live-probe with login + X-App-N. The decompiled `CheetahRobot.Tse` / `CheetahRobot.Tse.InstrumentInfo` (`TseDataFetcher.cs`, `MarketDataParser.cs`, `StaticPriceThreshold.cs`) gave the tsetmc endpoints + field layout. Reusable spikes: `SellerMarket/scratch/exir_spike.py` (env-var creds) + `EXIR_FINDINGS.md` (full contract).
+
+### Learnings (hard-won)
+- **alembic `alembic_version.version_num` is VARCHAR(32)** — revision ids MUST be ≤32 chars. `0009_broker_orders_tracking_composite` (37) crash-looped the mgmt container; alembic runs the WHOLE upgrade in ONE txn by default, so 0008+0009 BOTH rolled back to 0007. Fixed → `0009_bo_tracking_composite` (hotfix pushed direct to main, rebuilt, redeployed). **Keep migration ids short.**
+- **`broker_orders.tracking_number` is now composite UNIQUE `(broker, tracking_number)`** (mig 0009) — Exir `mmtpOrderId` ⟂ ephoenix `trackingNumber`, a global unique would let an Exir id clobber another customer's money row.
+- **Signer stored as a closure on a class attr binds `self`** → store `staticmethod(signer)` in the dynamic user-class dict.
+- **github.com is intermittently refused from this Windows host** — wrap `git push`/`gh` in retry loops (3-6×). ghcr.io reachable from `5.10.248.55`; tsetmc + `*.exirbroker.com` reachable from the Iranian VPSes.
+- **Mostafa's stack `config.ini` had only `username/password/broker/isin/side`** — the new `broker_family` line is additive; old bot ignores it.
+
+### Open follow-ups (Session 5)
+| # | Title | Why |
+|---|---|---|
+| — | **Finish the canary** (steps above) | Recreate Mostafa's stack on `6b92c31`, add the سرود/khobregan Exir customer, watch Wed open, then roll the other 6 stacks. |
+| — | Exir fire-log reconciliation | Sync order resp has no id → relies on the mgmt date-based reconcile. Confirm an Exir buy shows up in `/admin/bot-report` after the run. |
+| — | tsetmc reachability + caching on the bot hosts | `tse_price.py` caches MarketWatchInit 5 min; confirm `old.tsetmc.com` reachable from both VPSes at market open. |
