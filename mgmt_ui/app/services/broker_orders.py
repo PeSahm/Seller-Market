@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -286,6 +287,27 @@ def in_time_window(
     return True
 
 
+def parse_exclusions(raw: Optional[str]) -> set[str]:
+    """Parse a multi-line / comma / semicolon list of ISINs or symbols into a
+    normalized (upper-cased, trimmed) set. Empty input → empty set."""
+    if not raw:
+        return set()
+    parts = re.split(r"[\n,;]+", raw)
+    return {p.strip().upper() for p in parts if p.strip()}
+
+
+def is_excluded(order: BrokerOrder, exclude: set[str]) -> bool:
+    """True if the order's ISIN, symbol, or symbol_title is in the exclusion
+    set (case-insensitive). Used to keep e.g. agent-bought bonds out of the
+    report and fee."""
+    if not exclude:
+        return False
+    for v in (order.isin, order.symbol, order.symbol_title):
+        if v and v.strip().upper() in exclude:
+            return True
+    return False
+
+
 async def list_orders(
     db: AsyncSession,
     *,
@@ -300,6 +322,7 @@ async def list_orders(
     window_start: Optional[time] = None,
     window_end: Optional[time] = None,
     only_bot: bool = False,
+    exclude: Optional[set[str]] = None,
     limit: int = 1000,
 ) -> list[BrokerOrder]:
     """Filter ``broker_orders`` for the report; placement-time descending.
@@ -341,6 +364,8 @@ async def list_orders(
     rows = list((await db.execute(stmt)).scalars().all())
     if window_start is not None or window_end is not None:
         rows = [r for r in rows if in_time_window(r, window_start, window_end)]
+    if exclude:
+        rows = [r for r in rows if not is_excluded(r, exclude)]
     return rows
 
 
@@ -450,6 +475,8 @@ __all__ = [
     "map_getorders_row",
     "list_orders",
     "in_time_window",
+    "parse_exclusions",
+    "is_excluded",
     "refresh_orders_for_customers",
     "reconcile_all_recent",
 ]

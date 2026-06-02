@@ -27,7 +27,7 @@ from app.models.broker_orders import BrokerOrder
 from app.models.customers import Customer
 from app.models.fees import AgentFeeConfig
 from app.services import settings_store
-from app.services.broker_orders import in_time_window
+from app.services.broker_orders import in_time_window, is_excluded
 from app.services.profit_matching import OrderLeg, match_lots
 
 logger = logging.getLogger(__name__)
@@ -134,6 +134,7 @@ async def build_fee_report(
     until: Optional[date] = None,
     window_start: Optional[time] = None,
     window_end: Optional[time] = None,
+    exclude: Optional[set[str]] = None,
     max_rows: int = 20000,
 ) -> FeeReport:
     """Compute per-buy profit + operator fee across the filtered orders.
@@ -168,6 +169,10 @@ async def build_fee_report(
         )
 
     orders = list((await db.execute(stmt)).scalars().all())
+    if exclude:
+        # Drop excluded instruments (e.g. agent-bought bonds) BEFORE matching so
+        # they never contribute to profit or fee.
+        orders = [o for o in orders if not is_excluded(o, exclude)]
 
     # Resolve each customer's CURRENT agent. broker_orders.agent_id is a
     # fetch-time snapshot; if a customer is reassigned to another agent it

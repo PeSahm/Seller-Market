@@ -3061,8 +3061,9 @@ def _bot_report_resolve_time(param, default_str):
 
 
 async def _bot_report_filters(db, *, since, until, window_start, window_end):
-    """Resolve the shared filter scaffold (date range + time window) with
-    settings-backed defaults. Returns the parsed values + the raw echoes."""
+    """Resolve the shared filter scaffold (date range + time window + the
+    persistent instrument-exclusion set) with settings-backed defaults.
+    Returns ``(p_since, p_until, p_ws, p_we, exclude_set, exclude_raw)``."""
     settings_map = await settings_store.get_all_settings(db)
     p_since = _bot_report_parse_date(since) or _bot_report_parse_date(
         settings_map.get("robot_start_date")
@@ -3070,7 +3071,9 @@ async def _bot_report_filters(db, *, since, until, window_start, window_end):
     p_until = _bot_report_parse_date(until)
     p_ws = _bot_report_resolve_time(window_start, settings_map.get("bot_window_start"))
     p_we = _bot_report_resolve_time(window_end, settings_map.get("bot_window_end"))
-    return p_since, p_until, p_ws, p_we
+    exclude_raw = settings_map.get("excluded_instruments", "") or ""
+    exclude_set = services_broker_orders.parse_exclusions(exclude_raw)
+    return p_since, p_until, p_ws, p_we, exclude_set, exclude_raw
 
 
 async def _bot_report_customer_map(db, customer_ids):
@@ -3110,7 +3113,7 @@ async def admin_bot_report(
     """
     p_agent = _bot_report_parse_uuid(agent_id)
     p_customer = _bot_report_parse_uuid(customer_id)
-    p_since, p_until, p_ws, p_we = await _bot_report_filters(
+    p_since, p_until, p_ws, p_we, exclude_set, exclude_raw = await _bot_report_filters(
         db, since=since, until=until, window_start=window_start, window_end=window_end
     )
 
@@ -3129,6 +3132,7 @@ async def admin_bot_report(
             until=p_until,
             window_start=p_ws,
             window_end=p_we,
+            exclude=exclude_set,
         )
         cust_ids = {r.buy.customer_id for r in fee_report.buy_rows}
     else:
@@ -3147,6 +3151,7 @@ async def admin_bot_report(
             window_start=p_ws,
             window_end=p_we,
             only_bot=bool(only_bot),
+            exclude=exclude_set,
             limit=2000,
         )
         cust_ids = {o.customer_id for o in orders}
@@ -3173,6 +3178,8 @@ async def admin_bot_report(
         window_end if window_end is not None else (p_we.isoformat() if p_we else "")
     )
     ctx["filter_only_bot"] = bool(only_bot)
+    ctx["excluded_instruments_raw"] = exclude_raw
+    ctx["excluded_count"] = len(exclude_set)
     return templates.TemplateResponse("admin/bot_report.html", ctx)
 
 
@@ -3276,6 +3283,49 @@ async def admin_bot_report_fee_config(
     )
 
 
+def _bot_report_safe_next(next_url: Optional[str]) -> str:
+    """Constrain a post-save redirect to a local bot-report path so the
+    operator keeps their tab/filters, with no open-redirect surface."""
+    if (
+        next_url
+        and next_url.startswith("/admin/bot-report")
+        and "//" not in next_url
+        and "\\" not in next_url
+        and "\n" not in next_url
+    ):
+        return next_url
+    return "/admin/bot-report"
+
+
+@router.post("/bot-report/exclusions")
+async def admin_bot_report_exclusions(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    excluded_instruments: str = Form(""),
+    next_url: str = Form("", alias="next"),
+):
+    """Save the persistent instrument-exclusion list (ISINs/symbols to keep out
+    of the report + fee). Stored as the ``excluded_instruments`` setting —
+    ``settings_store.set_setting`` writes the audit row."""
+    # Normalize to one entry per line so the stored value round-trips cleanly
+    # into the textarea and the parser, regardless of how it was typed.
+    normalized = "\n".join(
+        sorted(services_broker_orders.parse_exclusions(excluded_instruments))
+    )
+    await settings_store.set_setting(
+        db, "excluded_instruments", normalized, updated_by=user.id
+    )
+    await db.commit()
+
+    target = _bot_report_safe_next(next_url)
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target}
+    )
+
+
 @router.get("/bot-report/export.xlsx")
 async def admin_bot_report_export(
     request: Request,
@@ -3292,7 +3342,7 @@ async def admin_bot_report_export(
     """Stream the .xlsx fee report — the owner's primary deliverable."""
     p_agent = _bot_report_parse_uuid(agent_id)
     p_customer = _bot_report_parse_uuid(customer_id)
-    p_since, p_until, p_ws, p_we = await _bot_report_filters(
+    p_since, p_until, p_ws, p_we, exclude_set, _ = await _bot_report_filters(
         db, since=since, until=until, window_start=window_start, window_end=window_end
     )
 
@@ -3305,10 +3355,12 @@ async def admin_bot_report_export(
         until=p_until,
         window_start=p_ws,
         window_end=p_we,
+        exclude=exclude_set,
     )
     # Every stored order in range for the audit sheet (no time-window filter).
     # broker_orders only holds fully-executed rows, so this is the executed
     # buys AND sells — the raw reconciliation trail behind the fee numbers.
+    # Excluded instruments are kept out of the audit sheet too, for consistency.
     orders = await services_broker_orders.list_orders(
         db,
         agent_id=p_agent,
@@ -3316,6 +3368,7 @@ async def admin_bot_report_export(
         broker=broker or None,
         since=p_since,
         until=p_until,
+        exclude=exclude_set,
         limit=20000,
     )
 
