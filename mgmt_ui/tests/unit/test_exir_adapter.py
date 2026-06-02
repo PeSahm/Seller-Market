@@ -7,7 +7,7 @@ Phase-0 spike against khobregan.exirbroker.com).
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -169,6 +169,11 @@ def test_map_exir_row(family_map):
     assert out["pam_code"] == "11694580090306"
     assert out["placed_at"] is not None
     assert (out["placed_at"].year, out["placed_at"].month) == (2026, 6)
+    # placed_at must be UTC-labeled wall-clock (matching the ephoenix mapper),
+    # NOT +03:30, so the UTC-boundary date-range filters classify both families
+    # consistently near Tehran midnight.
+    assert out["placed_at"].utcoffset() == timedelta(0)
+    assert (out["placed_at"].hour, out["placed_at"].minute) == (13, 27)
 
 
 def test_map_exir_row_sell_side(family_map):
@@ -189,3 +194,19 @@ def test_map_exir_and_ephoenix_same_keyset(family_map):
     assert set(_map_exir_row(_exir_row(), customer).keys()) == set(
         _map_ephoenix_row({}, customer).keys()
     )
+
+
+async def test_exir_get_orders_rejects_non_filled_status():
+    """Phase-1 adapter is filled-only: a request that excludes status 3 returns
+    an error WITHOUT touching the network (the check precedes any login), so the
+    mapper's hardcoded state=3 can never mis-label an active/cancelled row."""
+    rows, err = await ExirAdapter("khobregan").get_orders(
+        "u",
+        "p",
+        "http://ocr.invalid",
+        from_date="2026/06/01",
+        to_date="2026/06/02",
+        include_status=[2],
+    )
+    assert rows == []
+    assert err is not None and "status 3" in err

@@ -179,7 +179,15 @@ def _map_exir_row(row: dict, customer: Customer) -> dict:
     # entryDateTime is the only timestamp Exir gives us; use it for placement
     # AND sub-second placement (no separate "created"). Filled rows have no
     # explicit execution timestamp in the report → execution_date stays None.
+    # parse_jalali_datetime returns a Tehran-aware (+03:30) datetime. Re-label it
+    # UTC WITHOUT shifting the wall-clock numerals so it matches the ephoenix
+    # convention (_parse_dt also stores Tehran wall-clock labeled UTC). Otherwise
+    # the two families' placed_at would be 3.5h apart in absolute terms and the
+    # UTC-boundary date-range filters (list_orders / build_fee_report) would
+    # classify the same local date inconsistently near midnight.
     entry_dt = parse_jalali_datetime(row.get("entryDateTime") or "")
+    if entry_dt is not None:
+        entry_dt = entry_dt.replace(tzinfo=timezone.utc)
     # remainingQuantity == 0 means fully filled (ephoenix's isDone equivalent).
     is_done = _int_or_zero(row.get("remainingQuantity")) == 0
     return {
@@ -346,7 +354,11 @@ async def _upsert_order(db: AsyncSession, values: dict) -> bool:
             set_[col] = excluded
     set_["fetched_at"] = func.now()
     stmt = stmt.on_conflict_do_update(
-        index_elements=[BrokerOrder.tracking_number],
+        # Per-broker dedup: Exir mmtpOrderId and ephoenix trackingNumber are
+        # independent id namespaces, so a GLOBAL unique on tracking_number could
+        # match (and overwrite) a different broker's/customer's row. Scope the
+        # conflict to (broker, tracking_number) — see migration 0009.
+        index_elements=[BrokerOrder.broker, BrokerOrder.tracking_number],
         set_=set_,
     ).returning(literal_column("(xmax = 0)"))
     inserted = (await db.execute(stmt)).scalar_one()

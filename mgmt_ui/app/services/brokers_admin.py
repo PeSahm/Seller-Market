@@ -81,9 +81,17 @@ async def _warm_cache(db: AsyncSession) -> None:
 
 
 async def _count_customers_for_code(db: AsyncSession, code: str) -> int:
-    """How many customers reference this broker code (any state)."""
+    """How many customers reference this broker code (any state).
+
+    Case-insensitive to match how a customer's broker is resolved elsewhere
+    (``get_broker_by_code`` lowercases its lookup), so a mixed-case stored value
+    can't slip past the in-use guard and let a referenced broker be
+    disabled/deleted. ``code`` is already the lowercase ``broker.code``.
+    """
     result = await db.execute(
-        select(func.count()).select_from(Customer).where(Customer.broker == code)
+        select(func.count())
+        .select_from(Customer)
+        .where(func.lower(Customer.broker) == code)
     )
     return int(result.scalar_one() or 0)
 
@@ -177,7 +185,16 @@ async def update_broker(
 
     if data.label is not None:
         broker.label = data.label
-    if data.family is not None:
+    if data.family is not None and data.family != broker.family:
+        # ``family`` is the ONLY field that selects the adapter / URL shape /
+        # auth flow (resolved live via family_of(code) on every call). Flipping
+        # it for an in-use broker would silently reroute all its customers to the
+        # other broker's wire protocol and break them — guard it like disable.
+        in_use = await _count_customers_for_code(db, broker.code)
+        if in_use:
+            raise ValueError(
+                f"broker in use by {in_use} customers — cannot change family"
+            )
         broker.family = data.family
     if data.enabled is not None:
         broker.enabled = data.enabled

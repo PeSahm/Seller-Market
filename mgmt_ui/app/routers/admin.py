@@ -1141,6 +1141,11 @@ async def admin_customer_update(
         # ``page_shell.html`` will trigger a sync lazy-load that explodes.
         # Refresh proactively so the renderer never reaches for the wire.
         await db.refresh(user)
+        # The duplicate-tuple rollback inside update_customer ALSO expired the
+        # pre-fetched ``_broker_groups`` Broker ORM rows (rollback expires every
+        # loaded instance). Re-fetch them post-rollback so the sync optgroup
+        # render doesn't lazy-load and re-trigger the PR #73 MissingGreenlet 500.
+        _broker_groups = await brokers_admin.list_enabled_grouped(db)
         return _render_with_error(str(exc), status.HTTP_400_BAD_REQUEST)
 
     # Push the updated config.ini so the next bot run reads the new field

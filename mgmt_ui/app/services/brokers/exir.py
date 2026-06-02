@@ -174,6 +174,16 @@ class ExirAdapter:
             + (f": {last_description}" if last_description else "")
         )
 
+    def _session_key(self, username: str, password: str) -> tuple[str, str, str]:
+        """Cache key for a logged-in session: (code, username, pw-fingerprint)."""
+        return (self.code, username, _pw_fingerprint(password))
+
+    def _invalidate_session(self, username: str, password: str) -> None:
+        """Drop the cached session so the next call re-logs in — used when the
+        broker has invalidated the session server-side and our reads start
+        failing (otherwise a dead session would wedge reads until the TTL)."""
+        _SESSION_CACHE.pop(self._session_key(username, password), None)
+
     async def _session(
         self, username: str, password: str, ocr_service_url: str
     ) -> dict:
@@ -183,7 +193,7 @@ class ExirAdapter:
         The cached dict carries everything a caller needs to build a fresh
         ``AsyncClient`` (set ``cookies`` from it) and sign requests (``nt``).
         """
-        key = (self.code, username, _pw_fingerprint(password))
+        key = self._session_key(username, password)
         cached = _SESSION_CACHE.get(key)
         if cached is not None and time.monotonic() < cached["expires_at"]:
             return cached
@@ -284,55 +294,58 @@ class ExirAdapter:
 
         ``from_date``/``to_date`` arrive as Gregorian ``"YYYY/MM/DD"`` (the
         dispatcher passes ``date.strftime("%Y/%m/%d")``); they are converted to
-        Jalali for the wire. Phase 1 fetches filled orders (status 3) — what the
-        bot report needs. If ``isin`` is given, rows are filtered client-side on
-        ``insMaxLCode``. One fresh ``AsyncClient`` (login -> signed GET) per call.
+        Jalali for the wire. Phase 1 supports FILLED orders only (status 3) —
+        what the bot report needs, and what lets the mapper safely stamp
+        ``state=3``. A request that excludes 3 returns an explicit error rather
+        than silently fetching another status and mis-labeling it as filled.
+        If ``isin`` is given, rows are filtered client-side on ``insMaxLCode``.
+        On a non-200 (e.g. the broker expired our session) the cached session is
+        dropped and the login+fetch is retried once before giving up.
         """
+        # Phase-1 contract: filled-only. Reject a non-3 request loudly instead
+        # of fetching it and stamping state=3 (which would corrupt the report).
+        if include_status is not None and 3 not in include_status:
+            return [], (
+                "exir adapter (Phase 1) supports filled orders (status 3) only; "
+                f"got include_status={include_status}"
+            )
         try:
             jstart = gregorian_str_to_jalali_str(from_date)
             jend = gregorian_str_to_jalali_str(to_date)
+            path = (
+                "/api/v1/user/orderbookReport?size=1000"
+                f"&startDate={jstart}"
+                "&mmtpTypeId=null"
+                f"&endDate={jend}"
+                "&orderStatusId=3"
+            )
 
-            # Phase 1: filled rows only. include_status may name several
-            # statuses; honour them but default to [3] (filled).
-            statuses = list(include_status) if include_status else [3]
-            if 3 in statuses:
-                statuses = [3]
-            else:
-                # Honour an explicit non-3 request (e.g. cancelled=4 / active=2).
-                statuses = [statuses[0]]
-
-            session = await self._session(username, password, ocr_service_url)
-            nt = session["nt"]
-
-            all_rows: list[dict] = []
-            async with httpx.AsyncClient(
-                follow_redirects=True, timeout=_HTTP_TIMEOUT_S
-            ) as client:
-                for name, value in session["cookies"].items():
-                    client.cookies.set(name, value)
-
-                for status in statuses:
-                    path = (
-                        "/api/v1/user/orderbookReport?size=1000"
-                        f"&startDate={jstart}"
-                        "&mmtpTypeId=null"
-                        f"&endDate={jend}"
-                        f"&orderStatusId={status}"
-                    )
+            last_err: Optional[str] = None
+            for attempt in range(2):  # one retry with a fresh login on failure
+                session = await self._session(username, password, ocr_service_url)
+                nt = session["nt"]
+                async with httpx.AsyncClient(
+                    follow_redirects=True, timeout=_HTTP_TIMEOUT_S
+                ) as client:
+                    for name, value in session["cookies"].items():
+                        client.cookies.set(name, value)
                     resp = await self._signed_get(client, nt, path)
-                    if resp.status_code != 200:
-                        return (
-                            [],
-                            f"exir orderbookReport HTTP {resp.status_code}: "
-                            f"{resp.text[:200]}",
-                        )
+
+                if resp.status_code == 200:
                     rows = resp.json().get("result") or []
-                    all_rows.extend(rows)
+                    if isin:
+                        rows = [r for r in rows if r.get("insMaxLCode") == isin]
+                    return rows, None
 
-            if isin:
-                all_rows = [r for r in all_rows if r.get("insMaxLCode") == isin]
+                # Non-200: the cached session may be dead (server-side logout /
+                # rotation). Drop it so the retry re-logs in; the ephoenix sibling
+                # does the same on a 401.
+                last_err = (
+                    f"exir orderbookReport HTTP {resp.status_code}: {resp.text[:200]}"
+                )
+                self._invalidate_session(username, password)
 
-            return all_rows, None
+            return [], last_err
         except Exception as exc:  # noqa: BLE001
             logger.warning("exir get_orders failed: %s", exc)
             return [], f"exir error: {exc}"
