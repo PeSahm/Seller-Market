@@ -23,6 +23,7 @@ from typing import Optional
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditLog
@@ -142,16 +143,25 @@ async def create_broker(
         sort_order=data.sort_order,
     )
     db.add(broker)
-    await db.flush()
-    _record_audit(
-        db,
-        actor_id=actor_id,
-        action="broker.create",
-        target_id=broker.id,
-        before=None,
-        after=_snapshot(broker),
-    )
-    await db.commit()
+    # The ``existing is None`` pre-check above narrows the duplicate window but
+    # cannot close it: two concurrent creates can both pass it, then race to the
+    # ``code`` UNIQUE. Catch that IntegrityError and surface the same advertised
+    # ``ValueError`` instead of leaking a raw DB error to the router.
+    try:
+        await db.flush()
+        _record_audit(
+            db,
+            actor_id=actor_id,
+            action="broker.create",
+            target_id=broker.id,
+            before=None,
+            after=_snapshot(broker),
+        )
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise ValueError("broker code already exists") from exc
+
     await db.refresh(broker)
     await _warm_cache(db)
     return broker
@@ -286,16 +296,15 @@ async def delete_broker(
     await _warm_cache(db)
 
 
-async def list_enabled_grouped(
-    db: AsyncSession,
-) -> list[tuple[str, list[Broker]]]:
-    """Enabled brokers grouped by family for the create-customer dropdown.
+def _group_by_family(rows: list[Broker]) -> list[tuple[str, list[Broker]]]:
+    """Group already-ordered broker ``rows`` by family for the dropdowns.
 
-    Returns ``[("ephoenix", [...]), ("exir", [...])]`` — families in the fixed
-    ``ephoenix`` then ``exir`` order; within each, ordered by
-    ``(sort_order, label)``. Empty families are omitted.
+    Returns ``[("ephoenix", [...]), ("exir", [...])]`` — known families in the
+    fixed ``ephoenix`` then ``exir`` order; any unexpected families (defensive)
+    sorted alphabetically after. Empty families are omitted. ``rows`` are
+    assumed to already be ordered by ``(sort_order, label)`` within a family
+    (``list_brokers`` orders by ``(family, sort_order, label)``).
     """
-    rows = await list_brokers(db, include_disabled=False)
     by_family: dict[str, list[Broker]] = {}
     for b in rows:
         by_family.setdefault(b.family, []).append(b)
@@ -309,6 +318,30 @@ async def list_enabled_grouped(
     for fam in sorted(by_family):
         grouped.append((fam, by_family[fam]))
     return grouped
+
+
+async def list_enabled_grouped(
+    db: AsyncSession,
+) -> list[tuple[str, list[Broker]]]:
+    """Enabled brokers grouped by family for the create-customer dropdown.
+
+    Returns ``[("ephoenix", [...]), ("exir", [...])]`` — families in the fixed
+    ``ephoenix`` then ``exir`` order; within each, ordered by
+    ``(sort_order, label)``. Empty families are omitted.
+    """
+    rows = await list_brokers(db, include_disabled=False)
+    return _group_by_family(rows)
+
+
+async def list_all_grouped(db: AsyncSession) -> list[tuple[str, list[Broker]]]:
+    """All brokers (incl. disabled) grouped by family — for the customer-list
+    FILTER, where rows referencing a now-disabled broker must stay filterable.
+
+    Same grouped shape as :func:`list_enabled_grouped`; forms keep using the
+    enabled-only variant so they can't offer a disabled broker.
+    """
+    rows = await list_brokers(db, include_disabled=True)
+    return _group_by_family(rows)
 
 
 async def broker_codes(

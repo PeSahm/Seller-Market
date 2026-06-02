@@ -675,7 +675,11 @@ async def admin_customers(
     ctx["filter_broker"] = broker
     ctx["filter_q"] = q or ""
     ctx["all_agents"] = list(agents.values())
-    ctx["broker_groups"] = await brokers_admin.list_enabled_grouped(db)
+    # The LIST filter must include disabled brokers so operators can still
+    # filter down to legacy accounts that reference a now-disabled broker.
+    # (Create/edit forms keep ``list_enabled_grouped`` — they must only offer
+    # enabled brokers.)
+    ctx["broker_groups"] = await brokers_admin.list_all_grouped(db)
     return templates.TemplateResponse("admin/customers.html", ctx)
 
 

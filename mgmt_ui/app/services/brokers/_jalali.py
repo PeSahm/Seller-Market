@@ -70,14 +70,35 @@ def gregorian_to_jalali(gy: int, gm: int, gd: int) -> tuple[int, int, int]:
     return jy, jm, jd
 
 
+def _is_jalali_leap(jy: int) -> bool:
+    """True if ``jy`` is a Jalali leap year (JDF 33-year-cycle algorithm).
+
+    Uses the standard JDF closed-form: a year is leap iff the cycle remainder
+    falls in the leap band. This is the same arithmetic the conversion math is
+    derived from, so esfand (month 12) has 30 days in a leap year, 29 otherwise.
+    """
+    return ((((jy - 474) % 2820) + 474 + 38) * 682) % 2816 < 682
+
+
 def jalali_to_gregorian(jy: int, jm: int, jd: int) -> tuple[int, int, int]:
     """Inverse of :func:`gregorian_to_jalali` (JDF algorithm).
+
+    Validates ``jm``/``jd`` against the Jalali calendar (months 1-6 have 31
+    days, 7-11 have 30, esfand has 30 in a leap year else 29) and raises
+    :class:`ValueError` on an impossible date — otherwise a bad day/month would
+    raise ``IndexError`` deep in the loop or silently mis-convert.
 
     >>> jalali_to_gregorian(1405, 3, 12)
     (2026, 6, 2)
     >>> jalali_to_gregorian(1403, 1, 1)
     (2024, 3, 20)
     """
+    if not 1 <= jm <= 12:
+        raise ValueError(f"invalid Jalali date {jy}/{jm}/{jd}")
+    max_day = 31 if jm <= 6 else (30 if jm <= 11 else (30 if _is_jalali_leap(jy) else 29))
+    if not 1 <= jd <= max_day:
+        raise ValueError(f"invalid Jalali date {jy}/{jm}/{jd}")
+
     jy2 = jy - 979
     jm2 = jm - 1
     jd2 = jd - 1
@@ -167,7 +188,7 @@ def parse_jalali_datetime(s: str) -> datetime | None:
         hh, mm, ss = (int(p) for p in time_part.split(":"))
         gy, gm, gd = jalali_to_gregorian(dy, dm, dd)
         return datetime(gy, gm, gd, hh, mm, ss, tzinfo=_TEHRAN_TZ)
-    except (ValueError, TypeError):
+    except (ValueError, IndexError, TypeError):
         return None
 
 

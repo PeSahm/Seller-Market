@@ -126,6 +126,13 @@ async def admin_broker_create(
             db, payload, actor_id=user.id
         )
     except ValueError as exc:
+        # ``create_broker`` now ``db.rollback()``s on the duplicate-code race
+        # before re-raising as ValueError. The rollback expires every loaded
+        # attribute on the session, including ``user`` — and the shared
+        # ``page_shell.html`` then touches ``current_user.role`` /
+        # ``current_user.username``. Refresh it so the (sync) Jinja render
+        # doesn't lazy-load and explode with ``MissingGreenlet`` (see PR #73).
+        await db.refresh(user)
         return _rerender(str(exc))
 
     return _flash_redirect(request, f"/admin/brokers/{broker.id}/edit")

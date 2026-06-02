@@ -388,11 +388,24 @@ All 11 prior brokers (gs, ib, ayandeh, …) are **ONE software family** ("ephoen
 - **Test creds are already in the repo** (`SellerMarket/test_integration.py`, README, CLAUDE.md use `4580090306` / `Mm@12345`) — but the new spike reads creds from `EXIR_*` env vars anyway (don't add another hardcoded copy); the one live `nt` in a unit test was swapped for a synthetic value.
 - **Parallel subagents with DISJOINT file ownership** integrate cleanly into one tree (no worktrees needed): WS1 brokers-table, WS2 dispatcher, WS3 ExirAdapter, WS4+5 consumer side — then adversarially review the merged diff.
 
+### Phase-1 rollout runbook
+
+1. **Deploy the mgmt image** (mirror-pull + verify revision + `compose up -d api` — see the Session-2/3 deploy learnings for the ghcr-blocked / stale-`:latest` dance). Migrations `0008_brokers` + `0009_broker_orders_tracking_composite` run on container startup (entrypoint `alembic upgrade head`). Confirm:
+   - `docker exec seller-market-mgmt-postgres-1 psql -U mgmt -d mgmt_ui -tAc "SELECT version_num FROM alembic_version"` → expect `0009_broker_orders_tracking_composite`.
+   - The `brokers` table exists + is seeded: `... -c "SELECT code, family, enabled FROM brokers ORDER BY family, sort_order"` (11 ephoenix rows + `khobregan` exir + any pre-existing distinct broker codes).
+2. **Add an Exir tenant** via **/admin/brokers → New**: `code` = the subdomain (e.g. `khobregan`), `family` = `exir` (+ label, enabled, sort).
+3. **Verify the wiring**:
+   - The family cache warms at startup (`app/services/brokers/registry.py`) and refreshes on broker CRUD.
+   - The customer create/edit broker dropdown shows the new broker under its family optgroup (`list_enabled_grouped`).
+   - Add a customer on it, then **Verify credentials** — returns the bourse account name from `accountNumberList[0]`.
+   - **/admin/bot-report → Refresh from broker** populates `broker_orders` for that customer.
+4. **Rollback note**: downgrading past `0009` is **blocked by design** if cross-broker duplicate `tracking_number`s exist (the composite UNIQUE made them valid; the global single-column UNIQUE can't be recreated). Dedupe first.
+
 ### Open follow-ups (Session 4)
 
 | # | Title | Why |
 |---|---|---|
 | #102 | **Phase 2 — bot order-firing for Exir** | Flat adapter modules in `SellerMarket/`, thin `EphoenixAdapter` over the unmodified `api_client.py`, I/O-free hot-path `X-App-N` signer, render `broker_family` into `config.ini` (data-driven bot, no enum). Designed in the plan; not built. |
-| — | Real Exir `buyingPower` path | The `/api/v2/user/buyingPower` `406` blocks Phase-2 BUY volume sizing — find the right endpoint/version, or carry an explicit price in config for Exir. |
-| — | Confirm Exir order-placement contract | `POST /api/v1/order` (decompiled): confirm `insMaxLcode`=ISIN there too + the numeric `brokerCode` (116); the sync response has no order id (ids via `wss://…/sle`) → Phase-2 fire-log keys on the date-based reconciliation, not serial. |
-| — | Per-broker endpoint overrides + verify-instrument for Exir | Operator chose metadata-only CRUD (code/family/label/enabled/sort); URL quirks (ib shard, gs rate-limit) still live in code. Exir `verify_isin` is a Phase-1 stub (ISIN echoed, no metadata fetch). |
+| #102 | Real Exir `buyingPower` path | The `/api/v2/user/buyingPower` `406` blocks Phase-2 BUY volume sizing — find the right endpoint/version, or carry an explicit price in config for Exir. |
+| #102 | Confirm Exir order-placement contract | `POST /api/v1/order` (decompiled): confirm `insMaxLcode`=ISIN there too + the numeric `brokerCode` (116); the sync response has no order id (ids via `wss://…/sle`) → Phase-2 fire-log keys on the date-based reconciliation, not serial. |
+| #102 | Per-broker endpoint overrides + verify-instrument for Exir | Operator chose metadata-only CRUD (code/family/label/enabled/sort); URL quirks (ib shard, gs rate-limit) still live in code. Exir `verify_isin` is a Phase-1 stub (ISIN echoed, no metadata fetch). |

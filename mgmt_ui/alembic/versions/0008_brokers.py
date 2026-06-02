@@ -86,6 +86,9 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.func.now(),
         ),
+        # Enforce canonical (lowercase) codes at the DB boundary so a mixed-case
+        # value can never defeat exact-match routing (registry.family_of(code)).
+        sa.CheckConstraint("code = lower(code)", name="ck_brokers_code_lowercase"),
     )
     op.create_index(
         "ix_brokers_code", "brokers", ["code"], unique=True
@@ -162,6 +165,27 @@ def upgrade() -> None:
         )
     if backfill:
         op.bulk_insert(brokers_tbl, backfill)
+
+    # ---- Canonicalize referencing columns to the lowercase registry code ----
+    # The seed/back-fill above lowercases every broker code in the new table.
+    # Existing customers / broker_orders reference brokers by VALUE, so any
+    # legacy mixed-case value (e.g. "Khobregan") would no longer match the
+    # lowercase registry code and would fail DB-backed validation. Normalize
+    # them in place so references stay consistent. The ``<> lower(broker)``
+    # guard skips rows already lowercase and NULLs (NULL comparisons are NULL,
+    # i.e. not true), so this only rewrites the rows that actually need it.
+    bind.execute(
+        sa.text(
+            "UPDATE customers SET broker = lower(broker) "
+            "WHERE broker <> lower(broker)"
+        )
+    )
+    bind.execute(
+        sa.text(
+            "UPDATE broker_orders SET broker = lower(broker) "
+            "WHERE broker <> lower(broker)"
+        )
+    )
 
 
 def downgrade() -> None:

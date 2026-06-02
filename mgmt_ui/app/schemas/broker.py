@@ -8,33 +8,33 @@ cannot change it.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 # The broker families we have adapters for. Extend only alongside a new adapter.
 BrokerFamily = Literal["ephoenix", "exir"]
 
-
-def _normalize_code(v: str) -> str:
-    """Codes are lowercased + trimmed so "Khobregan" and "khobregan " collide
-    on the UNIQUE index instead of creating a dup the dropdown can't tell apart.
-    """
-    return v.strip().lower()
+# Broker codes are lowercased + trimmed so "Khobregan" and "khobregan " collide
+# on the UNIQUE index instead of creating a dup the dropdown can't tell apart.
+# Normalization (strip + lower) runs BEFORE the length check, so a
+# whitespace-only code (e.g. "   ") fails min_length=1 instead of slipping
+# through and collapsing to "".
+NormalizedBrokerCode = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True, to_lower=True, min_length=1, max_length=64
+    ),
+]
 
 
 class BrokerCreate(BaseModel):
-    code: str = Field(min_length=1, max_length=64)
+    code: NormalizedBrokerCode
     family: BrokerFamily
     label: str = Field(min_length=1, max_length=255)
     enabled: bool = True
     sort_order: int = 0
-
-    @field_validator("code")
-    @classmethod
-    def _code(cls, v: str) -> str:
-        return _normalize_code(v)
 
 
 class BrokerUpdate(BaseModel):

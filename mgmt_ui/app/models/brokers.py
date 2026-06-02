@@ -26,6 +26,12 @@ from app.db_base import Base
 
 class Broker(Base):
     __tablename__ = "brokers"
+    # Enforce canonical (lowercase) codes at the DB boundary so a mixed-case
+    # value can never slip in via a path that skips the schema validator and
+    # silently defeat exact-match routing (``registry.family_of(code)``).
+    __table_args__ = (
+        sa.CheckConstraint("code = lower(code)", name="ck_brokers_code_lowercase"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),

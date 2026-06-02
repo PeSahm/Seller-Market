@@ -703,27 +703,42 @@ async def _ephoenix_get_orders(
 # family split, so callers/tests that ``from app.services.broker_client import
 # verify_credentials`` keep working.
 #
-# ``_family`` resolves a broker code to its family via the registry, defaulting
-# to ephoenix whenever the family can't be resolved (cold cache, unknown code,
-# or any registry error). This preserves legacy behaviour: unit tests that
-# don't seed the ``brokers`` table still hit the ephoenix path. Because the
-# ephoenix bodies stay in THIS module, tests that patch internals like
-# ``broker_client._solve_captcha`` / ``broker_client._endpoints_for`` continue
-# to affect the ephoenix branch as before.
+# ``_family`` resolves a broker code to its family via the registry. The ephoenix
+# bodies stay in THIS module, so tests that patch internals like
+# ``broker_client._solve_captcha`` / ``broker_client._endpoints_for`` continue to
+# affect the ephoenix branch as before.
+
+
+# The 11 brokers that predate the DB-managed ``brokers`` table. They are the ONLY
+# codes allowed to fall back to ephoenix when the registry can't resolve a family
+# (cold cache / DB unavailable). Any other code — notably an Exir tenant — is NOT
+# in this set, so a resolution failure SURFACES as an error instead of silently
+# routing a non-ephoenix broker through the wrong adapter (CodeRabbit). Unit tests
+# that don't seed the brokers table use these codes (e.g. "ayandeh").
+_LEGACY_EPHOENIX_CODES = frozenset(
+    {
+        "gs", "bbi", "shahr", "ib", "karamad", "tejarat",
+        "ebb", "hbc", "rabin", "ayandeh", "farabi",
+    }
+)
 
 
 async def _family(broker_code: str) -> str:
-    """Resolve a broker code to its family, defaulting to ephoenix.
+    """Resolve a broker code to its family via the registry.
 
-    Unknown / not-yet-warmed codes (and any registry error) fall back to
-    ``"ephoenix"`` — the legacy default — so behaviour is unchanged for the
-    11 existing brokers and for tests that don't seed the brokers table.
+    On the normal path the warm DB-backed cache returns the family. If
+    resolution is unavailable (cold cache / DB down / unknown code) we fall back
+    to ``"ephoenix"`` ONLY for a known legacy ephoenix code — for any other code
+    the error propagates so the dispatchers below return a clean per-call error
+    rather than silently misrouting (e.g.) an Exir broker through ephoenix.
     """
     try:
         await registry.ensure_family_cache()
         return registry.family_of(broker_code)
     except Exception:
-        return "ephoenix"  # legacy default: unknown/cold -> ephoenix (unchanged behavior)
+        if broker_code in _LEGACY_EPHOENIX_CODES:
+            return "ephoenix"
+        raise
 
 
 async def verify_credentials(
@@ -738,7 +753,14 @@ async def verify_credentials(
     delegated to its adapter. Signature is identical to the pre-split public
     ``verify_credentials``.
     """
-    if await _family(broker_code) == "exir":
+    try:
+        family = await _family(broker_code)
+    except Exception as exc:  # noqa: BLE001 — surface, don't misroute
+        return VerifyResult(
+            ok=False,
+            error=f"could not resolve broker family for {broker_code!r}: {exc}",
+        )
+    if family == "exir":
         from app.services.brokers.exir import ExirAdapter
 
         return await ExirAdapter(broker_code).verify_credentials(
@@ -760,7 +782,14 @@ async def verify_isin(
 
     Signature is identical to the pre-split public ``verify_isin``.
     """
-    if await _family(broker_code) == "exir":
+    try:
+        family = await _family(broker_code)
+    except Exception as exc:  # noqa: BLE001 — surface, don't misroute
+        return IsinInfo(
+            ok=False,
+            error=f"could not resolve broker family for {broker_code!r}: {exc}",
+        )
+    if family == "exir":
         from app.services.brokers.exir import ExirAdapter
 
         return await ExirAdapter(broker_code).verify_isin(
@@ -790,7 +819,11 @@ async def get_orders(
     Signature (incl. the keyword-only block) is identical to the pre-split
     public ``get_orders``.
     """
-    if await _family(broker_code) == "exir":
+    try:
+        family = await _family(broker_code)
+    except Exception as exc:  # noqa: BLE001 — surface, don't misroute the sweep
+        return [], f"could not resolve broker family for {broker_code!r}: {exc}"
+    if family == "exir":
         from app.services.brokers.exir import ExirAdapter
 
         return await ExirAdapter(broker_code).get_orders(

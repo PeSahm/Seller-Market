@@ -118,8 +118,8 @@ async def _write_audit(
     )
 
 
-async def _validate_broker(db: AsyncSession, broker: str) -> None:
-    """Pre-check a broker code against the ``brokers`` table.
+async def _validate_broker(db: AsyncSession, broker: str) -> str:
+    """Pre-check a broker code against the ``brokers`` table; return its canonical code.
 
     Raises plain ``ValueError`` (which the routers already translate into a
     friendly flash, never a 500) if the code is unknown or disabled. This is a
@@ -128,12 +128,18 @@ async def _validate_broker(db: AsyncSession, broker: str) -> None:
     nothing to roll back, and a rollback would needlessly expire loaded attrs).
     The ``brokers`` table is the single source of truth now that the schema
     layer no longer pins a closed ``Literal`` of broker codes.
+
+    Returns ``b.code`` — the CANONICAL (lowercase) code from the registry — so
+    callers persist that rather than the caller's raw casing. ``brokers`` codes
+    are lowercase end-to-end, which keeps exact-match routing
+    (``registry.family_of(code)``) from being defeated by casing.
     """
     b = await brokers_admin.get_broker_by_code(db, broker)
     if b is None:
         raise ValueError(f"unknown broker: {broker!r}")
     if not b.enabled:
         raise ValueError(f"broker is disabled: {broker!r}")
+    return b.code
 
 
 def _escape_ilike(value: str) -> str:
@@ -248,8 +254,9 @@ async def create_customer(
     requires picking an ISIN.
     """
     # Validate the broker against the DB BEFORE inserting (read-only pre-check;
-    # raises plain ValueError → friendly 422 via the router, no 500).
-    await _validate_broker(db, data.broker)
+    # raises plain ValueError → friendly 422 via the router, no 500). Persist the
+    # CANONICAL (lowercase) code the registry returns, not the caller's casing.
+    broker_code = await _validate_broker(db, data.broker)
 
     customer = Customer(
         agent_id=agent_id,
@@ -259,7 +266,7 @@ async def create_customer(
         display_name=data.display_name,
         username=data.username,
         password_enc=fernet_encrypt(data.password),
-        broker=data.broker,
+        broker=broker_code,
         version=1,
     )
     db.add(customer)
@@ -318,9 +325,10 @@ async def update_customer(
     changes = data.model_dump(exclude={"version"}, exclude_unset=True)
     # If the broker is being (re)set, validate it against the DB BEFORE the
     # mutation/flush (read-only pre-check; raises plain ValueError → friendly
-    # 422 via the router, no 500, no rollback).
+    # 422 via the router, no 500, no rollback). Write the CANONICAL (lowercase)
+    # code the registry returns, not the caller's casing.
     if "broker" in changes and changes["broker"] is not None:
-        await _validate_broker(db, changes["broker"])
+        changes["broker"] = await _validate_broker(db, changes["broker"])
     for field, value in changes.items():
         if field == "password":
             customer.password_enc = fernet_encrypt(value)

@@ -175,7 +175,11 @@ def _map_exir_row(row: dict, customer: Customer) -> dict:
     # orderSideName: "خريد"/"خرید" = buy (خ), "فروش" = sell (ف). Match on the
     # first letter so the Arabic-vs-Persian yeh spelling doesn't matter.
     side_name = str(row.get("orderSideName", ""))
-    order_side = 1 if side_name.startswith("خ") else 2
+    # Map ONLY explicit prefixes: خ = buy (خريد/خرید), ف = sell (فروش). Anything
+    # else (blank / unexpected) → 0 = unknown side. 0 won't be matched as a buy
+    # or a sell by profit matching, which is safer than defaulting an unknown
+    # value to a (false) sell.
+    order_side = 1 if side_name.startswith("خ") else (2 if side_name.startswith("ف") else 0)
     # entryDateTime is the only timestamp Exir gives us; use it for placement
     # AND sub-second placement (no separate "created"). Filled rows have no
     # explicit execution timestamp in the report → execution_date stays None.

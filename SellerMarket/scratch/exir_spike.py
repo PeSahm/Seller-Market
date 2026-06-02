@@ -149,7 +149,8 @@ def main() -> int:
     hr("STEP 1  GET /exir  (cookie bootstrap)")
     r1 = s.get(BASE + "/exir", timeout=TIMEOUT)
     print(f"HTTP {r1.status_code}")
-    print("cookies:", s.cookies.get_dict())
+    # Don't dump cookie VALUES (cookiesession1 is reusable session material).
+    print("cookies:", list(s.cookies.keys()))
 
     # --- Step 2: captcha + OCR (retry loop) ---------------------------------
     hr("STEP 2  GET /captcha  ->  OCR")
@@ -163,9 +164,11 @@ def main() -> int:
             s.cookies.set("client_login_id", client_login_id)
         b64 = base64.b64encode(rc.content).decode()
         captcha_text = decode_captcha(b64)
+        # client_login_id is a short-lived JWT — print presence/length, NOT the value.
         print(
             f"  attempt {attempt}: status={rc.status_code} bytes={len(rc.content)} "
-            f"client_login_id={client_login_id!r} ocr={captcha_text!r}"
+            f"client_login_id present={bool(client_login_id)} "
+            f"len={len(client_login_id) if client_login_id else 0} ocr={captcha_text!r}"
         )
         if captcha_text and captcha_text.isdigit() and len(captcha_text) == 5:
             break
@@ -195,19 +198,29 @@ def main() -> int:
     except Exception:
         print("non-JSON login response:", rl.text[:2000])
         return 3
-    # Redact nothing except password (we need to SEE nt/authToken shape).
-    print("response JSON:", json.dumps(login_json, ensure_ascii=False, indent=2)[:4000])
-    print("cookies after login:", s.cookies.get_dict())
+    # The login response is reusable auth state (authToken/nt are session
+    # material). Print only non-sensitive fields + key presence — NEVER the raw
+    # values or the whole response.
+    print(
+        "login type:", login_json.get("type"),
+        "| validity:", login_json.get("validity"),
+        "| bourse:", (login_json.get("accountNumberList") or [{}])[0].get("bourseAccountName"),
+    )
+    print("login response keys:", sorted(login_json.keys()))
+    # Cookie NAMES only — values (JWT-TOKEN/client_login_id/cookiesession1) are secret.
+    print("cookies after login:", list(s.cookies.keys()))
 
     nt = login_json.get("nt")
     auth_token = login_json.get("authToken")
     if not nt:
         print("!! no `nt` in login response — cannot compute X-App-N. Gate FAILS.")
         return 3
-    print(f"\nnt={nt!r}  (len={len(nt)})")
-    print(f"authToken present={bool(auth_token)}  bourseAccountName={login_json.get('bourseAccountName')!r}")
+    # nt + authToken are reusable signing/session material — presence + length only.
+    print(f"\nnt present={bool(nt)} len={len(nt) if nt else 0}; authToken present={bool(auth_token)}")
     print(f"validity={login_json.get('validity')!r}")
-    print(">> Inspect the JSON above for the numeric brokerCode/account id (Phase-2 order payload needs it).")
+    print(">> The raw login response / nt / authToken values are intentionally NOT printed "
+          "(reusable auth state). Inspect the key list + presence above; the numeric "
+          "brokerCode/account id that the Phase-2 order payload needs lives in those keys.")
 
     # --- Step 4 & 5: buyingPower with X-App-N -------------------------------
     hr("STEP 4/5  GET /api/v2/user/buyingPower  (X-App-N)")

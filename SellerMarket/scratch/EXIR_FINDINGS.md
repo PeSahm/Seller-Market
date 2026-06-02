@@ -1,6 +1,8 @@
 # Exir / Rayan HamAfza — LIVE wire shape (confirmed by Phase-0 spike, 2026-06-02)
 
-Tenant probed: `khobregan` → `https://khobregan.exirbroker.com`. Account 4580090306.
+> Note: account identifiers in this document are masked (`<ACCOUNT>`) — no real account number is committed.
+
+Tenant probed: `khobregan` → `https://khobregan.exirbroker.com`. Account `<ACCOUNT>`.
 Source of truth for the adapter. (Spike: `scratch/exir_spike.py`, read-only, no orders.)
 
 ## Auth (web platform = cookies + X-App-N)
@@ -13,7 +15,7 @@ Source of truth for the adapter. (Spike: `scratch/exir_spike.py`, read-only, no 
    - Response (real keys): `username` ("116"+account), `firstName`/`lastName` (Persian),
      `authToken` (JWT), **`nt`** (130-char numeric seed for X-App-N), `validity` (minutes, 480),
      `accountNumberList[0].bourseAccountName` (e.g. "اسمـ50113") + `.accountNumber`
-     ("11694580090306" — **ends with the username**), `bankAccounts[0].id == -1`
+     ("116<ACCOUNT>" — **ends with the username**), `bankAccounts[0].id == -1`
      (matches the order payload's `bankAccountId:-1`), `brokerName` ("خبرگان سهام;khobregan saham"),
      `sendOrderDelay` (400). **No top-level `bourseAccountName`** — read it from `accountNumberList[0]`.
    - Auth state after login = session cookies (`JWT-TOKEN` = authToken, `cookiesession1`,

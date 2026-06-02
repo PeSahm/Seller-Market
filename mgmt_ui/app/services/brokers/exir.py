@@ -264,15 +264,21 @@ class ExirAdapter:
     async def verify_isin(
         self, username: str, password: str, isin: str, ocr_service_url: str
     ) -> IsinInfo:
-        """Exir verification is ISIN-based; we do not fetch instrument
-        metadata in Phase 1, so no broker call (and no login) is needed."""
+        """Exir does NOT validate instruments in Phase 1.
+
+        We deliberately do NOT contact the broker (no login, no fetch). Because
+        we cannot confirm the ISIN exists, we report ``ok=False`` rather than a
+        false ``ok=True`` — otherwise a typo'd ISIN would look verified. The
+        ISIN is still used as-is downstream; this just stops claiming it was
+        validated.
+        """
         return IsinInfo(
-            ok=True,
+            ok=False,
             isin=isin,
-            symbol=isin,
+            symbol=None,
             message=(
-                "Exir verification is ISIN-based; instrument metadata not "
-                "fetched in Phase 1."
+                "Exir instrument verification is not supported in Phase 1 — "
+                "the ISIN is used as-is, not validated."
             ),
         )
 
@@ -302,13 +308,17 @@ class ExirAdapter:
         On a non-200 (e.g. the broker expired our session) the cached session is
         dropped and the login+fetch is retried once before giving up.
         """
-        # Phase-1 contract: filled-only. Reject a non-3 request loudly instead
-        # of fetching it and stamping state=3 (which would corrupt the report).
-        if include_status is not None and 3 not in include_status:
+        # Phase-1 contract: filled-only, no side filter. Reject ANYTHING outside
+        # that subset up front, loudly, instead of silently fetching only the
+        # filled rows (and stamping state=3, which would corrupt the report) or
+        # ignoring a side filter we never apply.
+        if include_status is not None and set(include_status) != {3}:
             return [], (
                 "exir adapter (Phase 1) supports filled orders (status 3) only; "
                 f"got include_status={include_status}"
             )
+        if side is not None:
+            return [], "exir adapter (Phase 1) does not support a side filter"
         try:
             jstart = gregorian_str_to_jalali_str(from_date)
             jend = gregorian_str_to_jalali_str(to_date)
@@ -321,7 +331,7 @@ class ExirAdapter:
             )
 
             last_err: Optional[str] = None
-            for attempt in range(2):  # one retry with a fresh login on failure
+            for _attempt in range(2):  # one retry with a fresh login on failure
                 session = await self._session(username, password, ocr_service_url)
                 nt = session["nt"]
                 async with httpx.AsyncClient(

@@ -53,6 +53,25 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_constraint(_COMPOSITE, "broker_orders", type_="unique")
+
+    # Preflight: the composite UNIQUE made cross-broker duplicate tracking_numbers
+    # valid. Recreating the GLOBAL single-column UNIQUE would fail (or, worse,
+    # require silently dropping rows) once such duplicates exist. Block the
+    # rollback with a clear message instead of letting Postgres throw an opaque
+    # constraint-violation mid-migration.
+    bind = op.get_bind()
+    dupes = bind.execute(sa.text(
+        "SELECT count(*) FROM (SELECT tracking_number FROM broker_orders "
+        "GROUP BY tracking_number HAVING count(*) > 1) d"
+    )).scalar()
+    if dupes:
+        from alembic import util
+        raise util.CommandError(
+            f"Cannot recreate the global UNIQUE on broker_orders.tracking_number: "
+            f"{dupes} tracking_number value(s) are duplicated across brokers. "
+            "Dedupe/remove cross-broker duplicate rows before downgrading."
+        )
+
     # Restore the original single-column UNIQUE (Postgres default name).
     op.create_unique_constraint(
         "broker_orders_tracking_number_key", "broker_orders", ["tracking_number"]
