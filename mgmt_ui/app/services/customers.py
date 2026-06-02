@@ -38,6 +38,7 @@ from app.models.trade_instructions import TradeInstruction
 from app.schemas.customer import CustomerCreate, CustomerUpdate
 from app.security.crypto import decrypt as fernet_decrypt
 from app.security.crypto import encrypt as fernet_encrypt
+from app.services import brokers_admin
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,24 @@ async def _write_audit(
             after_json=after,
         )
     )
+
+
+async def _validate_broker(db: AsyncSession, broker: str) -> None:
+    """Pre-check a broker code against the ``brokers`` table.
+
+    Raises plain ``ValueError`` (which the routers already translate into a
+    friendly flash, never a 500) if the code is unknown or disabled. This is a
+    READ-ONLY pre-check run BEFORE any insert/flush, so — unlike the
+    duplicate-tuple path — it deliberately does NOT ``db.rollback()`` (there's
+    nothing to roll back, and a rollback would needlessly expire loaded attrs).
+    The ``brokers`` table is the single source of truth now that the schema
+    layer no longer pins a closed ``Literal`` of broker codes.
+    """
+    b = await brokers_admin.get_broker_by_code(db, broker)
+    if b is None:
+        raise ValueError(f"unknown broker: {broker!r}")
+    if not b.enabled:
+        raise ValueError(f"broker is disabled: {broker!r}")
 
 
 def _escape_ilike(value: str) -> str:
@@ -228,6 +247,10 @@ async def create_customer(
     :mod:`app.services.trade_instructions` — adding a customer no longer
     requires picking an ISIN.
     """
+    # Validate the broker against the DB BEFORE inserting (read-only pre-check;
+    # raises plain ValueError → friendly 422 via the router, no 500).
+    await _validate_broker(db, data.broker)
+
     customer = Customer(
         agent_id=agent_id,
         server_id=None,
@@ -293,6 +316,11 @@ async def update_customer(
     before = _public_snapshot(customer)
 
     changes = data.model_dump(exclude={"version"}, exclude_unset=True)
+    # If the broker is being (re)set, validate it against the DB BEFORE the
+    # mutation/flush (read-only pre-check; raises plain ValueError → friendly
+    # 422 via the router, no 500, no rollback).
+    if "broker" in changes and changes["broker"] is not None:
+        await _validate_broker(db, changes["broker"])
     for field, value in changes.items():
         if field == "password":
             customer.password_enc = fernet_encrypt(value)

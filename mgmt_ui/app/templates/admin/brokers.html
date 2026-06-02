@@ -1,0 +1,79 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Brokers{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Brokers</h1>
+    <p class="text-muted text-small">
+      The UI-managed broker registry. Each row is a broker the operator can
+      trade through; <code>family</code> selects the adapter / URL shape
+      (<code>ephoenix</code> or <code>exir</code>). <code>code</code> is the
+      immutable key referenced by customers and broker orders — disabled
+      brokers stay in the table (and keep validating existing customers) but
+      drop out of the create-customer dropdown.
+    </p>
+  </div>
+  <div class="header-actions">
+    <a class="btn btn--primary" href="/admin/brokers/new">+ Add broker</a>
+  </div>
+</div>
+
+{% if list_error %}
+<div class="flash flash--error">
+  <strong>✗ Could not complete that action</strong>
+  <p class="text-small">{{ list_error }}</p>
+</div>
+{% endif %}
+
+{% if not brokers %}
+<div class="card">
+  <p class="text-muted">No brokers yet.</p>
+  <p class="text-small text-muted">
+    Click <strong>+ Add broker</strong> to register the first one.
+  </p>
+</div>
+{% else %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>Code</th>
+      <th>Family</th>
+      <th>Label</th>
+      <th>Enabled</th>
+      <th>Sort</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for b in brokers %}
+    <tr>
+      <td><code>{{ b.code }}</code></td>
+      <td>{{ b.family }}</td>
+      <td dir="auto">{{ b.label }}</td>
+      <td>
+        {% if b.enabled %}
+          <span class="badge badge--ok">enabled</span>
+        {% else %}
+          <span class="badge badge--muted">disabled</span>
+        {% endif %}
+      </td>
+      <td>{{ b.sort_order }}</td>
+      <td class="text-right">
+        <a class="btn btn--ghost btn--sm" href="/admin/brokers/{{ b.id }}/edit">Edit</a>
+        <form method="post" action="/admin/brokers/{{ b.id }}/toggle"
+              style="display:inline;">
+          {% include "partials/csrf.html" %}
+          {% if b.enabled %}
+            <button class="btn btn--ghost btn--sm" type="submit">Disable</button>
+          {% else %}
+            <button class="btn btn--ghost btn--sm" type="submit">Enable</button>
+          {% endif %}
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

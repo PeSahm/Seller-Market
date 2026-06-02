@@ -56,10 +56,25 @@ def test_customer_create_minimal() -> None:
     assert model.password == "s3cret"
 
 
-def test_customer_create_rejects_invalid_broker() -> None:
-    """``broker`` is a strict Literal — anything outside the tuple is 422."""
+def test_customer_create_accepts_any_nonempty_broker_string() -> None:
+    """``broker`` is now a free string — the source of truth is the
+    ``brokers`` DB table, checked in the service layer
+    (``customers._validate_broker``), NOT a closed Pydantic ``Literal``.
+
+    So the schema accepts any non-empty code (e.g. a DB-managed Exir tenant
+    or operator-added broker); an unknown/disabled code is rejected later
+    with a plain ``ValueError`` by the service, not a 422 here.
+    """
     kwargs = _base_create_kwargs()
-    kwargs["broker"] = "totallybogus"
+    kwargs["broker"] = "khobregan"  # an Exir tenant code — unknown to the old Literal
+    model = CustomerCreate(**kwargs)
+    assert model.broker == "khobregan"
+
+
+def test_customer_create_rejects_empty_broker() -> None:
+    """An empty broker string is still a schema error (min_length=1)."""
+    kwargs = _base_create_kwargs()
+    kwargs["broker"] = ""
     with pytest.raises(ValidationError):
         CustomerCreate(**kwargs)
 

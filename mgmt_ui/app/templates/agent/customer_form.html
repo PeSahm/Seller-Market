@@ -48,8 +48,15 @@
   <div class="field">
     <label class="label" for="broker">Broker</label>
     <select class="input" id="broker" name="broker" required>
-      {% for b in brokers %}
-      <option value="{{ b }}" {% if fv.broker == b %}selected{% endif %}>{{ b }}</option>
+      {% if not fv.broker %}
+      <option value="" disabled selected>— pick a broker —</option>
+      {% endif %}
+      {% for family, brokers in broker_groups|default([]) %}
+      <optgroup label="{{ family }}">
+        {% for broker in brokers %}
+        <option value="{{ broker.code }}" {% if fv.broker == broker.code %}selected{% endif %}>{{ broker.label }}</option>
+        {% endfor %}
+      </optgroup>
       {% endfor %}
     </select>
   </div>
