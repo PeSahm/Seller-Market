@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from broker_enum import BrokerCode
+from broker_enum import BrokerCode, get_endpoints_for
 from api_client import EphoenixAPIClient
 from order_tracker import OrderResultTracker, OrderResult
 from cache_manager import TradingCache
@@ -287,14 +287,15 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
             cookies=prepared.cookies,
         )
 
-    # Validate broker code
-    if not BrokerCode.is_valid(broker_code):
-        raise ValueError(f"Invalid broker code: {broker_code}")
-    
-    # Get broker endpoints
-    broker_enum = BrokerCode(broker_code)
-    endpoints = broker_enum.get_endpoints()
-    
+    # ephoenix family — endpoints are DATA-DRIVEN from the broker code (no
+    # hardcoded enum gate). A new standard ephoenix broker added in the mgmt UI
+    # therefore fires here with no bot change; per-code quirks (the ib shard)
+    # live in get_endpoints_for. The mgmt UI already validates the code against
+    # the brokers table before it reaches config.ini, so a bad code can't get
+    # here — and if one did, it just derives api-{code}.ephoenix.ir and fails at
+    # the network layer rather than at a hardcoded allow-list.
+    endpoints = get_endpoints_for(broker_code)
+
     logger.info(f"Broker: {BrokerCode.get_broker_name(broker_code)}")
     
     # Initialize API client with cache
@@ -601,12 +602,20 @@ def on_test_stop(environment, **kwargs):
         section = dict(config[section_name])
         username = section['username']
         broker_code = section['broker']
-        
+
+        # Exir order status arrives over WebSocket, not the ephoenix
+        # GetOpenOrders feed, so this ephoenix-only post-run summary skips
+        # non-ephoenix sections. The old enum path skipped them implicitly via a
+        # BrokerCode ValueError; the data-driven path must skip them explicitly.
+        from broker_adapters import resolve_family
+        if resolve_family(broker_code, section) != "ephoenix":
+            logger.info(f"Skipping order-summary for non-ephoenix {username}@{broker_code}")
+            continue
+
         try:
-            # Get broker endpoints
-            broker_enum = BrokerCode(broker_code)
-            endpoints = broker_enum.get_endpoints()
-            
+            # Get broker endpoints (data-driven from the code)
+            endpoints = get_endpoints_for(broker_code)
+
             # Create API client
             api_client = EphoenixAPIClient(
                 broker_code=broker_code,

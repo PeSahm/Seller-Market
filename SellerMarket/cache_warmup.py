@@ -24,7 +24,7 @@ import logging
 from typing import Dict
 from datetime import datetime
 
-from broker_enum import BrokerCode
+from broker_enum import get_endpoints_for
 from api_client import EphoenixAPIClient
 from cache_manager import TradingCache
 from captcha_utils import decode_captcha
@@ -115,14 +115,11 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
         if resolve_family(broker_code, config_section) == "exir":
             return _warmup_exir(config_section, cache)
 
-        # Validate broker code
-        if not BrokerCode.is_valid(broker_code):
-            logger.error(f"Invalid broker code: {broker_code}")
-            return False
-        
-        # Get broker endpoints
-        broker_enum = BrokerCode(broker_code)
-        endpoints = broker_enum.get_endpoints()
+        # ephoenix family — endpoints are DATA-DRIVEN from the broker code (no
+        # hardcoded enum gate), so a new standard ephoenix broker validates here
+        # with no bot change. The ib shard etc. live in get_endpoints_for; the
+        # mgmt UI already validates the code against the brokers table.
+        endpoints = get_endpoints_for(broker_code)
         
         # Initialize API client with cache
         api_client = EphoenixAPIClient(

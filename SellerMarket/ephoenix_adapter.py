@@ -26,7 +26,7 @@ import logging
 from typing import Any, Callable, Optional
 
 from broker_adapters import BrokerAdapter, PreparedOrder
-from broker_enum import BrokerCode
+from broker_enum import BrokerCode, get_endpoints_for
 from api_client import EphoenixAPIClient
 
 logger = logging.getLogger(__name__)
@@ -62,13 +62,10 @@ class EphoenixAdapter(BrokerAdapter):
         logger.info(f"Preparing order for {username}@{broker_code} - ISIN: {isin}")
         logger.info(f"{'='*80}")
 
-        # Validate broker code
-        if not BrokerCode.is_valid(broker_code):
-            raise ValueError(f"Invalid broker code: {broker_code}")
-
-        # Get broker endpoints
-        broker_enum = BrokerCode(broker_code)
-        endpoints = broker_enum.get_endpoints()
+        # ephoenix family — endpoints derive from the broker code (data-driven,
+        # no enum gate), so a new standard ephoenix broker works with no code
+        # change. The ib shard etc. live in get_endpoints_for.
+        endpoints = get_endpoints_for(broker_code)
 
         logger.info(f"Broker: {BrokerCode.get_broker_name(broker_code)}")
 
