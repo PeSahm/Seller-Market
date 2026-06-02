@@ -497,11 +497,23 @@ GET https://core.tadbirrlc.com//StockInformationHandler
 - **removed `SellerMarket/tse_price.py`** (retired).
 - **tests** — new `test_rlc_price.py` (url-encode / parse hap-lap / cache-hit / proxy-bypass `trust_env is False` / unknown-ISIN raises / prefetch); `test_broker_adapters.py` repointed `tse_price`→`rlc_price` (band values unchanged 9930/9370). **Full bot suite: 98 passed.** ruff clean.
 
-### Resume here (canary is now VIABLE on PouyanIt)
-With the price broker-native + reachable from PouyanIt, the Session-5 canary is unblocked:
-1. **Merge #105** (await CodeRabbit, fix, reply `@coderabbitai`) → bot image rebuilds via `docker-publish.yml`.
-2. **Stage the new bot image** on 5.10.248.55 (ghcr was reachable there last session; else mirror-pull **by digest** per Session-3 lesson) + verify the running container's `org.opencontainers.image.revision` label == the merge SHA ("up" is NOT proof).
-3. **Recreate Mostafa's stack** (`83619dcd`, dir `…/agents/89bb891e-…/`) on the new image; ephoenix ayandeh buy unaffected (byte-identical path).
-4. **Add the Exir customer** in the mgmt UI: broker `khobregan` (exir, seeded), user `4580090306`, ISIN `IRO1SROD0001` (سرود), side 1 → assign to Mostafa's stack; redeploy so config.ini carries both sections + `broker_family = exir`.
-5. **Wed ~08:45 Tehran**: watch the run; confirm a clean Exir order (ceiling price from RLC, fee-adjusted volume) + the fire-log, then roll the other 6 stacks.
-- **No Exir order fired yet.** All validated read-only.
+### Merged + DEPLOYED (PR #105 → main `6b25a56`)
+CodeRabbit raised one issue (`prefetch` not actually best-effort — `_fetch` could raise); fixed (try/except + log, `test_prefetch_swallows_errors`), re-reviewed clean (COMMENTED). **Admin-squash-merged** (dismissed the stale CHANGES_REQUESTED — CodeRabbit downgrades to COMMENTED, never APPROVES, so GitHub keeps the merge BLOCKED until the stale review is dismissed). Bot image `6b25a56` built by `docker-publish.yml`.
+
+**Deploy state now (canary ARMED, not yet fired):**
+- **Bot image** staged on 5.10.248.55 by digest (`ghcr-mirror.liara.ir/pesahm/seller-market@sha256:5e2c4673…`) → retagged `ghcr.io/…:latest`, revision `6b25a56` verified (`rlc_price.py` present, `tse_price.py` gone). ghcr **was blocked** from PouyanIt this time → mirror-by-digest was required.
+- **Mostafa's stack** (`83619dcd`, dir `…/89bb891e-…/`) recreated on `6b25a56`, **healthy**. Both customers on it: ephoenix `ayandeh IRO1PNES0001 s1` (control) + exir `khobregan IRO1SROD0001 s1` (سرود, buy). Scheduler: cache_warmup 08:20, run_trading 08:44.
+- **PouyanIt pull-policy flipped to `never`** (both servers now `never`; ghcr blocked there, images pre-staged). Done via api container UPDATE.
+- **rlc_price verified LIVE in the recreated bot container**: `rlc_price.get_price_band('IRO1SROD0001') == (9930, 9370)`.
+
+### TWO bugs hit during deploy (both fixed)
+1. **Stale mgmt-UI renderer** — deployed mgmt-api was `019f974`, whose `config_ini.py` predates the `broker_family` line (that shipped in #104/`6b92c31` but the **mgmt UI was never redeployed past Phase 1**). So the first render produced the khobregan section with **no `broker_family`** → bot would default it to ephoenix. **Fix:** deployed the `6b92c31` mgmt-ui image (staged by digest `sha256:55cebc91…`; verified `019f974` is an ancestor → diff is only +10 lines in `config_ini.py`, **no migration**, alembic stays `0009_bo_tracking_composite`). mgmt-api healthy, `/health=200`. **LESSON: a bot PR that also edits a mgmt_ui file (the config renderer) requires redeploying BOTH images — the bot image alone is not enough.**
+2. **Cold family-cache in out-of-process redeploy** — triggering `services.stacks.redeploy_stack` via `docker exec … python -` does NOT run the FastAPI lifespan that warms the broker-family cache, so `registry.family_of('khobregan')` raised `UnknownBrokerError` and `config_ini.py`'s `except UnknownBrokerError: family='ephoenix'` rendered **`broker_family = ephoenix`**. **Fix:** `await warm_family_cache(db)` BEFORE `redeploy_stack` in the script. The normal **web-UI redeploy is fine** (cache warmed at startup). After the warm, config.ini correctly carries `broker_family = exir`. **Latent footgun (follow-up): the sync renderer swallows `UnknownBrokerError`→ephoenix, so ANY cold-cache render mislabels Exir as ephoenix — a background/worker redeploy path could silently mis-route. Renderer should ensure-warm or fail loud.**
+
+### Resume here — WATCH THE OPEN (08:44 Tehran)
+Everything is armed; **no Exir order has fired yet**. At the next 08:44 Tehran run:
+1. `docker logs sm-agent-89bb891e-…-bot --since 30m` around 08:44 — confirm the khobregan account routes to the **exir** adapter (not ephoenix), fires a BUY at the **RLC ceiling 9930** (سرود), fee-adjusted volume (`floor(BP/(price*(1+buyFee)))`), and a clean (non-error) order response.
+2. `cat …/89bb891e-…/run_results/order_fires_<date>.jsonl` — the Exir fire is logged (no serial/tracking — Exir sync resp has no id; mgmt reconciles **date-based**).
+3. `/admin/bot-report` → Refresh → confirm the Exir buy lands in `broker_orders` for the khobregan customer.
+4. Then **roll the other 6 stacks** to `6b25a56` (they still run `902a3dd`): stage the image per host (PouyanIt already has it; Tebyan via mirror-by-digest), recreate each stack dir's compose, verify the running container's revision == `6b25a56`.
+- ayandeh ephoenix buy is the control — it must fire exactly as before (byte-identical path).
