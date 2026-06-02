@@ -39,11 +39,14 @@ FLAT package layout — top-level module (Dockerfile ``COPY *.py ./``).
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import urllib.parse
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 # The RLC market-data gateway. The doubled slash mirrors the broker client's own
 # URL (the handler is tolerant of it) — kept verbatim to match what the server
@@ -103,11 +106,20 @@ def _fetch(isins: list[str], timeout: int) -> dict[str, tuple[int, int]]:
 
 
 def prefetch(isins: list[str], timeout: int = 15) -> None:
-    """Warm the cache for several ISINs in one request (best-effort)."""
+    """Warm the cache for several ISINs in one request (best-effort).
+
+    Transport/parse failures are swallowed (logged) — the per-ISIN
+    ``get_price_band`` retries on demand, so a failed warmup must never abort
+    the caller (e.g. the bot's pre-run warmup).
+    """
     unique = sorted({i for i in isins if i})
     if not unique:
         return
-    parsed = _fetch(unique, timeout)
+    try:
+        parsed = _fetch(unique, timeout)
+    except Exception as exc:  # noqa: BLE001 — warmup is best-effort; get_price_band retries
+        logger.warning("rlc_price prefetch failed for %d ISIN(s): %s", len(unique), exc)
+        return
     if parsed:
         now = time.monotonic()
         with _lock:

@@ -116,6 +116,17 @@ def test_prefetch_warms_multiple(monkeypatch):
     assert len(calls) == 1
 
 
+def test_prefetch_swallows_errors(monkeypatch):
+    # A transport/parse failure during warmup must NOT propagate (best-effort):
+    # the per-ISIN get_price_band retries on demand.
+    def boom(url, timeout=None, **kw):
+        raise rlc_price.requests.exceptions.ConnectionError("network down")
+    monkeypatch.setattr(rlc_price._session, "get", boom)
+    rlc_price.prefetch(["IRO1SROD0001"])  # no raise
+    # cache stayed empty → a later get_price_band still tries the network.
+    assert rlc_price._cache == {}
+
+
 # ---------------------------------------------------------------------------
 # Proxy-bypass: the Iranian RLC host must be reached directly.
 # ---------------------------------------------------------------------------
