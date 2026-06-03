@@ -1,0 +1,131 @@
+{#
+  Load-balance + locust auto-scale overview.
+
+  On every stack push the system (a) auto-scales each stack's locust
+  users/spawn to its customer-section count and (b) for multi-stack agents,
+  rebalances customers across servers by section count. This page shows the
+  current per-agent state (a preview reconcile, no mutation), lets an admin
+  trigger a rebalance on demand, and lists the recent automatic actions from
+  the audit log.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Load balance{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Load balance &amp; locust auto-scale</h1>
+    <p class="text-muted text-small">
+      On every stack push, each agent's customers are balanced across its servers
+      by section count, and locust is auto-scaled (users = {{ multiplier }}× sections,
+      spawn rate = sections) so every customer fires. Toggle on
+      <a href="/admin/settings">Settings</a>.
+    </p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header"><strong>Settings</strong></div>
+  <form method="post" action="/admin/load-balance/settings"
+        style="display:flex;flex-wrap:wrap;align-items:center;gap:1.25rem;padding:.5rem 0;">
+    <label style="display:flex;align-items:center;gap:.4rem;">
+      <input type="checkbox" name="enable_locust_autoscale" {% if autoscale_on %}checked{% endif %}>
+      Locust auto-scale
+    </label>
+    <label style="display:flex;align-items:center;gap:.4rem;">
+      <input type="checkbox" name="enable_autobalance" {% if balance_on %}checked{% endif %}>
+      Auto-balance customers
+    </label>
+    <label style="display:flex;align-items:center;gap:.4rem;">
+      Users multiplier
+      <input type="number" name="autobalance_users_multiplier" min="1" max="20"
+             value="{{ multiplier }}" class="input" style="width:5rem;">
+    </label>
+    <button type="submit" class="btn btn--primary btn--sm">Save</button>
+  </form>
+</div>
+
+{% for row in agent_rows %}
+  {% set a = row.agent %}{% set p = row.preview %}
+  {% if p is none %}
+  <div class="card">
+    <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:1rem;">
+      <h2 class="h2" dir="auto" style="margin:0;">{{ a.username }}</h2>
+      <span class="badge badge--down" title="Preview failed — see logs">preview unavailable</span>
+    </div>
+  </div>
+  {% else %}
+  <div class="card">
+    <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:1rem;">
+      <h2 class="h2" dir="auto" style="margin:0;">{{ a.username }}</h2>
+      <span style="display:flex;align-items:center;gap:.5rem;">
+        {% if p.num_stacks <= 1 %}
+          <span class="badge badge--up" title="Single stack — locust auto-scaled, nothing to balance">1 stack</span>
+        {% elif p.balanced %}
+          <span class="badge badge--up" title="No rebalance needed">balanced</span>
+        {% else %}
+          <span class="badge badge--pending" title="A rebalance is pending">{{ p.moves|length }} move(s) pending</span>
+        {% endif %}
+        {% if p.num_stacks > 1 %}
+        <form method="post" action="/admin/load-balance/{{ a.id }}/rebalance" style="display:inline;margin:0;">
+          <button type="submit" class="btn btn--primary btn--sm">Rebalance now</button>
+        </form>
+        {% endif %}
+      </span>
+    </div>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Stack</th><th>Customers</th><th>Sections</th>
+          <th>Locust users</th><th>Spawn rate</th>
+          {% if not p.balanced %}<th>After rebalance</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+      {% for sid, sl in p.before.items() %}
+        <tr>
+          <td><code class="text-small">{{ sid|string|truncate(8, true, "") }}</code></td>
+          <td>{{ sl.customers }}</td>
+          <td>{{ sl.sections }}</td>
+          <td>{{ sl.locust_users }}</td>
+          <td>{{ sl.locust_spawn_rate }}</td>
+          {% if not p.balanced %}
+            <td class="text-muted text-small">
+              {{ p.after[sid].sections }} sections · {{ p.after[sid].locust_users }} users
+            </td>
+          {% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+{% else %}
+  <p class="text-muted">No agents with deployed stacks yet.</p>
+{% endfor %}
+
+<h2 class="h2">Recent auto-balance actions</h2>
+<table class="table">
+  <thead>
+    <tr><th>When</th><th>Agent</th><th>Trigger</th><th>Customers moved</th></tr>
+  </thead>
+  <tbody>
+  {% for r in recent_actions %}
+    <tr>
+      <td class="text-small">{{ r.ts.strftime("%Y-%m-%d %H:%M") if r.ts else "" }}</td>
+      <td><code class="text-small">{{ r.target_id|string|truncate(8, true, "") }}</code></td>
+      <td class="text-small">
+        {% if r.actor_user_id and users_by_id.get(r.actor_user_id) %}
+          {{ users_by_id.get(r.actor_user_id).username }}
+        {% else %}
+          <span class="text-muted">auto (on push)</span>
+        {% endif %}
+      </td>
+      <td>{{ (r.after_json.moves | length) if (r.after_json and r.after_json.moves) else 0 }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="text-muted">No auto-balance actions recorded yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

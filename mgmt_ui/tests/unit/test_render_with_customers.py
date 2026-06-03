@@ -170,7 +170,8 @@ def _make_db(customer_rows: list[SimpleNamespace]) -> MagicMock:
     # Call order matches the body of ``_build_render_context`` →
     # ``_load_stack_customers``:
     # _read_setting × 2 → customers SELECT → per-customer TI SELECTs ×N →
-    # list_jobs → get_locust_config.
+    # list_jobs → get_locust_config → _read_setting × 2 (autoscale toggle +
+    # multiplier; these don't affect config.ini, only locust).
     db.execute = AsyncMock(
         side_effect=[
             settings_result,
@@ -179,6 +180,8 @@ def _make_db(customer_rows: list[SimpleNamespace]) -> MagicMock:
             *ti_results,
             scheduler_result,
             locust_result,
+            settings_result,  # enable_locust_autoscale
+            settings_result,  # autobalance_users_multiplier
         ]
     )
     db.get = AsyncMock(return_value=_fake_server())

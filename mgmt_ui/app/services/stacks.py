@@ -283,6 +283,11 @@ async def _read_setting(
     return value
 
 
+def _parse_bool(value: str) -> bool:
+    """Parse a settings-table string into a bool (``"true"/"1"/"yes"/"on"``)."""
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 async def _build_render_context(
     db: AsyncSession,
     stack: AgentStack,
@@ -382,6 +387,20 @@ async def _build_render_context(
             processes=locust_db.processes,
         )
 
+    # Locust auto-scale: by default the renderer derives users/spawn from the
+    # customer-section count (so locust never spawns fewer users than there are
+    # customers). The operator can disable it; the "3×" multiplier is tunable.
+    autoscale_locust = _parse_bool(
+        await _read_setting(db, "enable_locust_autoscale", "true")
+    )
+    try:
+        users_multiplier = int(
+            await _read_setting(db, "autobalance_users_multiplier", "3")
+        )
+    except (TypeError, ValueError):
+        users_multiplier = 3
+    users_multiplier = max(1, users_multiplier)
+
     return StackRenderContext(
         agent_id=stack.agent_id,
         server_base_dir=server.base_dir,
@@ -391,6 +410,8 @@ async def _build_render_context(
         scheduler_jobs=scheduler_rows,
         scheduler_enabled=scheduler_enabled,
         locust=locust_row,
+        autoscale_locust=autoscale_locust,
+        locust_users_multiplier=users_multiplier,
     )
 
 
@@ -947,6 +968,50 @@ async def _do_compose_action(
                 )
 
 
+async def _maybe_reconcile_agent(
+    db: AsyncSession, stack_id: UUID, actor_id: Optional[UUID]
+) -> None:
+    """Auto-balance the stack's agent + scale locust *before* a deploy.
+
+    Runs BEFORE :func:`_do_compose_action` (not inside it) because the reused
+    ``move_customer`` / ``push_*_for_stack`` helpers acquire the same per-server
+    compose lock — nesting would self-conflict. Gated by ``enable_autobalance``;
+    best-effort (any failure is logged and swallowed so it can never block the
+    deploy). The render step that follows still auto-scales the deploying stack's
+    own locust from ``enable_locust_autoscale``, independent of this.
+    """
+    if not _parse_bool(await _read_setting(db, "enable_autobalance", "true")):
+        return
+    try:
+        multiplier = int(
+            await _read_setting(db, "autobalance_users_multiplier", "3")
+        )
+    except (TypeError, ValueError):
+        multiplier = 3
+    try:
+        stack = await get_stack(db, stack_id)
+        if stack is None:
+            return
+        from app.services import autobalance  # noqa: WPS433
+
+        await autobalance.reconcile_agent(
+            db,
+            stack.agent_id,
+            actor_id,
+            apply=True,
+            enable_balance=True,
+            multiplier=max(1, multiplier),
+            skip_locust_push_for=stack_id,
+        )
+    except Exception:  # noqa: BLE001 — never block a deploy
+        # Reset the shared session so a half-finished reconcile can't leave it in
+        # a failed-transaction state and break the deploy's own commit below.
+        await db.rollback()
+        logger.exception(
+            "autobalance reconcile for stack %s failed", stack_id
+        )
+
+
 async def provision_stack(
     db: AsyncSession,
     stack_id: UUID,
@@ -959,6 +1024,7 @@ async def provision_stack(
     work — it's idempotent on the remote either way, but skipping is faster
     and keeps the SSH log cleaner.
     """
+    await _maybe_reconcile_agent(db, stack_id, actor_id)
     return await _do_compose_action(
         db,
         stack_id,
@@ -997,6 +1063,7 @@ async def redeploy_stack(
     round-trips per redeploy — negligible compared to ``--force-recreate
     --pull always`` (see :func:`_compose_up`).
     """
+    await _maybe_reconcile_agent(db, stack_id, actor_id)
     return await _do_compose_action(
         db,
         stack_id,

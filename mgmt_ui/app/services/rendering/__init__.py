@@ -78,6 +78,13 @@ class StackRenderContext:
     scheduler_jobs: Sequence[SchedulerJobRow] = field(default_factory=tuple)
     scheduler_enabled: bool = False
     locust: "LocustConfigRow | None" = None
+    # Auto-scale the locust user/spawn counts to the number of config sections
+    # so locust never spawns fewer users than there are customers (otherwise the
+    # excess customers never fire). Off by default for pure golden-file render
+    # tests; the stacks service flips it on from the ``enable_locust_autoscale``
+    # setting. ``locust_users_multiplier`` is the "3×" knob (``users = 3×sections``).
+    autoscale_locust: bool = False
+    locust_users_multiplier: int = 3
 
 
 # Re-exports so callers can do
