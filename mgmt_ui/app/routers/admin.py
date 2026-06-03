@@ -46,6 +46,7 @@ from app.schemas.settings_page import SettingsUpdate
 from app.security.deps import require_admin
 from app.services import agents as services_agents
 from app.services import audit as services_audit
+from app.services import autobalance as services_autobalance
 from app.services import broker_client
 from app.services import broker_orders as services_broker_orders
 from app.services import brokers_admin
@@ -2403,6 +2404,140 @@ async def admin_settings_save(
 #
 # Same "empty-string -> None, garbage -> None" parsing policy as
 # /admin/trades and /admin/health so a hand-edited URL stays graceful.
+
+
+def _setting_is_on(value: str) -> bool:
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+@router.get("/load-balance")
+async def admin_load_balance(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-agent load-balance + locust auto-scale overview, plus recent actions.
+
+    For each agent with at least one stack we run a *preview* reconcile
+    (``apply=False`` — no DB/SSH mutation) to show its current per-stack section
+    load, the computed locust ``users``/``spawn_rate``, and whether a rebalance
+    is pending. The recent ``autobalance.reconcile`` audit rows show what the
+    automatic on-push reconciler has already done.
+    """
+    autoscale_on = _setting_is_on(
+        await settings_store.get_setting(db, "enable_locust_autoscale")
+    )
+    balance_on = _setting_is_on(
+        await settings_store.get_setting(db, "enable_autobalance")
+    )
+    try:
+        multiplier = int(
+            await settings_store.get_setting(db, "autobalance_users_multiplier")
+        )
+    except (TypeError, ValueError):
+        multiplier = 3
+
+    agents = await services_agents.list_agents(db)
+    agent_rows = []
+    for agent in agents:
+        preview = await services_autobalance.reconcile_agent(
+            db,
+            agent.id,
+            None,
+            apply=False,
+            enable_balance=balance_on,
+            multiplier=multiplier,
+        )
+        if preview.num_stacks == 0:
+            continue
+        agent_rows.append({"agent": agent, "preview": preview})
+
+    recent = await services_audit.list_audit(
+        db, action_contains="autobalance", limit=50
+    )
+    actor_ids = {r.actor_user_id for r in recent if r.actor_user_id}
+    users_by_id: dict = {}
+    if actor_ids:
+        res = await db.execute(select(User).where(User.id.in_(actor_ids)))
+        users_by_id = {u.id: u for u in res.scalars().all()}
+
+    ctx = _ctx(request, user, current_tab="/admin/load-balance")
+    ctx["agent_rows"] = agent_rows
+    ctx["recent_actions"] = recent
+    ctx["users_by_id"] = users_by_id
+    ctx["autoscale_on"] = autoscale_on
+    ctx["balance_on"] = balance_on
+    ctx["multiplier"] = multiplier
+    return templates.TemplateResponse("admin/load_balance.html", ctx)
+
+
+@router.post("/load-balance/{agent_id}/rebalance")
+async def admin_load_balance_rebalance(
+    agent_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually run the reconcile for one agent (balance + scale locust now).
+
+    Best-effort: a failure is logged, not surfaced as a 500 — the same reconcile
+    runs automatically on the next stack push regardless.
+    """
+    try:
+        multiplier = int(
+            await settings_store.get_setting(db, "autobalance_users_multiplier")
+        )
+    except (TypeError, ValueError):
+        multiplier = 3
+    try:
+        await services_autobalance.reconcile_agent(
+            db,
+            agent_id,
+            user.id,
+            apply=True,
+            enable_balance=True,
+            multiplier=multiplier,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort manual trigger
+        logger.warning("manual rebalance failed for agent %s: %s", agent_id, exc)
+    return _flash_redirect(request, "/admin/load-balance")
+
+
+@router.post("/load-balance/settings")
+async def admin_load_balance_settings(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    enable_locust_autoscale: bool = Form(False),
+    enable_autobalance: bool = Form(False),
+    autobalance_users_multiplier: int = Form(3),
+):
+    """Save the auto-balance / auto-scale toggles (this feature's own settings).
+
+    Unchecked checkboxes don't POST, so the bool params default to ``False``.
+    The multiplier is clamped to a sane 1..20.
+    """
+    multiplier = max(1, min(20, autobalance_users_multiplier))
+    await settings_store.set_setting(
+        db,
+        "enable_locust_autoscale",
+        "true" if enable_locust_autoscale else "false",
+        updated_by=user.id,
+    )
+    await settings_store.set_setting(
+        db,
+        "enable_autobalance",
+        "true" if enable_autobalance else "false",
+        updated_by=user.id,
+    )
+    await settings_store.set_setting(
+        db,
+        "autobalance_users_multiplier",
+        str(multiplier),
+        updated_by=user.id,
+    )
+    await db.commit()
+    return _flash_redirect(request, "/admin/load-balance")
 
 
 @router.get("/audit")

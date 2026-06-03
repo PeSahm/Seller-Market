@@ -64,6 +64,17 @@ DEFAULTS: dict[str, str] = {
     # OR symbol matches any entry (case-insensitive). Use it to keep bonds the
     # agents buy out of your report and fee. Empty = exclude nothing.
     "excluded_instruments": "",
+    # --- Auto-balance + locust auto-scale (load-balance feature) ---
+    # Auto-scale each stack's locust users/spawn to its customer-section count on
+    # every render/push (fixes the fixed users=10 silently capping trading at 10
+    # customers). "true"/"false".
+    "enable_locust_autoscale": "true",
+    # The "users = N× sections" multiplier (operator wants "at least 3×").
+    "autobalance_users_multiplier": "3",
+    # On every push, rebalance a multi-stack agent's customers across its servers
+    # by section count (with hysteresis). Disable to keep customers where they are
+    # while still auto-scaling locust. "true"/"false".
+    "enable_autobalance": "true",
 }
 
 

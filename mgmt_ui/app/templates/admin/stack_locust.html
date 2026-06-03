@@ -39,6 +39,15 @@
   <strong>next</strong> scheduled run &mdash; locust reads
   <code>locust_config.json</code> at process start, not continuously.
 </p>
+<p class="text-small">
+  <span class="badge badge--pending">auto-managed</span>
+  When auto-scale is on (<a href="/admin/load-balance">Load balance</a>),
+  <strong>users</strong> and <strong>spawn rate</strong> are derived from this
+  stack's customer-section count on every push (users = N&times; sections,
+  spawn = sections). The <strong>users</strong> value below then acts only as a
+  <em>floor</em>; <strong>spawn rate</strong> is overridden. Disable auto-scale
+  on the Load-balance page to edit them by hand.
+</p>
 
 {% set fv = form_values|default({}) %}
 {% set users_value = fv.users if fv.users is defined else (locust.users if locust else 10) %}

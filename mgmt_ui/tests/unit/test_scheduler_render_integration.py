@@ -126,15 +126,30 @@ def _make_db(customer_rows: list[SimpleNamespace] | None = None) -> MagicMock:
     settings_result = MagicMock()
     settings_result.scalar_one_or_none = MagicMock(return_value=None)
 
+    # The locust auto-scale toggle (read at the tail of _build_render_context)
+    # is forced OFF here so these tests keep asserting the override-verbatim /
+    # fleet-default locust behaviour; the auto-scale path is covered by
+    # test_autobalance.py.
+    autoscale_off = MagicMock()
+    autoscale_off.scalar_one_or_none = MagicMock(return_value="false")
+
     customers_result = MagicMock()
     scalars_mock = MagicMock()
     scalars_mock.all = MagicMock(return_value=customer_rows or [])
     customers_result.scalars = MagicMock(return_value=scalars_mock)
 
-    # Same ordering as test_render_with_customers: two settings reads,
-    # then one customer read.
+    # Order: two settings reads, the customer read, then the two tail settings
+    # reads (enable_locust_autoscale → "false", autobalance_users_multiplier).
+    # The scheduler-jobs + locust-config service calls are monkeypatched, so
+    # they don't consume from this queue.
     db.execute = AsyncMock(
-        side_effect=[settings_result, settings_result, customers_result]
+        side_effect=[
+            settings_result,
+            settings_result,
+            customers_result,
+            autoscale_off,
+            settings_result,
+        ]
     )
     db.get = AsyncMock(return_value=_fake_server())
     return db
