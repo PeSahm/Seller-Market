@@ -6,7 +6,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,25 @@ class OrderResult:
         self.is_done = order_data.get('isDone', False)
         self.net_amount = order_data.get('netAmount', 0)
         
+    def is_executed(self) -> bool:
+        """True if any of this order's volume has actually traded (filled).
+
+        Used by the post-run summary to count executed trades. An order counts
+        as executed once its ``executedVolume`` is positive (partial or full
+        fill). Freshly-queued limit orders at the open report 0 here (state 2,
+        "registered in core") until the matching engine fills them.
+
+        This method was referenced by ``locustfile_new.on_test_stop`` but never
+        defined, so every post-run summary raised ``AttributeError`` ("'OrderResult'
+        object has no attribute 'is_executed'") and silently dropped the account
+        from the trade count — making runs look empty/failed even when orders
+        placed successfully.
+        """
+        try:
+            return float(self.executed_volume or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
     def to_dict(self) -> dict:
         """Convert to dictionary."""
         return {
@@ -175,7 +194,7 @@ class OrderResultTracker:
             f"Total Volume: {total_volume:,} shares",
             f"Executed Volume: {total_executed:,} shares ({total_executed/total_volume*100:.1f}%)" if total_volume > 0 else "Executed Volume: 0",
             f"Total Amount: {total_amount:,.0f} Rials",
-            f"\nOrder Details:",
+            "\nOrder Details:",
             f"{'-'*70}"
         ]
         
