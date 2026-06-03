@@ -2440,14 +2440,20 @@ async def admin_load_balance(
     agents = await services_agents.list_agents(db)
     agent_rows = []
     for agent in agents:
-        preview = await services_autobalance.reconcile_agent(
-            db,
-            agent.id,
-            None,
-            apply=False,
-            enable_balance=balance_on,
-            multiplier=multiplier,
-        )
+        try:
+            preview = await services_autobalance.reconcile_agent(
+                db,
+                agent.id,
+                None,
+                apply=False,
+                enable_balance=balance_on,
+                multiplier=multiplier,
+            )
+        except Exception:  # noqa: BLE001 — one bad agent must not 500 the page
+            logger.exception("load-balance preview failed for agent %s", agent.id)
+            await db.rollback()
+            agent_rows.append({"agent": agent, "preview": None})
+            continue
         if preview.num_stacks == 0:
             continue
         agent_rows.append({"agent": agent, "preview": preview})

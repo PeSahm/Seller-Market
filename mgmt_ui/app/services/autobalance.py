@@ -233,8 +233,16 @@ def _loads_from(
     customer_loads: list[tuple[UUID, UUID, int]],
     *,
     multiplier: int,
+    floor_by_stack: Optional[dict[UUID, int]] = None,
 ) -> dict[UUID, StackLoad]:
-    """Build per-stack :class:`StackLoad` (sections, customers, locust targets)."""
+    """Build per-stack :class:`StackLoad` (sections, customers, locust targets).
+
+    ``floor_by_stack`` carries each stack's persisted ``LocustConfig.users`` so
+    the previewed/audited ``locust_users`` matches what ``render_locust_config``
+    actually renders (which uses that override as a floor). Falls back to the
+    fleet floor for any stack without an override.
+    """
+    floor_by_stack = floor_by_stack or {}
     by_stack: dict[UUID, StackLoad] = {
         s.id: StackLoad(stack_id=s.id, server_id=s.server_id, sections=0, customers=0)
         for s in stacks
@@ -245,8 +253,9 @@ def _loads_from(
             sl.sections += sec
             sl.customers += 1
     for sl in by_stack.values():
+        floor = floor_by_stack.get(sl.stack_id) or _LOCUST_USERS_FLOOR
         sl.locust_users, sl.locust_spawn_rate = compute_locust_targets(
-            sl.sections, multiplier=multiplier, floor_users=_LOCUST_USERS_FLOOR
+            sl.sections, multiplier=multiplier, floor_users=floor
         )
     return by_stack
 
@@ -296,14 +305,27 @@ async def reconcile_agent(
     stack_ids = [s.id for s in stacks]
     customer_loads = await _load_customer_sections(db, agent_id)
 
-    before = _loads_from(stacks, customer_loads, multiplier=multiplier)
+    # Each stack's persisted locust override acts as the auto-scale floor — load
+    # it so preview/audit ``locust_users`` matches what render_locust_config emits.
+    from app.services import locust_configs as services_locust  # noqa: WPS433
+
+    floor_by_stack: dict[UUID, int] = {}
+    for s in stacks:
+        lc = await services_locust.get_locust_config(db, s.id)
+        floor_by_stack[s.id] = lc.users if lc is not None else _LOCUST_USERS_FLOOR
+
+    before = _loads_from(
+        stacks, customer_loads, multiplier=multiplier, floor_by_stack=floor_by_stack
+    )
 
     moves: list[PlannedMove] = []
     if len(stacks) > 1 and enable_balance:
         moves = plan_moves(stack_ids, server_by_stack, customer_loads)
 
     after_loads = _apply_moves(customer_loads, moves)
-    after = _loads_from(stacks, after_loads, multiplier=multiplier)
+    after = _loads_from(
+        stacks, after_loads, multiplier=multiplier, floor_by_stack=floor_by_stack
+    )
     balanced = len(moves) == 0
 
     if not apply:
@@ -333,6 +355,9 @@ async def reconcile_agent(
             )
             applied_moves.append(mv)
         except Exception as exc:  # noqa: BLE001 — best-effort, never block deploy
+            # Reset the shared session in case the failure left an open txn, so
+            # later moves / the final commit don't inherit a poisoned session.
+            await db.rollback()
             logger.warning(
                 "autobalance: move customer %s -> server %s failed: %s",
                 mv.customer_id,
@@ -352,11 +377,14 @@ async def reconcile_agent(
         try:
             await stacks_svc.push_locust_config_for_stack(db, sid, actor_id)
         except Exception as exc:  # noqa: BLE001 — best-effort
+            await db.rollback()
             logger.warning("autobalance: push locust for stack %s failed: %s", sid, exc)
 
     # Recompute after-state from the moves that actually applied.
     after_loads = _apply_moves(customer_loads, applied_moves)
-    after = _loads_from(stacks, after_loads, multiplier=multiplier)
+    after = _loads_from(
+        stacks, after_loads, multiplier=multiplier, floor_by_stack=floor_by_stack
+    )
 
     await _write_reconcile_audit(
         db, agent_id, actor_id, before, after, applied_moves

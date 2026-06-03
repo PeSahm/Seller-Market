@@ -1003,9 +1003,12 @@ async def _maybe_reconcile_agent(
             multiplier=max(1, multiplier),
             skip_locust_push_for=stack_id,
         )
-    except Exception as exc:  # noqa: BLE001 — never block a deploy
-        logger.warning(
-            "autobalance reconcile for stack %s failed: %s", stack_id, exc
+    except Exception:  # noqa: BLE001 — never block a deploy
+        # Reset the shared session so a half-finished reconcile can't leave it in
+        # a failed-transaction state and break the deploy's own commit below.
+        await db.rollback()
+        logger.exception(
+            "autobalance reconcile for stack %s failed", stack_id
         )
 
 

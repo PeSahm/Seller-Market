@@ -47,6 +47,14 @@
 
 {% for row in agent_rows %}
   {% set a = row.agent %}{% set p = row.preview %}
+  {% if p is none %}
+  <div class="card">
+    <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:1rem;">
+      <h2 class="h2" dir="auto" style="margin:0;">{{ a.username }}</h2>
+      <span class="badge badge--down" title="Preview failed — see logs">preview unavailable</span>
+    </div>
+  </div>
+  {% else %}
   <div class="card">
     <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:1rem;">
       <h2 class="h2" dir="auto" style="margin:0;">{{ a.username }}</h2>
@@ -91,6 +99,7 @@
       </tbody>
     </table>
   </div>
+  {% endif %}
 {% else %}
   <p class="text-muted">No agents with deployed stacks yet.</p>
 {% endfor %}
