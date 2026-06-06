@@ -523,3 +523,57 @@ Everything is armed; **no Exir order has fired yet**. At the next 08:44 Tehran r
 ### Data-driven ephoenix brokers (`2fa0ffd`, pushed direct to main)
 Operator asked to bring ephoenix to Exir's parity: adding a new ephoenix broker should be a mgmt-UI DB row, not a bot code change. The bot gated ephoenix order-firing on the hardcoded `broker_enum.BrokerCode` (`is_valid` + `BrokerCode(code).get_endpoints()`). Fix: extracted the URL derivation into module-level **`get_endpoints_for(code)`** (`BrokerCode.get_endpoints` delegates → 11 brokers **byte-identical**, asserted by `test_enum_delegates_to_get_endpoints_for`); `locustfile_new` (order path) + `cache_warmup` + `ephoenix_adapter` derive endpoints from the code string and **dropped the `is_valid` gate**; `on_test_stop`'s ephoenix-only GetOpenOrders summary now skips non-ephoenix sections explicitly (`resolve_family != "ephoenix"`) instead of relying on the enum raising. **Now: a STANDARD new ephoenix broker = DB row + `broker_family=ephoenix`, no bot rebuild.** Non-standard hosts (ib's `api8` shard, gs quirks) stay code-keyed in `get_endpoints_for`. Live-verified on `2fa0ffd`: `get_endpoints_for('ayandeh') == BrokerCode.AYANDEH.get_endpoints()` (True), `get_endpoints_for('newbank')` → `api-newbank.ephoenix.ir`, and ayandeh warmup authenticates + fetches BP through the derived endpoints. 103 tests pass.
 - ayandeh ephoenix buy is the control — it must fire exactly as before (byte-identical path).
+
+---
+
+## Session 7 — Hamid "customers not firing / wrong trades" root-caused; locust auto-scale + load-balance feature (PR #106) built + fleet-deployed
+
+Operator (agent **Hamid**) complained some customers weren't firing and the Runs page showed wrong/"failed" trade counts. Root-caused a whole cluster, shipped two bot fixes + a big mgmt-UI feature (#106), and **rolled the entire fleet (7 stacks, both VPSes) + the mgmt UI to `fd853ea`**. Exir canary from Session 6 **fired successfully** (`orderSuccess id=17292832`) before this.
+
+### Bot image lineage this session (all on `main`, built by `docker-publish.yml`)
+`6b25a56` (rlc_price/#105) → `f434e48` (cache_warmup Exir) → `2fa0ffd` (data-driven ephoenix) → `4f20c25` (is_executed fix) → `fd853ea` (#106 squash — **mgmt-UI only**, so its *bot* image == `4f20c25` code). **The whole fleet now runs `fd853ea`.** mgmt-UI also on `fd853ea`.
+
+### The Hamid cluster — diagnosed from the bot's OWN log (`/app/trading_bot.log`), not the truncated mgmt run-log
+**The mgmt run log blob (`/var/lib/run_logs/<uuid>.log`) is a TRUNCATED tail (~60 lines)** — useless for placement detail. The full per-order detail is the bot's `/app/trading_bot.log` (14 MB) inside the container. Always pull THAT (`docker exec <c> cat /app/trading_bot.log`).
+
+Root causes (all in Hamid's old `902a3dd` image / pre-mount compose):
+1. **Locust silently caps trading at the user count.** `locustfile_new._create_user_classes` makes **one user-class per config section** (customer×instrument) but locust only spawns `users` (was fixed at **10**) across them → with >10 sections the excess customers are *prepared but never POST*. Live: Hamid's Tebyan had 26 sections / 8 accounts but only **3 accounts** placed. **THE primary bug.**
+2. **`OrderResult.is_executed()` missing** → `on_test_stop`'s trade-count loop raised `AttributeError`, caught as "Failed to fetch orders for X", silently dropping the account from the count. Fixed `4f20c25` (added `is_executed = executedVolume>0` + test). This is the bot's own summary, **NOT** the mgmt "N trades" badge.
+3. **`self.side` AttributeError in `place_order`'s fire-log capture** on the OLD image — order POSTed 200 then the fire-log key crashed, so the success was never recorded → empty fire-log. **Already fixed in current code** (`_create_user_classes` sets `side` as a class attr, line ~771); redeploying onto the new image fixes it.
+4. **Missing bind mounts.** Hamid's pre-#77 compose lacked `./order_results` and `./run_results` mounts → fire-log + order_results trapped in the container → `trade_ingestor`/`fire_log_ingestor` (which SFTP-read from the HOST) see nothing → mgmt has no data. The current `rendering/compose_yaml.py` mounts both (+ `trading_bot.log`, `cache_warmup.log`, `logs`); redeploying re-renders the compose with them.
+
+### The "N trades" badge — where it comes from
+`/admin/runs` (admin.py ~2698) + `/agent/runs` compute it as `COUNT(*) FROM trade_results GROUP BY run_id` (`trade_counts_by_run`). `trade_results` is populated by the **`trade_ingestor`** reading `order_results/*.json` from the host. So a missing `order_results` mount = empty `trade_results` = badge shows 0 → rendered as **"failed"** (and "partial · N trades" when exit≠0 but trades>0 — locust exits non-zero from the order-spam's expected broker rejections). **The badge is NOT the bot's `is_executed` summary.** Fix = the redeploy (mounts), not bot code.
+
+### Broker order-rate-limit is REAL on BOTH families (by design, operator confirmed "ignore")
+Order spam hits a per-account **300 ms min-interval** rejection: ephoenix **Code 1018** ("فاصله زمانی ثبت دو سفارش کمتر از حد مجاز"), Exir **Code 1005** (same message). Only the FIRST order per account per 300 ms wins (head-of-queue). Other live rejection codes seen on Hamid's run: **1017** "بازار در وضعیت سفارش گیری نمی‌باشد" (market not in order-taking state — fired a hair before open), **1011** "مانده حساب کافی نیست" (insufficient buying power — a multi-instrument account's shared BP funds only the first instrument; the rest 1011). ~40k attempts → only ~34 landed; that's normal for the spam.
+
+### Feature: locust auto-scale + load-balance on every push (PR #106, merged `fd853ea`, **mgmt-UI only, no migration**)
+Operator spec: on every push, **1 stack → just auto-scale locust; >1 stack → load-balance customers across servers by section count, then auto-scale**; `users = 3× sections`, `spawn_rate = sections`; auto-apply + an admin page that shows state + actions.
+- **Render-time auto-scale** (`rendering/locust_config.py::compute_locust_targets` + `render_locust_config`): `users = clamp(max(3×sections, floor), 1, 10000)`, `spawn = clamp(sections, 1, 1000)`. The stack's persisted `LocustConfig.users` is the **floor** (a manual value can raise but not lower below 3×). Gated by `ctx.autoscale_locust`, set in `stacks._build_render_context` from the **`enable_locust_autoscale`** setting (default on). Off by default in pure golden-file render tests.
+- **`services/autobalance.py`**: `plan_moves` (pure, minimal-moves greedy, **hysteresis = `max(2, ceil(0.15×avg))`** so a roughly-balanced agent never thrashes — each move changes a broker login IP), `reconcile_agent(apply=…)`, `list_agent_stacks`. Reuses `distribution.move_customer` (audits + re-pushes both config.ini) + `locust_configs`/`push_locust_config_for_stack`; writes one `autobalance.reconcile` summary audit. Per-move/per-push handlers `await db.rollback()` on failure (don't poison the shared session).
+- **Hook**: `_maybe_reconcile_agent` in `provision_stack`/`redeploy_stack` **BEFORE `_do_compose_action`** (NOT inside — the reused move/push helpers take the same per-server compose advisory lock, so nesting self-conflicts). Best-effort try/except (+ rollback), gated by **`enable_autobalance`** (default on).
+- **Admin page `/admin/load-balance`** (+ nav tab): per-agent section load + computed locust per stack, balance status, "Rebalance now", the toggles, recent `autobalance` audit rows. Per-agent preview wrapped in try/except (one bad agent can't 500 the page). "auto-managed" note on `stack_locust.html`.
+- Settings (key/value): `enable_locust_autoscale`, `enable_autobalance`, `autobalance_users_multiplier` (all default on/3). CodeRabbit **APPROVED** after 3 fixes (per-agent isolation, per-stack floor, session rollback). 428 mgmt unit tests pass. CI lints nothing — only `pytest tests/unit -q`.
+
+### Fleet rollout (this session's deploy) — all verified live
+1. mgmt-UI `fd853ea` staged by digest (`@sha256:421fda…`) → `/health=200`, `/admin/load-balance`=401(registered), alembic still `0009`.
+2. Bot `fd853ea` (`@sha256:82e2a71…`) staged on BOTH VPSes by mirror-by-digest (ghcr blocked from PouyanIt; both servers `image_pull_policy=never`).
+3. **Redeployed all 7 stacks via `redeploy_stack`** (NOT manual `compose up` — only `redeploy_stack` re-renders the compose=mounts + config + triggers reconcile). Did it via `docker exec api python -` and **`await warm_family_cache(db)` FIRST** (the Session-6 cold-cache footgun: `config_ini` mislabels Exir→ephoenix if the family cache is cold).
+4. Verified: all 7 on `fd853ea` + healthy, `run_results` mount present, **Hamid rebalanced 20/8 → 14/14** (reconcile moved 2 customers Tebyan→PouyanIt), locust auto-scaled (Hamid Tebyan users=42 spawn=14; Hamid PouyanIt users=100 because that stack has a manual floor of 100 — harmless, ≥3×). Mostafa balanced (0 moves). Small stacks floor at users=10.
+
+### Learnings (Session 7)
+- **Hamid's earlier "23/26 sections" was STALE** (days old). Always re-check the live host `config.ini` section count **and** the DB (`trade_instructions` per customer on the stack) before assuming a config/DB mismatch — here they matched (8/20), so the redeploy didn't drop anyone. `redeploy_stack` re-renders config.ini from the DB (the source of truth).
+- **Pull the bot's `/app/trading_bot.log`, not the mgmt run-log blob** (the latter is a ~60-line truncated tail).
+- **`redeploy_stack` ≠ manual `docker compose up -d`.** Manual compose-up swaps the image but does NOT re-render the compose (no mounts) or config/locust (no auto-scale) or reconcile. To deliver mounts + auto-scale, you MUST `redeploy_stack`.
+- **Out-of-process `redeploy_stack` needs `warm_family_cache` first** (no FastAPI lifespan to warm it) or Exir sections render as ephoenix.
+- **Hysteresis matters**: the load-balancer only moves when >15% imbalanced, so the first fleet-wide reconcile didn't thrash — only genuinely-lopsided Hamid (20/8) moved.
+- **`gh pr merge --delete-branch` switches the local checkout to stale local `main`** (pre-merge) — after every merge, `git fetch origin main && git checkout main && git reset --hard origin/main` to resync.
+- **github.com push/`gh` still intermittently refused from this Windows host** — wrap in retry loops (the push usually lands on attempt 2-4 despite errors).
+
+### Open follow-ups (Session 7)
+| # | Title | Why |
+|---|---|---|
+| — | Watch the next 08:44 open for Hamid | Confirm all 14 customers/stack fire (no 10-cap), fire-log + `trade_results` populate, `/admin/load-balance` shows balanced, the "N trades" badge is correct. |
+| — | Reconcile the per-stack locust floor | Hamid/PouyanIt has a manual `users=100` floor; clear it on the locust panel if exact `3×sections` is wanted. |
+| — | Exir fire-log reconciliation (still pending from S5/S6) | Exir sync resp has no order id → mgmt date-based reconcile; confirm an Exir buy lands in `/admin/bot-report` after a real run. |
