@@ -26,8 +26,11 @@ jobs:
     - name: Get version
       id: semver
       run: |
-        # Get the latest tag, or use v0.0.0 if none exists
-        LATEST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo "")"
+        # Get the latest BOT tag only. Must filter to v<digit>.x.x — otherwise
+        # git describe also returns the mgmt-ui tags (vmgmt-ui-v*/mgmt-ui-v*),
+        # and the naive parser below then computes a colliding mgmt-ui-style tag
+        # (e.g. "vmgmt-ui-v0.4.1 already exists"), failing the whole build.
+        LATEST_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || echo "")"
         
         if [ -z "$LATEST_TAG" ]; then
           # No tags exist, start with v0.1.0
