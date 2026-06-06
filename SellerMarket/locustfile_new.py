@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from broker_enum import BrokerCode, get_endpoints_for
+from locust_scaling import per_section_user_count
 from api_client import EphoenixAPIClient
 from order_tracker import OrderResultTracker, OrderResult
 from cache_manager import TradingCache
@@ -742,13 +743,36 @@ if not config.sections():
 
 logger.info(f"Loaded configuration with {len(config.sections())} account(s)")
 
+def _read_locust_users(path: str = "locust_config.json", default: int = 10) -> int:
+    """Read the configured locust ``users`` from locust_config.json (the same
+    file the run command builds ``-u`` from), so fixed_count tracks it."""
+    try:
+        import json
+        with open(path, encoding="utf-8") as f:
+            return int(json.load(f).get("locust", {}).get("users", default))
+    except Exception:
+        return default
+
+
 # Dynamically create user classes for each config section
 def _create_user_classes():
     """Create user classes in a function scope to avoid variable leakage to globals."""
     import sys
     current_module = sys.modules[__name__]
     user_classes = []
-    
+
+    # Pin an EQUAL number of locust users to every section via ``fixed_count``.
+    # locust's default weight distribution starves some sections to 0 users when
+    # the total user count is near the section count (live: a 14-section stack at
+    # users=42 left one account's classes at 0 → never fired). fixed_count =
+    # users // sections guarantees each section its share — no starvation.
+    num_sections = len(config.sections())
+    _fixed_count = per_section_user_count(_read_locust_users(), num_sections)
+    logger.info(
+        f"locust fixed_count per section = {_fixed_count} "
+        f"(configured users={_read_locust_users()}, sections={num_sections})"
+    )
+
     for idx, section_name in enumerate(config.sections(), start=1):
         try:
             section = dict(config[section_name])
@@ -762,6 +786,9 @@ def _create_user_classes():
             
             # Create dynamic user class with unique name and set class attributes
             user_class = type(unique_class_name, (TradingUser,), {
+                # Guarantee locust spawns an equal share for THIS section (no
+                # weight-distribution starvation — see locust_scaling).
+                'fixed_count': _fixed_count,
                 'order_url': order_data.order_url,
                 'token': order_data.token,
                 'order_json': order_data.data,

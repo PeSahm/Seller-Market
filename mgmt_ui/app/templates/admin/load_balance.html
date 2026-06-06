@@ -28,6 +28,7 @@
   <div class="card-header"><strong>Settings</strong></div>
   <form method="post" action="/admin/load-balance/settings"
         style="display:flex;flex-wrap:wrap;align-items:center;gap:1.25rem;padding:.5rem 0;">
+    {% include "partials/csrf.html" %}
     <label style="display:flex;align-items:center;gap:.4rem;">
       <input type="checkbox" name="enable_locust_autoscale" {% if autoscale_on %}checked{% endif %}>
       Locust auto-scale
@@ -68,6 +69,7 @@
         {% endif %}
         {% if p.num_stacks > 1 %}
         <form method="post" action="/admin/load-balance/{{ a.id }}/rebalance" style="display:inline;margin:0;">
+          {% include "partials/csrf.html" %}
           <button type="submit" class="btn btn--primary btn--sm">Rebalance now</button>
         </form>
         {% endif %}
