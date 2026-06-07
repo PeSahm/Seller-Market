@@ -301,12 +301,9 @@ class ExirAdapter(BrokerAdapter):
                 # CalculateOrderParam fee-adjustment so the order can't over-spend
                 # the buying power (which the broker would reject).
                 volume = int(bp / (price * (1.0 + fee)))
-                max_volume = config_section.get("max_volume")
-                if max_volume:
-                    volume = min(volume, int(max_volume))
                 logger.info(
                     f"exir BUY {isin} ({self.username}@{self.broker_code}): "
-                    f"bp={bp:,.0f}, price={price}, fee={fee}, volume={volume:,}"
+                    f"bp={bp:,.0f}, price={price}, fee={fee}, raw_volume={volume:,}"
                 )
             else:  # SELL — size from real holdings; fail-fast on nothing held.
                 volume = self._holdings(isin, descriptor)
@@ -314,8 +311,32 @@ class ExirAdapter(BrokerAdapter):
                     raise ValueError(f"no Exir holdings for {isin}")
                 logger.info(
                     f"exir SELL {isin} ({self.username}@{self.broker_code}): "
-                    f"holdings/volume={volume:,}"
+                    f"holdings/raw_volume={volume:,}"
                 )
+
+            # Cap at the instrument's MAX ORDER QUANTITY (RLC ``mxqo``). The
+            # broker rejects any single order whose volume exceeds it ("volume
+            # upper threshold"). Applies to BUY (BP-derived — can blow past the
+            # cap for a large account on a cheap stock) AND SELL (large holdings).
+            max_qty = rlc_price.get_max_order_qty(isin)
+            if max_qty and 0 < max_qty < volume:
+                logger.warning(
+                    f"exir {isin} ({self.username}@{self.broker_code}): volume "
+                    f"{volume:,} exceeds max order qty {max_qty:,} — capping"
+                )
+                volume = max_qty
+            # Operator-set hard cap (optional), applied last.
+            max_volume = config_section.get("max_volume")
+            if max_volume:
+                volume = min(volume, int(max_volume))
+            if volume <= 0:
+                raise ValueError(
+                    f"exir {isin}: computed order volume is 0 (bp/holdings too small)"
+                )
+            logger.info(
+                f"exir {isin} ({self.username}@{self.broker_code}): "
+                f"final volume={volume:,} (max_order_qty={max_qty or 'n/a'})"
+            )
 
             broker_id = descriptor["broker_id"]
             if broker_id is None:

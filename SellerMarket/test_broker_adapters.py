@@ -104,7 +104,7 @@ class _FakeSession:
         })
 
 
-def _install_exir_fakes(monkeypatch, *, asset="1000000", holdings_rows=None, band=(200, 180), buy_fee=0.0):
+def _install_exir_fakes(monkeypatch, *, asset="1000000", holdings_rows=None, band=(200, 180), buy_fee=0.0, max_qty=0):
     """Patch ExirAdapter so login + signed reads + the RLC band never hit the network."""
     # Fresh module session cache each test.
     monkeypatch.setattr(exir_adapter, "_SESSION_CACHE", {}, raising=True)
@@ -118,6 +118,11 @@ def _install_exir_fakes(monkeypatch, *, asset="1000000", holdings_rows=None, ban
     # Broker-native RLC price band (ceiling, floor) — never hit the network.
     monkeypatch.setattr(
         exir_adapter.rlc_price, "get_price_band", lambda isin, timeout=15: band
+    )
+    # Max order quantity (RLC mxqo). 0 = "no cap" (default) so existing volume
+    # assertions are unaffected; a positive value exercises the volume cap.
+    monkeypatch.setattr(
+        exir_adapter.rlc_price, "get_max_order_qty", lambda isin, timeout=15: max_qty
     )
 
     # Signed GET reads: buying power via stockInfo.purchaseUpperBound, holdings.
@@ -264,6 +269,38 @@ def test_exir_config_price_overrides_rlc(monkeypatch):
     body = json.loads(po.body)
     assert body["price"] == "200.0"        # override, not the 9930 ceiling
     assert po.volume == 5000               # 1000000 // 200
+
+
+# ---------------------------------------------------------------------------
+# ExirAdapter — volume capped at the instrument max order quantity (mxqo)
+# ---------------------------------------------------------------------------
+
+def test_exir_buy_volume_capped_at_max_order_qty(monkeypatch):
+    # BP-derived volume would be 1,000,000 // 200 = 5000, but the instrument's
+    # max order quantity is 1000 → the order MUST be capped (broker rejects above
+    # the volume upper threshold). This is the bug being fixed.
+    _install_exir_fakes(monkeypatch, asset="1000000", max_qty=1000)
+    a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
+    po = a.prepare_order(isin="IRO3SMBZ0001", side=1, config_section={"price": "200"})
+    assert po.volume == 1000
+    assert json.loads(po.body)["quantity"] == "1000"
+
+
+def test_exir_sell_volume_capped_at_max_order_qty(monkeypatch):
+    # Large holdings must also be capped to the per-order max.
+    rows = [{"insMaxLcode": "IRO3SMBZ0001", "asset": 999999}]
+    _install_exir_fakes(monkeypatch, holdings_rows=rows, max_qty=1000)
+    a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
+    po = a.prepare_order(isin="IRO3SMBZ0001", side=2, config_section={"price": "200"})
+    assert po.volume == 1000
+
+
+def test_exir_no_cap_when_max_qty_zero(monkeypatch):
+    # max_qty=0 means "unknown / no cap" — volume must NOT be clamped to 0/1.
+    _install_exir_fakes(monkeypatch, asset="1000000", max_qty=0)
+    a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
+    po = a.prepare_order(isin="IRO3SMBZ0001", side=1, config_section={"price": "200"})
+    assert po.volume == 5000   # uncapped (1000000 // 200)
 
 
 # ---------------------------------------------------------------------------

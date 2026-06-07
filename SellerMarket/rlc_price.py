@@ -67,8 +67,8 @@ _session.trust_env = False
 _session.headers.update({"User-Agent": _UA})
 
 _lock = threading.Lock()
-# isin -> ((ceiling, floor), monotonic_loaded_at)
-_cache: dict[str, tuple[tuple[int, int], float]] = {}
+# isin -> ((ceiling, floor, max_order_qty), monotonic_loaded_at)
+_cache: dict[str, tuple[tuple[int, int, int], float]] = {}
 
 
 def _build_url(isins: list[str]) -> str:
@@ -77,9 +77,9 @@ def _build_url(isins: list[str]) -> str:
     return _BASE_URL + "?" + urllib.parse.quote(blob) + "&jsoncallback="
 
 
-def _parse_rows(rows: object) -> dict[str, tuple[int, int]]:
-    """Parse the handler's JSON array into ``{ISIN: (ceiling, floor)}``."""
-    out: dict[str, tuple[int, int]] = {}
+def _parse_rows(rows: object) -> dict[str, tuple[int, int, int]]:
+    """Parse the handler's JSON array into ``{ISIN: (ceiling, floor, max_order_qty)}``."""
+    out: dict[str, tuple[int, int, int]] = {}
     if not isinstance(rows, list):
         return out
     for row in rows:
@@ -93,12 +93,18 @@ def _parse_rows(rows: object) -> dict[str, tuple[int, int]]:
             floor = int(float(row.get("lap")))    # lower threshold (SELL floor)
         except (TypeError, ValueError):
             continue
+        # mxqo = the broker's MAX ORDER QUANTITY (the volume upper threshold it
+        # rejects orders for). 0 when absent/unparseable → "no cap".
+        try:
+            max_qty = max(0, int(float(row.get("mxqo"))))
+        except (TypeError, ValueError):
+            max_qty = 0
         if ceiling > 0:
-            out[nc] = (ceiling, floor)
+            out[nc] = (ceiling, floor, max_qty)
     return out
 
 
-def _fetch(isins: list[str], timeout: int) -> dict[str, tuple[int, int]]:
+def _fetch(isins: list[str], timeout: int) -> dict[str, tuple[int, int, int]]:
     """Fetch + parse the band for ``isins`` (no caching). Raises on transport."""
     resp = _session.get(_build_url(isins), timeout=timeout)
     resp.raise_for_status()
@@ -123,8 +129,27 @@ def prefetch(isins: list[str], timeout: int = 15) -> None:
     if parsed:
         now = time.monotonic()
         with _lock:
-            for isin, band in parsed.items():
-                _cache[isin] = (band, now)
+            for isin, info in parsed.items():
+                _cache[isin] = (info, now)
+
+
+def _get_info(isin: str, timeout: int = 15) -> tuple[int, int, int]:
+    """Return cached ``(ceiling, floor, max_order_qty)`` for ``isin`` (fetch on miss).
+
+    Raises ``ValueError`` if the instrument isn't in the handler's response.
+    """
+    with _lock:
+        hit = _cache.get(isin)
+        if hit is not None and (time.monotonic() - hit[1]) < _TTL_S:
+            return hit[0]
+    # Network OUTSIDE the lock so a slow fetch can't stall other accounts.
+    parsed = _fetch([isin], timeout)
+    info = parsed.get(isin)
+    if info is None:
+        raise ValueError(f"rlc: no price band for ISIN {isin!r}")
+    with _lock:
+        _cache[isin] = (info, time.monotonic())
+    return info
 
 
 def get_price_band(isin: str, timeout: int = 15) -> tuple[int, int]:
@@ -135,18 +160,23 @@ def get_price_band(isin: str, timeout: int = 15) -> tuple[int, int]:
     ``lap``) is the SELL price. Raises ``ValueError`` if the instrument isn't in
     the handler's response.
     """
-    with _lock:
-        hit = _cache.get(isin)
-        if hit is not None and (time.monotonic() - hit[1]) < _TTL_S:
-            return hit[0]
-    # Network OUTSIDE the lock so a slow fetch can't stall other accounts.
-    parsed = _fetch([isin], timeout)
-    band = parsed.get(isin)
-    if band is None:
-        raise ValueError(f"rlc: no price band for ISIN {isin!r}")
-    with _lock:
-        _cache[isin] = (band, time.monotonic())
-    return band
+    ceiling, floor, _ = _get_info(isin, timeout)
+    return ceiling, floor
+
+
+def get_max_order_qty(isin: str, timeout: int = 15) -> int:
+    """Return the instrument's MAX ORDER QUANTITY (``mxqo``) — the per-order
+    volume upper threshold the broker enforces.
+
+    Returns 0 when unknown (instrument missing, ``mxqo`` absent, or a transient
+    fetch error) so a data gap is treated as "no cap" and never blocks an order.
+    Shares the cache with :func:`get_price_band`, so calling it right after the
+    price band is a free cache hit.
+    """
+    try:
+        return _get_info(isin, timeout)[2]
+    except (ValueError, requests.RequestException):
+        return 0
 
 
 def clear_cache() -> None:
