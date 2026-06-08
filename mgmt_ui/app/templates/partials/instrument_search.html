@@ -32,8 +32,12 @@
 <script>
 (function(){
   var url = {{ instrument_search_url|tojson }};
+  function init(){
   var box = document.getElementById('instrument_search');
   var list = document.getElementById('ta-results');
+  // #isin lives BELOW this partial in the form, so we must wait for the DOM to
+  // finish parsing (init runs on DOMContentLoaded) — otherwise isin is null and
+  // the whole typeahead bails out, leaving a plain text box.
   var isin = document.getElementById('isin');
   if(!box || !list || !isin) return;
   var t = null, ctrl = null;
@@ -69,5 +73,11 @@
     }, 220);
   });
   document.addEventListener('click', function(e){ if(e.target !== box) hide(); });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
 })();
 </script>
