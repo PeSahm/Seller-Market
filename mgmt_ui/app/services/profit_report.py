@@ -62,11 +62,14 @@ class BuyFeeRow:
 
 @dataclass
 class VirtualFeeRow:
-    """A 20-day mark-to-market assessment on an unsold bot-bought position.
+    """Realization of the UNSOLD remainder of a bot-bought position.
 
-    A position (customer × stock) still unsold after 20 days is valued at
-    today's market price: in profit → fee = X% of the paper gain; in loss → a
-    fixed per-agent fee. Separate from the realized per-buy rows.
+    Triggered either because the customer SOLD some of the position (``trigger
+    == "sell"`` → the whole remainder is realized at the weighted-avg sell
+    price) or because it's been held >20 days unsold (``trigger == "20d"`` →
+    the aged remainder is marked to today's market price). In profit → fee =
+    X% of the paper gain; in loss → a fixed per-agent fee. This is on TOP of the
+    realized per-buy fee on the actually-sold shares.
     """
 
     customer_id: Optional[UUID]
@@ -76,7 +79,8 @@ class VirtualFeeRow:
     symbol: str
     open_qty: int
     avg_buy_price: Decimal
-    today_price: int
+    price: int          # realization price (avg sell price, or today's price)
+    trigger: str        # "sell" | "20d"
     in_loss: bool
     fee: Decimal
 
@@ -364,31 +368,66 @@ async def build_fee_report(
             ctot.total_fee += row.fee
             ctot.open_volume += row.open_volume
 
-        # --- 20-day mark-to-market on the UNSOLD remainder of this position ---
-        # One assessment per (customer, isin): aggregate the still-open volume of
-        # bot buys placed > mark_to_market_days ago, value it at today's market
-        # price → in profit bill X% of the paper gain, in loss bill the fixed
-        # per-agent loss fee.
-        aged_open_qty = 0
-        weighted_buy = Decimal("0")
-        for o in bot_buys:
-            brow = per_buy[o.tracking_number]
-            if brow.open_volume <= 0:
-                continue
-            buy_ts = o.execution_date or o.created_at_broker or o.placed_at
-            if buy_ts is None or (today - buy_ts.date()).days <= mark_to_market_days:
-                continue
-            aged_open_qty += brow.open_volume
-            weighted_buy += (
-                Decimal(o.price) if o.price is not None else Decimal("0")
-            ) * brow.open_volume
-        if aged_open_qty > 0:
-            today_price = await _today_price(_isin)
-            if today_price and today_price > 0:
-                avg_buy = weighted_buy / aged_open_qty
-                tp = Decimal(today_price)
-                if tp > avg_buy:
-                    vfee = (fee_pct / Decimal("100")) * (tp - avg_buy) * aged_open_qty
+        # --- Realize the UNSOLD remainder of this position (customer × stock) ---
+        # Trigger + realization price:
+        #   * the customer SOLD some → realize the WHOLE remainder at the
+        #     weighted-avg sell price ("whole position on first sell"), OR
+        #   * no sell, held > mark_to_market_days → realize the AGED remainder at
+        #     today's market price (20-day mark-to-market).
+        # In profit → fee = X% of the paper gain; in loss → the fixed per-agent
+        # loss fee (per losing position). This is ON TOP of the per-buy realized
+        # fee already billed on the actually-sold shares.
+        open_lots = [
+            (o, per_buy[o.tracking_number].open_volume)
+            for o in bot_buys
+            if per_buy[o.tracking_number].open_volume > 0
+        ]
+        if open_lots:
+            realize_price: Optional[Decimal] = None
+            trigger = ""
+            rem_lots: list = []
+            if sells:
+                sq = sum(int(s.executed_volume or 0) for s in sells)
+                sv = sum(
+                    (Decimal(s.price) if s.price is not None else Decimal("0"))
+                    * int(s.executed_volume or 0)
+                    for s in sells
+                )
+                if sq > 0:
+                    realize_price = sv / sq
+                    trigger = "sell"
+                    rem_lots = open_lots  # the WHOLE remainder
+            else:
+                aged = [
+                    (o, q)
+                    for o, q in open_lots
+                    if (ts := (o.execution_date or o.created_at_broker or o.placed_at))
+                    is not None
+                    and (today - ts.date()).days > mark_to_market_days
+                ]
+                if aged:
+                    tp = await _today_price(_isin)
+                    if tp and tp > 0:
+                        realize_price = Decimal(tp)
+                        trigger = "20d"
+                        rem_lots = aged
+                    else:
+                        logger.warning(
+                            "fee: no live price for %s — skipping 20-day mark-to-market",
+                            _isin,
+                        )
+            if realize_price is not None and realize_price > 0 and rem_lots:
+                rem_qty = sum(q for _, q in rem_lots)
+                weighted_buy = sum(
+                    (
+                        (Decimal(o.price) if o.price is not None else Decimal("0")) * q
+                        for o, q in rem_lots
+                    ),
+                    Decimal("0"),
+                )
+                avg_buy = weighted_buy / rem_qty
+                if realize_price > avg_buy:
+                    vfee = (fee_pct / Decimal("100")) * (realize_price - avg_buy) * rem_qty
                     in_loss = False
                 else:
                     vfee = await _loss_fee(agent_id_of_group)
@@ -401,8 +440,9 @@ async def build_fee_report(
                     report.virtual_rows.append(VirtualFeeRow(
                         customer_id=cust_id, agent_id=agent_id_of_group,
                         broker=group[0].broker, isin=_isin, symbol=sym,
-                        open_qty=aged_open_qty, avg_buy_price=avg_buy,
-                        today_price=today_price, in_loss=in_loss, fee=vfee,
+                        open_qty=rem_qty, avg_buy_price=avg_buy,
+                        price=int(realize_price), trigger=trigger,
+                        in_loss=in_loss, fee=vfee,
                     ))
                     ctot.total_fee += vfee
                     ctot.mark_fee += vfee
@@ -410,10 +450,6 @@ async def build_fee_report(
                         agent_id_of_group, AgentTotals(agent_id=agent_id_of_group)
                     )
                     atot.total_fee += vfee
-            else:
-                logger.warning(
-                    "fee 20-day: no live price for %s — skipping mark-to-market", _isin
-                )
 
     # Per-customer paid (received-fee ledger) → remaining = owed − paid (#116).
     paid_map = await fee_payments.total_paid_by_customer(

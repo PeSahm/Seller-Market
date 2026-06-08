@@ -269,14 +269,16 @@
     {% endif %}
 
     {% if fr.virtual_rows %}
-    <h3 class="h3" style="margin-top:18px;">20-day mark-to-market (unsold &gt; 20 days)</h3>
+    <h3 class="h3" style="margin-top:18px;">Realized remainder (on sell / held &gt; 20 days)</h3>
     <p class="text-small text-muted">
-      Positions still unsold after 20 days, valued at today's price: in profit →
-      % of the paper gain; in loss → the fixed per-agent loss fee.
+      The UNSOLD remainder of a position, realized because the customer sold some
+      (valued at the avg sell price) or it's been held &gt; 20 days (today's
+      price): in profit → % of the paper gain; in loss → the fixed per-agent
+      loss fee. This is on top of the realized fee on the actually-sold shares.
     </p>
     <table class="table">
       <thead>
-        <tr><th>Customer</th><th>Symbol / ISIN</th><th>Open qty</th><th>Avg buy</th><th>Today</th><th>Status</th><th>Fee</th></tr>
+        <tr><th>Customer</th><th>Symbol / ISIN</th><th>Open qty</th><th>Avg buy</th><th>Price</th><th>Trigger</th><th>Status</th><th>Fee</th></tr>
       </thead>
       <tbody>
         {% for v in fr.virtual_rows %}
@@ -289,7 +291,11 @@
           </td>
           <td class="text-small">{{ '{:,}'.format(v.open_qty) }}</td>
           <td class="text-small">{{ '{:,.0f}'.format(v.avg_buy_price) }}</td>
-          <td class="text-small">{{ '{:,}'.format(v.today_price) }}</td>
+          <td class="text-small">{{ '{:,}'.format(v.price) }}</td>
+          <td>
+            {% if v.trigger == 'sell' %}<span class="badge" title="customer sold some → whole remainder realized">sold</span>
+            {% else %}<span class="badge" title="held > 20 days">20d</span>{% endif %}
+          </td>
           <td>
             {% if v.in_loss %}<span class="badge badge--down" title="fixed per-agent loss fee">loss</span>
             {% else %}<span class="badge badge--up">profit</span>{% endif %}

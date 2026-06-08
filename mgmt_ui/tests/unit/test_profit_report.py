@@ -145,7 +145,7 @@ async def test_20day_profit_bills_pct_of_paper_gain(monkeypatch):
     rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
     assert len(rep.virtual_rows) == 1
     v = rep.virtual_rows[0]
-    assert v.in_loss is False and v.open_qty == 100
+    assert v.trigger == "20d" and v.in_loss is False and v.open_qty == 100
     assert v.fee == Decimal("1000")  # 1% × (7000-6000) × 100 = 1% × 100000
     assert rep.per_customer[_CUST].mark_fee == Decimal("1000")
     assert rep.per_customer[_CUST].total_fee == Decimal("1000")
@@ -185,17 +185,41 @@ async def test_20day_skips_when_no_price():
     assert rep.virtual_rows == []
 
 
-async def test_20day_only_on_unsold_remainder(monkeypatch):
-    async def _price(_db, _isin):
-        return 7000
-    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
-    # buy 100 @ 6000 (old), sell 60 → 40 open & aged → virtual on 40 only.
-    buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
+# ---------------------------------------------------------------------------
+# Whole-position realization on the FIRST sell (at the avg sell price)
+# ---------------------------------------------------------------------------
+
+
+async def test_sell_realizes_whole_remainder_at_sell_price():
+    # buy 100 @ 6000 (recent), customer sells only 60 @ 6500. The sold 60 are
+    # realized via FIFO (fee 300); the unsold 40 are realized at the avg sell
+    # price 6500 (fee 200) — total 500 = the whole position at 6500.
+    buy = _order(1, 100, 6000, is_bot=True, ts=_RECENT, tracking=1)
     sell = _order(2, 60, 6500, is_bot=False, ts=_RECENT, tracking=2)
     rep = await pr.build_fee_report(_fake_db([buy, sell], [(_CUST, _AGENT)]), today=_TODAY)
+    # FIFO realized on the sold 60.
+    assert rep.buy_rows[0].fee == Decimal("300")  # 1% × (6500-6000) × 60
+    # Remainder realized on the sell trigger.
     assert len(rep.virtual_rows) == 1
-    assert rep.virtual_rows[0].open_qty == 40
-    assert rep.virtual_rows[0].fee == Decimal("400")  # 1% × (7000-6000) × 40
+    v = rep.virtual_rows[0]
+    assert v.trigger == "sell" and v.in_loss is False and v.open_qty == 40
+    assert v.fee == Decimal("200")  # 1% × (6500-6000) × 40
+    assert rep.per_customer[_CUST].total_fee == Decimal("500")  # 300 + 200
+
+
+async def test_sell_at_loss_remainder_uses_fixed_fee(monkeypatch):
+    async def _loss(_db, _agent):
+        return Decimal("300000")  # fixed loss fee (Rial)
+    monkeypatch.setattr(pr, "get_loss_fee_rial", _loss)
+    # buy 100 @ 7000 (recent), sells 1 @ 6500 (a loss). Sold 1 realizes nothing
+    # (loss → no positive fee); the unsold 99 at 6500 < 7000 → fixed loss fee.
+    buy = _order(1, 100, 7000, is_bot=True, ts=_RECENT, tracking=1)
+    sell = _order(2, 1, 6500, is_bot=False, ts=_RECENT, tracking=2)
+    rep = await pr.build_fee_report(_fake_db([buy, sell], [(_CUST, _AGENT)]), today=_TODAY)
+    assert rep.buy_rows[0].fee == Decimal("0")  # the 1 sold share was a loss
+    v = rep.virtual_rows[0]
+    assert v.trigger == "sell" and v.in_loss is True and v.fee == Decimal("300000")
+    assert rep.per_customer[_CUST].total_fee == Decimal("300000")
 
 
 # ---------------------------------------------------------------------------
