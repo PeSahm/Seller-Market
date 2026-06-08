@@ -92,4 +92,21 @@
   </tbody>
 </table>
 {% endif %}
+
+{% if total_trade_instructions %}
+<section class="card" style="margin-top: 16px; border: 1px solid var(--danger, #c0392b);">
+  <h2 class="h3" style="margin-top:0;">Danger zone</h2>
+  <p class="text-small text-muted">
+    Delete <strong>all {{ total_trade_instructions }} trade instruction{% if total_trade_instructions != 1 %}s{% endif %}</strong>
+    across every one of your customers. The accounts themselves are kept — only
+    the ISIN/side rows are removed, and each affected stack's
+    <code>config.ini</code> is re-pushed so the bot stops trading them.
+  </p>
+  <form method="post" action="/agent/trade-instructions/delete-all"
+        onsubmit="return confirm('Delete ALL trade instructions for ALL your customers? This cannot be undone. The accounts stay, but every ISIN/side row is removed and the bot stops trading them.');">
+    {% include "partials/csrf.html" %}
+    <button class="btn btn--danger btn--sm" type="submit">Delete all trade instructions</button>
+  </form>
+</section>
+{% endif %}
 {% endblock %}

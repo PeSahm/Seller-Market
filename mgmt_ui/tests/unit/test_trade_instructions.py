@@ -134,3 +134,56 @@ async def test_update_optimistic_lock_mismatch_raises(
 
     db.flush.assert_not_awaited()
     db.commit.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# delete_all_for_agent (#113)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_all_for_agent_deletes_and_returns_affected_stacks() -> None:
+    """Bulk delete returns the count + de-duplicated affected stack ids
+    (dropping NULL stack_id for unassigned customers), writes ONE summary
+    audit row, and commits."""
+    agent_id = uuid.uuid4()
+    stack_a = uuid.uuid4()
+    # (ti_id, isin, side, stack_id)
+    rows = [
+        (uuid.uuid4(), "IRO1A", 1, stack_a),
+        (uuid.uuid4(), "IRO1B", 2, stack_a),   # same stack → deduped
+        (uuid.uuid4(), "IRO1C", 1, None),       # unassigned → dropped
+    ]
+    select_result = MagicMock()
+    select_result.all.return_value = rows
+
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[select_result, MagicMock()])  # select, then delete
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+
+    count, stacks = await ti_svc.delete_all_for_agent(
+        db, agent_id, actor_id=uuid.uuid4()
+    )
+    assert count == 3
+    assert stacks == [stack_a]
+    db.add.assert_called_once()       # single summary audit row
+    db.commit.assert_awaited_once()
+    assert db.execute.await_count == 2  # the SELECT + the bulk DELETE
+
+
+@pytest.mark.asyncio
+async def test_delete_all_for_agent_empty_is_noop() -> None:
+    empty = MagicMock()
+    empty.all.return_value = []
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=empty)
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+
+    count, stacks = await ti_svc.delete_all_for_agent(
+        db, uuid.uuid4(), actor_id=uuid.uuid4()
+    )
+    assert count == 0 and stacks == []
+    db.add.assert_not_called()
+    db.commit.assert_not_awaited()
