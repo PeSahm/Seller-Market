@@ -577,3 +577,54 @@ Operator spec: on every push, **1 stack → just auto-scale locust; >1 stack →
 | — | Watch the next 08:44 open for Hamid | Confirm all 14 customers/stack fire (no 10-cap), fire-log + `trade_results` populate, `/admin/load-balance` shows balanced, the "N trades" badge is correct. |
 | — | Reconcile the per-stack locust floor | Hamid/PouyanIt has a manual `users=100` floor; clear it on the locust panel if exact `3×sections` is wanted. |
 | — | Exir fire-log reconciliation (still pending from S5/S6) | Exir sync resp has no order id → mgmt date-based reconcile; confirm an Exir buy lands in `/admin/bot-report` after a real run. |
+
+---
+
+## Session 8 — operator feature roadmap (10 issues), 8 shipped + deployed; market-data sidecar
+
+Operator handed a prioritized wishlist (7 features) + a fee-methodology redesign + a flagged trade-log bug. Process: **opened one GitHub issue per item (#107–#116)**, then built them **one at a time** (branch + PR + CodeRabbit + mirror-by-digest deploy). **8 shipped; 7 PRs merged; production updated to `b3aced3` + a new market-data sidecar — all verified live.** The fee redesign (#111) is **PAUSED** at the operator's request (they're testing the live features first).
+
+### Issues (one per wishlist item)
+`#107` trade-log accuracy · `#108` market-data sidecar · `#109` instrument dropdown · `#110` auto-sell · `#111` fee redesign · `#112` agent run buttons · `#113` agent delete-all-instructions · `#114` agent fee view · `#115` copy customer · `#116` per-customer fee + payments ledger.
+
+### Shipped + merged this session
+| PR | Issue | What |
+|---|---|---|
+| #117 | #112 | Agent stacks-LIST never linked to the stack-DETAIL page (where the run-now strip already lived) → just wire the link. |
+| #118 | #107 | **Trade-log fix**: failed/no-trade runs showed "partial · N" because placed-but-rejected orders (`executed_volume=0`) were counted. Added `executed_volume>0` to the run-count query in `admin.py`+`agent.py`; `trades.list_trades(executed_only=…)` UI default + a "Show all" toggle (placement rows kept for forensics). |
+| #119 | #115 | `customers.copy_customer_to_agent` — clone account (same broker/username/password_enc) + all TradeInstructions under another agent, **pending/unassigned**; UNIQUE `(agent,broker,username)` permits it; regenerate `section_name`. |
+| #120 | #113 | `trade_instructions.delete_all_for_agent` (one bulk DELETE scoped to the agent's customers, one summary audit) + `POST /agent/trade-instructions/delete-all` + a "Danger zone" card showing the true instruction count. |
+| #121,#122 | #108 | Market-data sidecar **service** (see below). |
+| #123 | #109 | Searchable stock-name → ISIN typeahead on the trade-instruction form (admin+agent), filling the existing `#isin` field (progressive enhancement; manual ISIN still works), via the sidecar `/search`. |
+
+### Market-data sidecar (#108) — the foundational piece
+**Decision**: market data (price band, last price, **queue**, instrument list) is **market-wide** → ONE source (**RLC `core.tadbirrlc.com`**) for ALL brokers; reach it directly (`trust_env=False`). Delivered as a **per-host sidecar** (one container per VPS, **mgmt-managed**), so each host stays self-contained (no cross-VPS dependency, no tsetmc). Operator's reference account = a single global **Khobregan** Exir account (optional — the data endpoints are public; only a future authed endpoint would need it).
+- **Bot side** (`SellerMarket/`): `rlc_market.py` (RLC client reusing `rlc_price`'s session), `market_data_app.py` (Flask app — reuses the bot image's `flask` dep), `Dockerfile.market_data`, `.github/workflows/docker-publish-market-data.yml` → `ghcr.io/pesahm/seller-market-md:latest` (**no semver git-tag** — pinned by `:latest` + short-sha + revision label, sidestepping the S7 tag-collision class). Endpoints: `/health /price-band /last-price /queue /instruments /search`.
+- **mgmt side**: `app/services/market_data_client.py` (async httpx, **degrades gracefully** — `[]`/`None` on any error, never 500s), `GET /admin|/agent/instruments/search`, `partials/instrument_search.html`, setting `market_data_url` (default `http://market-data:8077`), and a `market-data` service added to the mgmt **prod compose** so the api reaches it over the compose network.
+
+### LIVE-CONFIRMED RLC shapes (the gold — from a read-only `curl` probe on PouyanIt)
+`GET https://core.tadbirrlc.com//<Handler>?<url-encoded {'Type':...}>&jsoncallback=`
+- **StockInformationHandler** `{'Type':'getstockprice2','la':'Fa','arr':'<ISIN[,...]>'}` → per-instrument row. Confirmed fields: `nc`=ISIN, `cn`=company, `sf`=symbol, `cp`/`ltp`/`pcp`=close/last/yesterday, `hap`/`lap`=upper/lower band, `mxqo`=max order qty, **and the best-level QUEUE: `bbq`=best-buy qty (= صف خرید / buy-queue volume), `bsq`=best-sell qty, `nbb`/`nbs`=order counts, `bbp`/`bsp`=best buy/sell price.**
+- **StocksHandler.ashx** `{'Type':'ALL21'}` → the WHOLE-MARKET list, **same row shape** as above (one dict per instrument; `sn` sector can be null). Powers `/instruments` + `/search`.
+- **StockFutureInfoHandler** `{'Type':'getLightSymbolInfoAndQueue','la':'Fa','nscCode':'<ISIN>'}` → `{"symbolinfo":{…ht/lt band…}, "symbolqueue":{"Value":[…]}}` — the FULL 5-level depth is in `symbolqueue.Value` (empty when market closed; not yet pinned). **Auto-sell uses the best-level `bbq` from getstockprice2 (one call, confirmed), not this.** ⚠️ My first queue parser guessed `qd`/`qo`/`symbolinfo` — WRONG; fixed in PR #122 to `bbq`/`bsq`.
+
+### Deploy state (end of session)
+- **mgmt-UI** on `5.10.248.55:/opt/seller-market-mgmt` → **`b3aced3`** (#107/#112/#115/#113/#109), `/health=200`, alembic still **`0009`** (none of these 8 had a migration).
+- **market-data sidecar** → running as the `market-data` compose service on the mgmt host, image `812d81e`, **healthy**. Verified: **api → `http://market-data:8077/search?q=سرود` returns `{isin:IRO1SROD0001, name:سیمان‌شاهرود, symbol:سرود}`** — full chain live.
+- Bots/trading hosts **unchanged** (no bot redeploy this session; the bot `:latest` got the new sidecar/rlc_market modules but no stack was recreated — the auto-sell #110 redeploy is future work).
+
+### Learnings (Session 8)
+- **The auto-mode classifier blocks ad-hoc containers on the shared VPS** (a `docker run --rm md-test` was denied) but allows **read-only `curl` probes** — use those to confirm external API shapes, and run the *documented* `docker compose up -d` deploy (not throwaway `docker run`) for real deploys.
+- **Verify speculative API parsers with a live read-only probe BEFORE building consumers on them** — the probe corrected the queue field mapping (`bbq`/`bsq`, not `qd`/`qo`) and confirmed ALL21 == getstockprice2 row shape, saving a wrong auto-sell.
+- **`git checkout -b` carries uncommitted working-tree changes onto the new branch** — used repeatedly to rescue edits accidentally started on `main` (operator twice reminded "you are on main"). Always check `git branch --show-current` before editing.
+- **CodeRabbit "pending" can outlast CI** — the poll-and-merge loop should break on the two test jobs (`test`, `mgmt-ui-test`) being non-pending, not wait on CodeRabbit; `--admin --squash` merges past it.
+- **The mirror was FRESH every pull this session** (`ghcr-mirror.liara.ir/...:latest` revision == merge SHA on first try) — but still always verify the `org.opencontainers.image.revision` label before retag+up.
+- **The instrument dropdown fills the EXISTING `#isin` field** (progressive enhancement) — no hidden-field juggling, and the manual ISIN input remains the canonical fallback if the sidecar/JS is down.
+
+### Remaining work + captured decisions (resume here)
+The fee/auto-sell cluster, with the operator decisions already locked (don't re-litigate):
+- **#111 fee redesign** (PAUSED, operator testing first): **fee = X% of each BOT SELL's VALUE** (`sell_price×sold_qty`), charged once on the sell side, **fixed/final at sale time**; **20-day rule applies to UNSOLD BUYS only** → virtual sell at TODAY's live price (sidecar `/last-price`) for the open qty, fee = X%×(open_qty×today_price), **recomputed live**; manual (non-`is_bot`) sells earn no fee. Rework `profit_report.build_fee_report` (rows become per-sell + per-virtual-sell), `fee_export`, the bot-report fees tab; keep `profit_matching.match_lots` for open-lot detection. Mock the sidecar client in tests.
+- **#116**: per-customer `fee_percent` (nullable col) → resolver **customer → agent → global → default**; `customer_fee_payments` ledger **(admin-only)**; report shows per-customer **owed − paid = remaining**.
+- **#114**: `/agent/fees` page reusing the report scoped to `agent_id=user.id` (read-only).
+- **#110 auto-sell + sidecar part 2**: bot long-running monitor polling sidecar `/queue` → SELL when `buy_volume < per-instrument threshold` (thread `auto_sell_threshold` shares through `config_ini.py`); emit a SELL fire-log line; deploy the sidecar on the TRADING hosts too (mgmt-managed per-host deploy is still future infra — for now it could ride each stack's compose or a manual per-host container).
+- Plan file with full detail: `~/.claude/plans/read-all-md-and-modular-turing.md`.
