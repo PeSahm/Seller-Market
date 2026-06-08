@@ -42,3 +42,40 @@ class AgentFeeConfig(Base):
         server_default=sa.func.now(),
         onupdate=sa.func.now(),
     )
+
+
+class CustomerFeePayment(Base):
+    """A fee payment the operator has RECEIVED for a customer (#116).
+
+    "Azadi paid 1,000,000 rial" → one row. The fee report shows, per customer,
+    owed (computed) − paid (Σ this ledger) = remaining. Admin-only to create.
+    ``amount`` is a Rial value (``Numeric(24,4)``); ``paid_at`` the payment date
+    (nullable), ``recorded_by`` the admin who logged it.
+    """
+
+    __tablename__ = "customer_fee_payments"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=sa.text("gen_random_uuid()"),
+    )
+    customer_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("customers.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    amount: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    paid_at: Mapped[Optional[date]] = mapped_column(sa.Date, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recorded_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        sa.TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    )

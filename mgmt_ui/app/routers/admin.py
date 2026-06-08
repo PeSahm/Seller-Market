@@ -52,6 +52,7 @@ from app.services import broker_orders as services_broker_orders
 from app.services import brokers_admin
 from app.services import customers as services_customers
 from app.services import fee_export
+from app.services import fee_payments as services_fee_payments
 from app.services import profit_report as services_profit_report
 from app.services import distribution as services_distribution
 from app.services import health_signals as services_health
@@ -1008,12 +1009,17 @@ async def admin_customer_detail(
         for a in await services_agents.list_agents(db)
         if a.id != customer.agent_id
     ]
+    # Received-fee ledger (#116): list + running total.
+    payments = await services_fee_payments.list_payments(db, customer_id)
+    total_paid = sum((p.amount for p in payments), Decimal("0"))
     ctx = _ctx(request, user, current_tab="/admin/customers")
     ctx["customer"] = customer
     ctx["agent"] = agent
     ctx["server"] = server
     ctx["trade_instructions"] = trade_instructions
     ctx["copy_targets"] = sorted(copy_targets, key=lambda a: (a.username or "").lower())
+    ctx["fee_payments"] = payments
+    ctx["total_paid"] = total_paid
     return templates.TemplateResponse("admin/customer_detail.html", ctx)
 
 
@@ -1695,6 +1701,68 @@ async def admin_customer_copy(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return _flash_redirect(request, f"/admin/customers/{new_customer.id}")
+
+
+@router.post("/customers/{customer_id}/fee-config")
+async def admin_customer_fee_config(
+    customer_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    fee_percent: str = Form(""),
+):
+    """Set or CLEAR (blank) a customer's profit-share fee % override (#116)."""
+    raw = (fee_percent or "").strip()
+    parsed: Optional[Decimal] = None
+    if raw:
+        try:
+            parsed = Decimal(raw.replace(",", ""))
+        except (InvalidOperation, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"invalid fee %: {raw!r}") from exc
+        if parsed < 0 or parsed >= 100:
+            raise HTTPException(status_code=400, detail="fee % must be ≥ 0 and < 100")
+    try:
+        await services_customers.set_fee_percent(
+            db, customer_id, parsed, actor_id=user.id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _flash_redirect(request, f"/admin/customers/{customer_id}")
+
+
+@router.post("/customers/{customer_id}/fee-payment")
+async def admin_customer_fee_payment(
+    customer_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    amount: str = Form(...),
+    paid_at: str = Form(""),
+    note: str = Form(""),
+):
+    """Record a received fee payment for a customer (#116)."""
+    customer = await services_customers.get_customer(db, customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="customer not found")
+    try:
+        amt = services_fee_payments.parse_amount(amount)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    p_date = None
+    if paid_at.strip():
+        try:
+            p_date = datetime.fromisoformat(paid_at.strip()).date()
+        except (ValueError, TypeError):
+            p_date = None
+    await services_fee_payments.record_payment(
+        db,
+        customer_id=customer_id,
+        amount=amt,
+        paid_at=p_date,
+        note=(note or None),
+        recorded_by=user.id,
+    )
+    return _flash_redirect(request, f"/admin/customers/{customer_id}")
 
 
 @router.get("/instruments/search")

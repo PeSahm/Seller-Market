@@ -116,7 +116,7 @@ def build_fee_workbook(
     _write_header(
         wsc,
         ["Customer", "Agent", "# sells", "# virtual", "Sell fee",
-         "Virtual fee", "Total fee (owed)"],
+         "Virtual fee", "Total fee (owed)", "Paid", "Remaining"],
     )
     for t in report.per_customer.values():
         wsc.append([
@@ -127,9 +127,11 @@ def build_fee_workbook(
             _num(t.sell_fee),
             _num(t.virtual_fee),
             _num(t.total_fee),
+            _num(t.paid),
+            _num(t.remaining),
         ])
-    _apply_formats(wsc, date_cols=[], money_cols=[5, 6, 7], pct_cols=[], nrows=len(report.per_customer))
-    _autosize(wsc, [18, 16, 10, 10, 16, 16, 18])
+    _apply_formats(wsc, date_cols=[], money_cols=[5, 6, 7, 8, 9], pct_cols=[], nrows=len(report.per_customer))
+    _autosize(wsc, [18, 16, 10, 10, 16, 16, 18, 16, 16])
 
     # ---- Sheet 3: Per-agent totals --------------------------------------
     ws2 = wb.create_sheet("Per-agent totals")

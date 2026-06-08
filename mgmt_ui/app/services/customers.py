@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
@@ -86,6 +87,7 @@ def _public_snapshot(customer: Customer) -> dict:
         "display_name": customer.display_name,
         "username": customer.username,
         "broker": customer.broker,
+        "fee_percent": str(customer.fee_percent) if customer.fee_percent is not None else None,
         "version": customer.version,
     }
 
@@ -410,6 +412,37 @@ async def copy_customer_to_agent(
     return new_customer
 
 
+async def set_fee_percent(
+    db: AsyncSession,
+    customer_id: UUID,
+    fee_percent: Optional[Decimal],
+    actor_id: UUID,
+) -> Customer:
+    """Set (or clear with ``None``) a customer's profit-share fee % override (#116).
+
+    A NULL override means the report falls back to the agent override → global
+    setting → default. Audit-logged. Raises ``LookupError`` if missing.
+    """
+    customer = await get_customer(db, customer_id)
+    if customer is None:
+        raise LookupError(f"customer {customer_id} not found")
+    before = _public_snapshot(customer)
+    customer.fee_percent = fee_percent
+    customer.updated_at = _now_utc()
+    await db.flush()
+    await _write_audit(
+        db,
+        actor_id=actor_id,
+        action="customer.fee_config",
+        target_id=customer.id,
+        before=before,
+        after=_public_snapshot(customer),
+    )
+    await db.commit()
+    await db.refresh(customer)
+    return customer
+
+
 # ---------------------------------------------------------------------------
 # Update
 # ---------------------------------------------------------------------------
@@ -505,5 +538,6 @@ __all__ = [
     "get_customer",
     "get_customer_trade_counts",
     "list_customers",
+    "set_fee_percent",
     "update_customer",
 ]

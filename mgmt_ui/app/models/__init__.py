@@ -14,7 +14,7 @@ from app.models.runs import Run, StackRunLock, IngestCursor
 from app.models.trades import TradeResult
 from app.models.broker_orders import BrokerOrder
 from app.models.order_fires import OrderFire
-from app.models.fees import AgentFeeConfig
+from app.models.fees import AgentFeeConfig, CustomerFeePayment
 from app.models.health import HealthSignal
 from app.models.audit import AuditLog
 
@@ -37,6 +37,7 @@ __all__ = [
     "BrokerOrder",
     "OrderFire",
     "AgentFeeConfig",
+    "CustomerFeePayment",
     "HealthSignal",
     "AuditLog",
 ]

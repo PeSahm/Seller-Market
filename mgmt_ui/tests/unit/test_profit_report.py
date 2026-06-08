@@ -21,6 +21,10 @@ _AGENT = uuid.uuid4()
 _CUST = uuid.uuid4()
 _TODAY = date(2026, 6, 30)
 
+# The real resolver, captured BEFORE the autouse fixture stubs the module name —
+# the get_fee_percent unit tests below exercise the real function directly.
+_REAL_GET_FEE_PERCENT = pr.get_fee_percent
+
 
 def _order(side, qty, price, *, is_bot, ts, tracking, isin="IRO1XXXX0001"):
     return BrokerOrder(
@@ -55,13 +59,17 @@ def _fake_db(orders, cust_agent_rows=None):
 
 @pytest.fixture(autouse=True)
 def _patch(monkeypatch):
-    async def _fee(_db, _agent):
+    async def _fee(_db, _agent, customer_id=None):
         return Decimal("1.0")  # 1%
     monkeypatch.setattr(pr, "get_fee_percent", _fee)
 
     async def _price(_db, _isin):
         return 7000  # today's live price
     monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+
+    async def _paid(_db, _ids):
+        return {}  # no payments by default
+    monkeypatch.setattr(pr.fee_payments, "total_paid_by_customer", _paid)
 
 
 async def test_bot_sell_fee_is_pct_of_sell_value():
@@ -137,3 +145,41 @@ async def test_virtual_skipped_when_no_live_price(monkeypatch):
                  ts=datetime(2026, 6, 1, tzinfo=timezone.utc), tracking=1)
     rep = await pr.build_fee_report(_fake_db([buy]), today=_TODAY)
     assert rep.rows == []  # no price → no virtual sell, no fee
+
+
+async def test_paid_and_remaining_per_customer(monkeypatch):
+    # owed 6500 (bot sell 100@6500 × 1%), paid 2000 → remaining 4500.
+    async def _paid(_db, _ids):
+        return {_CUST: Decimal("2000")}
+    monkeypatch.setattr(pr.fee_payments, "total_paid_by_customer", _paid)
+    sell = _order(2, 100, 6500, is_bot=True,
+                  ts=datetime(2026, 6, 20, tzinfo=timezone.utc), tracking=1)
+    rep = await pr.build_fee_report(_fake_db([sell]), today=_TODAY)
+    ct = rep.per_customer[_CUST]
+    assert ct.total_fee == Decimal("6500")
+    assert ct.paid == Decimal("2000")
+    assert ct.remaining == Decimal("4500")
+
+
+# ---------------------------------------------------------------------------
+# get_fee_percent resolution: customer → agent → global → default (#116)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_fee_percent_customer_override_wins():
+    from types import SimpleNamespace
+    db = MagicMock()
+    db.get = AsyncMock(return_value=SimpleNamespace(fee_percent=Decimal("2.5")))
+    # customer override present → returned without touching the agent config.
+    assert await _REAL_GET_FEE_PERCENT(db, _AGENT, customer_id=_CUST) == Decimal("2.5")
+
+
+async def test_get_fee_percent_falls_back_to_agent():
+    from types import SimpleNamespace
+    db = MagicMock()
+    # 1st db.get (Customer) → no override; 2nd (AgentFeeConfig) → 1.5%.
+    db.get = AsyncMock(side_effect=[
+        SimpleNamespace(fee_percent=None),
+        SimpleNamespace(fee_percent=Decimal("1.5")),
+    ])
+    assert await _REAL_GET_FEE_PERCENT(db, _AGENT, customer_id=_CUST) == Decimal("1.5")
