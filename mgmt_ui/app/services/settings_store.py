@@ -82,6 +82,12 @@ DEFAULTS: dict[str, str] = {
     # search/dropdown (#109) and the fee 20-day mark-to-market price (#111). A
     # connection error degrades gracefully (no dropdown results / no live price).
     "market_data_url": "http://market-data:8077",
+    # --- 20-day mark-to-market loss fee (#111 follow-up) ---
+    # When a bot-bought position is still unsold after 20 days and is in LOSS at
+    # today's price, bill this FIXED fee per losing position (customer × stock).
+    # GLOBAL default in TOMAN; per-agent override lives in agent_fee_configs.
+    # The report converts ×10 to Rial. "0" = no loss fee.
+    "mark_to_market_loss_fee_toman": "0",
 }
 
 

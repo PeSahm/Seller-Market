@@ -8,7 +8,7 @@ query, the fee resolver, and the payments ledger are mocked.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +20,7 @@ from app.services import profit_report as pr
 _AGENT = uuid.uuid4()
 _CUST = uuid.uuid4()
 _CUST_B = uuid.uuid4()
+_TODAY = date(2026, 6, 30)
 
 # Real resolver captured before the autouse fixture stubs the module name.
 _REAL_GET_FEE_PERCENT = pr.get_fee_percent
@@ -61,6 +62,15 @@ def _patch(monkeypatch):
     async def _paid(_db, _ids):
         return {}
     monkeypatch.setattr(pr.fee_payments, "total_paid_by_customer", _paid)
+
+    # No live price by default → the 20-day pass is a no-op unless a test opts in.
+    async def _price(_db, _isin):
+        return None
+    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+
+    async def _loss(_db, _agent):
+        return Decimal("0")
+    monkeypatch.setattr(pr, "get_loss_fee_rial", _loss)
 
 
 async def test_realized_profit_fee_on_bot_buy():
@@ -116,6 +126,76 @@ async def test_loss_lot_earns_no_fee():
     assert rep.buy_rows[0].realized_profit == Decimal("-50000")
     assert rep.buy_rows[0].fee == Decimal("0")  # no fee on a loss
     assert rep.per_customer[_CUST].total_fee == Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# 20-day mark-to-market on unsold positions
+# ---------------------------------------------------------------------------
+
+_OLD = datetime(2026, 6, 1, tzinfo=timezone.utc)   # 29 days before _TODAY
+_RECENT = datetime(2026, 6, 25, tzinfo=timezone.utc)  # 5 days before _TODAY
+
+
+async def test_20day_profit_bills_pct_of_paper_gain(monkeypatch):
+    async def _price(_db, _isin):
+        return 7000
+    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+    # bot buy 100 @ 6000 placed 29d ago, NEVER sold → open 100, today 7000.
+    buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
+    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
+    assert len(rep.virtual_rows) == 1
+    v = rep.virtual_rows[0]
+    assert v.in_loss is False and v.open_qty == 100
+    assert v.fee == Decimal("1000")  # 1% × (7000-6000) × 100 = 1% × 100000
+    assert rep.per_customer[_CUST].mark_fee == Decimal("1000")
+    assert rep.per_customer[_CUST].total_fee == Decimal("1000")
+    assert rep.grand_fee == Decimal("1000")
+
+
+async def test_20day_loss_bills_fixed_per_agent_fee(monkeypatch):
+    async def _price(_db, _isin):
+        return 5500  # below the 6000 buy → loss
+    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+
+    async def _loss(_db, _agent):
+        return Decimal("500000")  # fixed loss fee, in Rial
+    monkeypatch.setattr(pr, "get_loss_fee_rial", _loss)
+
+    buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
+    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
+    assert len(rep.virtual_rows) == 1
+    v = rep.virtual_rows[0]
+    assert v.in_loss is True and v.fee == Decimal("500000")
+    assert rep.per_customer[_CUST].total_fee == Decimal("500000")
+
+
+async def test_20day_skips_recent_lots(monkeypatch):
+    async def _price(_db, _isin):
+        return 7000
+    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+    buy = _order(1, 100, 6000, is_bot=True, ts=_RECENT, tracking=1)  # only 5 days old
+    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
+    assert rep.virtual_rows == []
+
+
+async def test_20day_skips_when_no_price():
+    # fixture's get_last_price returns None → no mark-to-market.
+    buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
+    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
+    assert rep.virtual_rows == []
+
+
+async def test_20day_only_on_unsold_remainder(monkeypatch):
+    async def _price(_db, _isin):
+        return 7000
+    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+    # buy 100 @ 6000 (old), sell 60 → 40 open & aged → virtual on 40 only.
+    buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
+    sell = _order(2, 60, 6500, is_bot=False, ts=_RECENT, tracking=2)
+    rep = await pr.build_fee_report(_fake_db([buy, sell], [(_CUST, _AGENT)]), today=_TODAY)
+    assert len(rep.virtual_rows) == 1
+    assert rep.virtual_rows[0].open_qty == 40
+    assert rep.virtual_rows[0].fee == Decimal("400")  # 1% × (7000-6000) × 40
 
 
 # ---------------------------------------------------------------------------

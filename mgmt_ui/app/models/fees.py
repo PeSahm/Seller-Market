@@ -29,6 +29,11 @@ class AgentFeeConfig(Base):
         primary_key=True,
     )
     fee_percent: Mapped[Decimal] = mapped_column(Numeric(6, 4), nullable=False)
+    # Fixed fee (in TOMAN) billed per losing position on the 20-day mark-to-market
+    # (#111 follow-up). NULL = fall back to the global setting. ×10 → Rial.
+    loss_fee_toman: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(18, 2), nullable=True
+    )
     effective_from: Mapped[Optional[date]] = mapped_column(sa.Date, nullable=True)
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     updated_by: Mapped[Optional[uuid.UUID]] = mapped_column(

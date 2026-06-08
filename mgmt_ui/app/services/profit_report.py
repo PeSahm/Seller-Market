@@ -27,13 +27,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.broker_orders import BrokerOrder
 from app.models.customers import Customer
 from app.models.fees import AgentFeeConfig
-from app.services import fee_payments, settings_store
+from app.services import fee_payments, market_data_client, settings_store
 from app.services.broker_orders import in_time_window, is_excluded
 from app.services.profit_matching import OrderLeg, match_lots
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_FEE_PERCENT = Decimal("1.0")
+_MARK_TO_MARKET_DAYS = 20
+_TOMAN_TO_RIAL = Decimal("10")
 
 # Buy is fully sold / partly sold / not sold yet ("possible sell" still to come).
 STATUS_REALIZED = "realized"
@@ -59,6 +61,27 @@ class BuyFeeRow:
 
 
 @dataclass
+class VirtualFeeRow:
+    """A 20-day mark-to-market assessment on an unsold bot-bought position.
+
+    A position (customer × stock) still unsold after 20 days is valued at
+    today's market price: in profit → fee = X% of the paper gain; in loss → a
+    fixed per-agent fee. Separate from the realized per-buy rows.
+    """
+
+    customer_id: Optional[UUID]
+    agent_id: Optional[UUID]
+    broker: str
+    isin: str
+    symbol: str
+    open_qty: int
+    avg_buy_price: Decimal
+    today_price: int
+    in_loss: bool
+    fee: Decimal
+
+
+@dataclass
 class CustomerFeeTotals:
     """Per-customer rollup: owed (computed) − paid (ledger) = remaining (#116)."""
 
@@ -67,7 +90,8 @@ class CustomerFeeTotals:
     num_buys: int = 0
     total_buy_value: Decimal = Decimal("0")
     realized_profit: Decimal = Decimal("0")
-    total_fee: Decimal = Decimal("0")  # owed
+    total_fee: Decimal = Decimal("0")  # owed (realized + 20-day mark-to-market)
+    mark_fee: Decimal = Decimal("0")   # the 20-day mark-to-market portion
     open_volume: int = 0
     paid: Decimal = Decimal("0")
     remaining: Decimal = Decimal("0")
@@ -86,6 +110,7 @@ class AgentTotals:
 @dataclass
 class FeeReport:
     buy_rows: list[BuyFeeRow] = field(default_factory=list)
+    virtual_rows: list[VirtualFeeRow] = field(default_factory=list)
     per_customer: dict[Optional[UUID], CustomerFeeTotals] = field(default_factory=dict)
     per_agent: dict[Optional[UUID], AgentTotals] = field(default_factory=dict)
     grand_realized: Decimal = Decimal("0")
@@ -115,6 +140,28 @@ async def get_fee_percent(
     except Exception:  # noqa: BLE001 — malformed setting shouldn't 500 the report
         logger.warning("profit_fee_percent setting is unparseable; using default")
         return _DEFAULT_FEE_PERCENT
+
+
+async def get_loss_fee_rial(db: AsyncSession, agent_id: Optional[UUID]) -> Decimal:
+    """Resolve the fixed loss-fee (in RIAL) for the 20-day mark-to-market.
+
+    Per-agent ``agent_fee_configs.loss_fee_toman`` override → global
+    ``mark_to_market_loss_fee_toman`` setting → 0. Stored in Toman; returned
+    ×10 as Rial so it adds straight onto the report's Rial totals.
+    """
+    toman: Optional[Decimal] = None
+    if agent_id is not None:
+        cfg = await db.get(AgentFeeConfig, agent_id)
+        if cfg is not None and getattr(cfg, "loss_fee_toman", None) is not None:
+            toman = Decimal(cfg.loss_fee_toman)
+    if toman is None:
+        try:
+            toman = Decimal(
+                str(await settings_store.get_setting(db, "mark_to_market_loss_fee_toman"))
+            )
+        except Exception:  # noqa: BLE001 — malformed setting shouldn't 500 the report
+            toman = Decimal("0")
+    return toman * _TOMAN_TO_RIAL
 
 
 def _leg(order: BrokerOrder) -> OrderLeg:
@@ -160,6 +207,8 @@ async def build_fee_report(
     window_start: Optional[time] = None,
     window_end: Optional[time] = None,
     exclude: Optional[set[str]] = None,
+    today: Optional[date] = None,
+    mark_to_market_days: int = _MARK_TO_MARKET_DAYS,
     max_rows: int = 20000,
 ) -> FeeReport:
     """Compute per-buy profit + operator fee across the filtered orders.
@@ -169,7 +218,12 @@ async def build_fee_report(
     against ALL sells, rolls matched lots up per buy, and rolls up per customer
     (owed − paid = remaining) + per agent. Every customer with orders in scope
     appears, even at zero, so each is reachable for fee config + payments.
+
+    20-day mark-to-market: any bot-bought position (customer × stock) still
+    UNSOLD after ``mark_to_market_days`` is valued at today's market price —
+    in profit → fee = X% of the paper gain; in loss → a fixed per-agent fee.
     """
+    today = today or datetime.now(timezone.utc).date()
     stmt = (
         select(BrokerOrder)
         .where(BrokerOrder.state == 3)
@@ -215,6 +269,18 @@ async def build_fee_report(
     by_tracking = {o.tracking_number: o for o in orders}
     report = FeeReport()
     fee_pct_cache: dict[tuple, Decimal] = {}
+    loss_fee_cache: dict[Optional[UUID], Decimal] = {}
+    price_cache: dict[str, Optional[int]] = {}
+
+    async def _today_price(isin: str) -> Optional[int]:
+        if isin not in price_cache:
+            price_cache[isin] = await market_data_client.get_last_price(db, isin)
+        return price_cache[isin]
+
+    async def _loss_fee(agent: Optional[UUID]) -> Decimal:
+        if agent not in loss_fee_cache:
+            loss_fee_cache[agent] = await get_loss_fee_rial(db, agent)
+        return loss_fee_cache[agent]
 
     for (cust_id, _isin), group in groups.items():
         agent_id_of_group = (
@@ -298,6 +364,57 @@ async def build_fee_report(
             ctot.total_fee += row.fee
             ctot.open_volume += row.open_volume
 
+        # --- 20-day mark-to-market on the UNSOLD remainder of this position ---
+        # One assessment per (customer, isin): aggregate the still-open volume of
+        # bot buys placed > mark_to_market_days ago, value it at today's market
+        # price → in profit bill X% of the paper gain, in loss bill the fixed
+        # per-agent loss fee.
+        aged_open_qty = 0
+        weighted_buy = Decimal("0")
+        for o in bot_buys:
+            brow = per_buy[o.tracking_number]
+            if brow.open_volume <= 0:
+                continue
+            buy_ts = o.execution_date or o.created_at_broker or o.placed_at
+            if buy_ts is None or (today - buy_ts.date()).days <= mark_to_market_days:
+                continue
+            aged_open_qty += brow.open_volume
+            weighted_buy += (
+                Decimal(o.price) if o.price is not None else Decimal("0")
+            ) * brow.open_volume
+        if aged_open_qty > 0:
+            today_price = await _today_price(_isin)
+            if today_price and today_price > 0:
+                avg_buy = weighted_buy / aged_open_qty
+                tp = Decimal(today_price)
+                if tp > avg_buy:
+                    vfee = (fee_pct / Decimal("100")) * (tp - avg_buy) * aged_open_qty
+                    in_loss = False
+                else:
+                    vfee = await _loss_fee(agent_id_of_group)
+                    in_loss = True
+                if vfee > 0:
+                    sym = next(
+                        (x.symbol or x.symbol_title for x in group if (x.symbol or x.symbol_title)),
+                        "",
+                    ) or ""
+                    report.virtual_rows.append(VirtualFeeRow(
+                        customer_id=cust_id, agent_id=agent_id_of_group,
+                        broker=group[0].broker, isin=_isin, symbol=sym,
+                        open_qty=aged_open_qty, avg_buy_price=avg_buy,
+                        today_price=today_price, in_loss=in_loss, fee=vfee,
+                    ))
+                    ctot.total_fee += vfee
+                    ctot.mark_fee += vfee
+                    atot = report.per_agent.setdefault(
+                        agent_id_of_group, AgentTotals(agent_id=agent_id_of_group)
+                    )
+                    atot.total_fee += vfee
+            else:
+                logger.warning(
+                    "fee 20-day: no live price for %s — skipping mark-to-market", _isin
+                )
+
     # Per-customer paid (received-fee ledger) → remaining = owed − paid (#116).
     paid_map = await fee_payments.total_paid_by_customer(
         db, [cid for cid in report.per_customer if cid is not None]
@@ -321,10 +438,12 @@ async def build_fee_report(
 
 __all__ = [
     "BuyFeeRow",
+    "VirtualFeeRow",
     "CustomerFeeTotals",
     "AgentTotals",
     "FeeReport",
     "get_fee_percent",
+    "get_loss_fee_rial",
     "build_fee_report",
     "STATUS_REALIZED",
     "STATUS_PARTIAL",

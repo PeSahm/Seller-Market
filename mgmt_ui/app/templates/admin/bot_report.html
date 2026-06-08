@@ -132,9 +132,9 @@
   {# ================= Profit & fee tab ================= #}
   {% set fr = fee_report %}
 
-  {# Per-agent fee % override #}
+  {# Per-agent fee % + 20-day fixed loss-fee override #}
   <details class="card" style="margin-bottom: 12px;">
-    <summary class="text-small">Set an agent's profit-share fee %</summary>
+    <summary class="text-small">Set an agent's fee % + 20-day loss fee</summary>
     <form method="post" action="/admin/bot-report/fee-config" class="filter-bar" style="margin-top:8px;">
       {% include "partials/csrf.html" %}
       <select name="agent_id" class="input" required>
@@ -144,8 +144,14 @@
         {% endfor %}
       </select>
       <input type="number" step="0.0001" min="0" name="fee_percent" class="input" placeholder="fee %" required title="Percent, e.g. 1.5 = 1.5%">
-      <button class="btn btn--sm" type="submit">Save fee %</button>
+      <input type="number" step="1" min="0" name="loss_fee_toman" class="input" placeholder="loss fee (Toman)" title="Fixed fee per losing position on the 20-day mark-to-market, in Toman (blank = global default)">
+      <button class="btn btn--sm" type="submit">Save</button>
     </form>
+    <p class="text-small text-muted" style="margin:6px 0 0;">
+      The 20-day loss fee is billed per losing position (customer × stock) still
+      unsold after 20 days; in profit it's the % above. Global default is on
+      Admin → Settings (<code>mark_to_market_loss_fee_toman</code>).
+    </p>
   </details>
 
   {% if not fr or not fr.per_customer %}
@@ -260,6 +266,39 @@
         {{ '{:,}'.format(fr.unmatched_sell_qty) }} sold share(s) had no matching bot buy in
         range (pre-existing/manual holdings) — excluded from the fee.
       </p>
+    {% endif %}
+
+    {% if fr.virtual_rows %}
+    <h3 class="h3" style="margin-top:18px;">20-day mark-to-market (unsold &gt; 20 days)</h3>
+    <p class="text-small text-muted">
+      Positions still unsold after 20 days, valued at today's price: in profit →
+      % of the paper gain; in loss → the fixed per-agent loss fee.
+    </p>
+    <table class="table">
+      <thead>
+        <tr><th>Customer</th><th>Symbol / ISIN</th><th>Open qty</th><th>Avg buy</th><th>Today</th><th>Status</th><th>Fee</th></tr>
+      </thead>
+      <tbody>
+        {% for v in fr.virtual_rows %}
+        {% set cust = customers_by_id.get(v.customer_id) %}
+        <tr>
+          <td dir="auto" class="text-small">{{ cust.display_name if cust else '—' }}</td>
+          <td>
+            {% if v.symbol %}<code class="text-small" dir="auto">{{ v.symbol }}</code><div class="text-small text-muted"><code>{{ v.isin }}</code></div>
+            {% else %}<code class="text-small">{{ v.isin }}</code>{% endif %}
+          </td>
+          <td class="text-small">{{ '{:,}'.format(v.open_qty) }}</td>
+          <td class="text-small">{{ '{:,.0f}'.format(v.avg_buy_price) }}</td>
+          <td class="text-small">{{ '{:,}'.format(v.today_price) }}</td>
+          <td>
+            {% if v.in_loss %}<span class="badge badge--down" title="fixed per-agent loss fee">loss</span>
+            {% else %}<span class="badge badge--up">profit</span>{% endif %}
+          </td>
+          <td class="text-small"><strong>{{ '{:,.0f}'.format(v.fee) }}</strong></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
     {% endif %}
   {% endif %}
 
