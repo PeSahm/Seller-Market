@@ -1,0 +1,26 @@
+# Market-data sidecar image — one per VPS, deployed by the mgmt UI.
+# Reuses the bot's flat module tree (rlc_price, rlc_market, exir_*), so the
+# build context is ./SellerMarket (same as the bot image). Serves the Flask
+# market-data API (market_data_app.py).
+
+FROM python:3.11-slim AS builder
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends gcc \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+FROM python:3.11-slim
+WORKDIR /app
+COPY --from=builder /root/.local /root/.local
+ENV PATH=/root/.local/bin:$PATH
+COPY *.py ./
+
+ENV PYTHONUNBUFFERED=1
+ENV MARKET_DATA_PORT=8077
+EXPOSE 8077
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8077/health', timeout=5).status==200 else 1)"
+
+CMD ["python", "market_data_app.py"]
