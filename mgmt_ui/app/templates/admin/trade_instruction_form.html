@@ -41,6 +41,10 @@
       action="{% if is_edit %}/admin/customers/{{ customer.id }}/trade-instructions/{{ trade_instruction.id }}/edit{% else %}/admin/customers/{{ customer.id }}/trade-instructions{% endif %}">
   {% include "partials/csrf.html" %}
 
+  {# --- Stock-name search → fills the ISIN field below (issue #109) --- #}
+  {% set instrument_search_url = "/admin/instruments/search" %}
+  {% include "partials/instrument_search.html" %}
+
   {# --- ISIN + side --- #}
   <div class="field-row">
     <div class="field field--grow">

@@ -1,0 +1,73 @@
+{#
+  Searchable stock-name → ISIN typeahead (issue #109).
+
+  Progressive enhancement: on selecting a result it fills the existing #isin
+  input on the same form. If the sidecar or JS is unavailable, the manual ISIN
+  field still works — this only *assists*.
+
+  Requires `instrument_search_url` set by the including template, e.g.
+    {% set instrument_search_url = "/admin/instruments/search" %}
+    {% include "partials/instrument_search.html" %}
+#}
+<style>
+  .ta-wrap { position: relative; }
+  .ta-results { position:absolute; z-index:40; left:0; right:0; margin:2px 0 0;
+    padding:0; list-style:none; max-height:240px; overflow-y:auto;
+    background:var(--surface,#fff); border:1px solid var(--border,#ccc);
+    border-radius:6px; box-shadow:0 4px 16px rgba(0,0,0,.12); }
+  .ta-item { padding:6px 10px; cursor:pointer; font-size:.9rem; }
+  .ta-item:hover { background:var(--accent-bg,#eef); }
+  .ta-isin { color:var(--text-muted,#777); }
+</style>
+<div class="field field--grow ta-wrap">
+  <label class="label" for="instrument_search">Find stock by name / symbol</label>
+  <input class="input" id="instrument_search" type="text" autocomplete="off"
+         placeholder="type a name or symbol, e.g. سرود …" dir="auto"
+         role="combobox" aria-expanded="false" aria-controls="ta-results">
+  <ul id="ta-results" class="ta-results" role="listbox" hidden></ul>
+  <p class="text-small text-muted">
+    Pick a result to fill the ISIN below — or type the ISIN directly.
+  </p>
+</div>
+<script>
+(function(){
+  var url = {{ instrument_search_url|tojson }};
+  var box = document.getElementById('instrument_search');
+  var list = document.getElementById('ta-results');
+  var isin = document.getElementById('isin');
+  if(!box || !list || !isin) return;
+  var t = null, ctrl = null;
+  function hide(){ list.hidden = true; list.innerHTML = ''; box.setAttribute('aria-expanded','false'); }
+  function choose(it){ isin.value = it.isin; box.value = (it.symbol || it.name || it.isin); hide(); }
+  function render(items){
+    list.innerHTML = '';
+    if(!items || !items.length){ hide(); return; }
+    items.forEach(function(it){
+      var li = document.createElement('li');
+      li.className = 'ta-item'; li.setAttribute('role','option');
+      var nameEl = document.createElement('span'); nameEl.setAttribute('dir','auto');
+      nameEl.textContent = (it.symbol ? it.symbol + ' — ' : '') + (it.name || '') || it.isin;
+      var isinEl = document.createElement('span'); isinEl.className = 'ta-isin';
+      isinEl.textContent = ' ' + it.isin;
+      li.appendChild(nameEl); li.appendChild(isinEl);
+      li.addEventListener('mousedown', function(e){ e.preventDefault(); choose(it); });
+      list.appendChild(li);
+    });
+    list.hidden = false; box.setAttribute('aria-expanded','true');
+  }
+  box.addEventListener('input', function(){
+    var q = box.value.trim();
+    if(t) clearTimeout(t);
+    if(q.length < 2){ hide(); return; }
+    t = setTimeout(function(){
+      if(ctrl) ctrl.abort();
+      ctrl = new AbortController();
+      fetch(url + '?q=' + encodeURIComponent(q), {signal: ctrl.signal, headers: {'Accept':'application/json'}})
+        .then(function(r){ return r.ok ? r.json() : {instruments: []}; })
+        .then(function(d){ render(d && d.instruments); })
+        .catch(function(){ /* sidecar/network down → no suggestions; manual ISIN still works */ });
+    }, 220);
+  });
+  document.addEventListener('click', function(e){ if(e.target !== box) hide(); });
+})();
+</script>

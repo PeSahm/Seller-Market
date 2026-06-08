@@ -75,6 +75,13 @@ DEFAULTS: dict[str, str] = {
     # by section count (with hysteresis). Disable to keep customers where they are
     # while still auto-scaling locust. "true"/"false".
     "enable_autobalance": "true",
+    # --- Market-data sidecar (issue #108) ---
+    # Base URL of the per-host market-data sidecar this mgmt UI talks to. On the
+    # mgmt host the sidecar runs as the ``market-data`` service in the same
+    # compose project, reachable over the compose network. Powers the instrument
+    # search/dropdown (#109) and the fee 20-day mark-to-market price (#111). A
+    # connection error degrades gracefully (no dropdown results / no live price).
+    "market_data_url": "http://market-data:8077",
 }
 
 

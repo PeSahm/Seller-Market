@@ -56,6 +56,7 @@ from app.services import profit_report as services_profit_report
 from app.services import distribution as services_distribution
 from app.services import health_signals as services_health
 from app.services import locust_configs as services_locust
+from app.services import market_data_client
 from app.services import run_executor
 from app.services import runs as services_runs
 from app.services import scheduler_jobs as services_scheduler
@@ -1694,6 +1695,24 @@ async def admin_customer_copy(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return _flash_redirect(request, f"/admin/customers/{new_customer.id}")
+
+
+@router.get("/instruments/search")
+async def admin_instruments_search(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    q: str = "",
+    limit: int = 20,
+):
+    """Typeahead source for the trade-instruction ISIN field — name/symbol →
+    ISIN via the market-data sidecar. Returns ``{instruments:[{isin,symbol,
+    name}]}``; an empty list on a too-short query or a sidecar hiccup (the
+    manual ISIN input still works)."""
+    rows = await market_data_client.search_instruments(
+        db, q, limit=min(max(limit, 1), 50)
+    )
+    return {"instruments": rows}
 
 
 # ---------------------------------------------------------------------------

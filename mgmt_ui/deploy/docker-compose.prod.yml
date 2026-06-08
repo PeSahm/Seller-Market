@@ -58,6 +58,28 @@ services:
       # past JANITOR_RUN_LOG_RETENTION_DAYS.
       - /var/lib/sm-mgmt/run_logs:/var/lib/run_logs
 
+  # Per-host market-data sidecar (issue #108). The api reaches it over the
+  # compose network at http://market-data:8077 (the `market_data_url` setting
+  # default) for the instrument dropdown (#109) and the fee 20-day price (#111).
+  # The data endpoints are public RLC — the MARKET_DATA_* reference account is
+  # OPTIONAL (only needed if a future authed endpoint is added). No host port:
+  # only the api (same network) consumes it. The api degrades gracefully if it
+  # is down, so it is intentionally NOT a hard depends_on.
+  market-data:
+    image: ${MARKET_DATA_IMAGE_TAG:-ghcr.io/pesahm/seller-market-md:latest}
+    restart: unless-stopped
+    environment:
+      MARKET_DATA_PORT: "8077"
+      MARKET_DATA_BROKER: ${MARKET_DATA_BROKER:-}
+      MARKET_DATA_USERNAME: ${MARKET_DATA_USERNAME:-}
+      MARKET_DATA_PASSWORD: ${MARKET_DATA_PASSWORD:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8077/health', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
 networks:
   default:
     name: sm_mgmt_net
