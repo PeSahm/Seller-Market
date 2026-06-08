@@ -167,10 +167,10 @@
       </p>
     </div>
   {% else %}
-    {# Per-customer totals (owed) #}
+    {# Per-customer totals: owed (computed) − paid (ledger) = remaining #}
     <table class="table" style="margin-bottom: 16px;">
       <thead>
-        <tr><th>Customer</th><th>Agent</th><th># sells</th><th># virtual</th><th>Fee owed</th></tr>
+        <tr><th>Customer</th><th>Agent</th><th># sells</th><th># virtual</th><th>Owed</th><th>Paid</th><th>Remaining</th><th></th></tr>
       </thead>
       <tbody>
         {% for cid, t in fr.per_customer.items() %}
@@ -181,12 +181,18 @@
           <td dir="auto" class="text-small text-muted">{{ ag.username if ag else '—' }}</td>
           <td class="text-small">{{ t.num_sells }}</td>
           <td class="text-small">{{ t.num_virtual }}</td>
-          <td class="text-small"><strong>{{ '{:,.0f}'.format(t.total_fee) }}</strong></td>
+          <td class="text-small">{{ '{:,.0f}'.format(t.total_fee) }}</td>
+          <td class="text-small text-muted">{{ '{:,.0f}'.format(t.paid) }}</td>
+          <td class="text-small"><strong>{{ '{:,.0f}'.format(t.remaining) }}</strong></td>
+          <td>
+            {% if cid %}<a class="btn btn--ghost btn--sm" href="/admin/customers/{{ cid }}">payment…</a>{% endif %}
+          </td>
         </tr>
         {% endfor %}
         <tr>
           <td><strong>TOTAL</strong></td><td></td><td></td><td></td>
           <td class="text-small"><strong>{{ '{:,.0f}'.format(fr.grand_fee) }}</strong></td>
+          <td></td><td></td><td></td>
         </tr>
       </tbody>
     </table>

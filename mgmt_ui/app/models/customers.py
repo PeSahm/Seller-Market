@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Optional
 
 import sqlalchemy as sa
@@ -10,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     text,
 )
@@ -98,6 +100,9 @@ class Customer(Base):
     username: Mapped[str] = mapped_column(String(255), nullable=False)
     password_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     broker: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Per-customer profit-share fee % override (#116). NULL = no override; the
+    # report falls back to the agent override → global setting → default.
+    fee_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 4), nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(
         sa.TIMESTAMP(timezone=True),

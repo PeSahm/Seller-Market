@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.broker_orders import BrokerOrder
 from app.models.customers import Customer
 from app.models.fees import AgentFeeConfig
-from app.services import market_data_client, settings_store
+from app.services import fee_payments, market_data_client, settings_store
 from app.services.broker_orders import in_time_window, is_excluded
 from app.services.profit_matching import OrderLeg, compute_open_lots
 
@@ -80,7 +80,9 @@ class CustomerFeeTotals:
     num_virtual: int = 0
     sell_fee: Decimal = Decimal("0")
     virtual_fee: Decimal = Decimal("0")
-    total_fee: Decimal = Decimal("0")  # owed (paid/remaining added in #116)
+    total_fee: Decimal = Decimal("0")  # owed
+    paid: Decimal = Decimal("0")       # Σ received-fee ledger (#116)
+    remaining: Decimal = Decimal("0")  # owed − paid
 
 
 @dataclass
@@ -100,12 +102,19 @@ class FeeReport:
     grand_fee: Decimal = Decimal("0")
 
 
-async def get_fee_percent(db: AsyncSession, agent_id: Optional[UUID]) -> Decimal:
-    """Resolve the fee % for an agent: per-agent override → global → default.
+async def get_fee_percent(
+    db: AsyncSession,
+    agent_id: Optional[UUID],
+    customer_id: Optional[UUID] = None,
+) -> Decimal:
+    """Resolve the fee %: per-customer → per-agent → global → default (#116).
 
-    Returns a PERCENT (e.g. ``Decimal("1.5")`` == 1.5%). (#116 layers a
-    per-customer override on top of this.)
+    Returns a PERCENT (e.g. ``Decimal("1.5")`` == 1.5%).
     """
+    if customer_id is not None:
+        cust = await db.get(Customer, customer_id)
+        if cust is not None and cust.fee_percent is not None:
+            return Decimal(cust.fee_percent)
     if agent_id is not None:
         cfg = await db.get(AgentFeeConfig, agent_id)
         if cfg is not None and cfg.fee_percent is not None:
@@ -248,7 +257,7 @@ async def build_fee_report(
 
     by_tracking = {o.tracking_number: o for o in orders}
     report = FeeReport()
-    fee_pct_cache: dict[Optional[UUID], Decimal] = {}
+    fee_pct_cache: dict[tuple, Decimal] = {}
     price_cache: dict[str, Optional[int]] = {}
 
     async def _today_price(isin: str) -> Optional[int]:
@@ -260,9 +269,12 @@ async def build_fee_report(
         agent_of = (
             cust_agent.get(cust_id) if cust_id is not None else group[0].agent_id
         )
-        if agent_of not in fee_pct_cache:
-            fee_pct_cache[agent_of] = await get_fee_percent(db, agent_of)
-        fee_pct = fee_pct_cache[agent_of]
+        # Fee % resolves per CUSTOMER → agent → global → default (#116), so
+        # cache by (customer, agent), not agent alone.
+        ck = (cust_id, agent_of)
+        if ck not in fee_pct_cache:
+            fee_pct_cache[ck] = await get_fee_percent(db, agent_of, customer_id=cust_id)
+        fee_pct = fee_pct_cache[ck]
         rate = fee_pct / Decimal("100")
         broker_code = group[0].broker
         group_symbol = next(
@@ -325,6 +337,14 @@ async def build_fee_report(
                     fee=rate * value, at=buy_ts, tracking=lot.buy_tracking,
                     age_days=age,
                 ))
+
+    # Per-customer paid (received-fee ledger) → remaining = owed − paid (#116).
+    paid_map = await fee_payments.total_paid_by_customer(
+        db, [cid for cid in report.per_customer if cid is not None]
+    )
+    for cid, ct in report.per_customer.items():
+        ct.paid = paid_map.get(cid, Decimal("0")) if cid is not None else Decimal("0")
+        ct.remaining = ct.total_fee - ct.paid
 
     report.rows.sort(key=_sort_key, reverse=True)
     report.grand_value = sum((r.value for r in report.rows), Decimal("0"))
