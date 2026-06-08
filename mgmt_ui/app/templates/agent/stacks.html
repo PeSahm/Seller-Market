@@ -5,8 +5,9 @@
 <h1 class="h1">My stacks</h1>
 <p class="text-muted text-small">
   A stack is your bot's on-server deployment for a particular trading
-  server. You can tune the schedule and load-test parameters here; server
-  assignment itself is decided by your admin.
+  server. Open a stack to run cache warmup / trading manually or tune the
+  schedule and load-test parameters; server assignment itself is decided by
+  your admin.
 </p>
 
 {% if not stacks %}
@@ -23,15 +24,15 @@
     <th>Server</th>
     <th>Status</th>
     <th>Deployed</th>
-    <th>Edit</th>
+    <th>Manage</th>
   </tr></thead>
   <tbody>
     {% for s in stacks %}
     {% set srv = servers_by_id.get(s.server_id) %}
     <tr>
       <td>
-        {% if srv %}<span dir="auto">{{ srv.name }}</span>
-        {% else %}<span class="text-muted">&mdash;</span>{% endif %}
+        {% if srv %}<a dir="auto" href="/agent/stacks/{{ s.id }}">{{ srv.name }}</a>
+        {% else %}<a class="text-muted" href="/agent/stacks/{{ s.id }}">&mdash;</a>{% endif %}
       </td>
       <td>
         {% if s.status == 'up' %}<span class="badge badge--up">up</span>
@@ -43,6 +44,7 @@
         {% if s.deployed_at %}{{ s.deployed_at.strftime('%Y-%m-%d %H:%M UTC') }}{% else %}&mdash;{% endif %}
       </td>
       <td>
+        <a class="btn btn--primary btn--sm" href="/agent/stacks/{{ s.id }}">Open &amp; run&hellip;</a>
         <a class="btn btn--ghost btn--sm" href="/agent/stacks/{{ s.id }}/scheduler">Scheduler&hellip;</a>
         <a class="btn btn--ghost btn--sm" href="/agent/stacks/{{ s.id }}/locust">Locust&hellip;</a>
       </td>
