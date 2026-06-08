@@ -113,22 +113,36 @@ def test_search_filters_ranks_and_caps(monkeypatch):
 # queue
 # ---------------------------------------------------------------------------
 
-def test_queue_symbolinfo_wrapper(monkeypatch):
-    _patch(monkeypatch, {"symbolinfo": {"qd": 12345, "qo": 6789, "zd": 3, "zo": 2}})
+def test_queue_from_getstockprice2_row(monkeypatch):
+    # LIVE-CONFIRMED: best-level queue lives on the getstockprice2 row —
+    # bbq/bsq (best buy/sell qty), nbb/nbs (order counts), bbp/bsp (best prices).
+    _patch(monkeypatch, [{
+        "nc": "IRO1SROD0001",
+        "bbq": 12345, "bsq": 6789, "nbb": 3, "nbs": 2, "bbp": 11150, "bsp": 0,
+    }])
     q = rlc_market.get_queue("IRO1SROD0001")
     assert q["buy_volume"] == 12345
     assert q["sell_volume"] == 6789
     assert q["buy_count"] == 3 and q["sell_count"] == 2
+    assert q["best_buy_price"] == 11150
 
 
-def test_queue_missing_fields_returns_none(monkeypatch):
-    _patch(monkeypatch, {"symbolinfo": {"foo": 1}})
+def test_queue_unknown_isin_returns_none(monkeypatch):
+    _patch(monkeypatch, [{"nc": "OTHER", "bbq": 5}])
     assert rlc_market.get_queue("IRO1SROD0001") is None
+
+
+def test_queue_empty_book_is_zero_not_none(monkeypatch):
+    # A found row with no resting orders → an HONEST zero (auto-sell reads
+    # buy_volume=0 as "empty buy queue"), NOT None ("no data").
+    _patch(monkeypatch, [{"nc": "IRO1SROD0001", "bbq": 0, "bsq": 0}])
+    q = rlc_market.get_queue("IRO1SROD0001")
+    assert q is not None and q["buy_volume"] == 0
 
 
 def test_queue_caches(monkeypatch):
     calls = []
-    _patch(monkeypatch, {"symbolinfo": {"qd": 1}}, capture=calls)
+    _patch(monkeypatch, [{"nc": "X", "bbq": 1}], capture=calls)
     rlc_market.get_queue("X")
     rlc_market.get_queue("X")
     assert len(calls) == 1

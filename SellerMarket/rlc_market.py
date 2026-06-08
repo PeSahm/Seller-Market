@@ -223,28 +223,35 @@ def search_instruments(q: str, limit: int = 20) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Order queue (tolerant — shape pinned live; raw logged; never raises).
+# Order queue — the best-level (top-of-book) buy/sell queue.
+#
+# LIVE-CONFIRMED shape: the StockInformationHandler row (getstockprice2) carries
+# the best-level queue directly — ``bbq`` (best-BUY quantity = the buy-queue /
+# صف خرید volume), ``bsq`` (best-SELL quantity), ``nbb``/``nbs`` (order counts),
+# ``bbp``/``bsp`` (best buy/sell price). One call also gives band + last, so we
+# reuse the same handler the price band uses. (StockFutureInfoHandler returns
+# ``symbolinfo`` + ``symbolqueue.Value`` for the FULL 5-level depth, but the
+# best level here is what auto-sell needs; the depth handler stays a future
+# refinement.)
 # ---------------------------------------------------------------------------
 
-def _extract_queue(payload: object) -> dict | None:
-    """Best-effort buy/sell queue volumes from a StockFutureInfoHandler payload.
+def _extract_queue(payload: object, isin: str) -> dict | None:
+    """Best-level buy/sell queue from a getstockprice2 row for ``isin``.
 
-    Returns ``{buy_volume, sell_volume, buy_count, sell_count, raw}`` or None.
-    Field names are hedged across the shapes seen in the decompiled
-    ``TadbirSymbolDataFetcher`` (``zd``/``qd`` = best-bid count/volume,
-    ``zo``/``qo`` = best-ask count/volume; ``symbolinfo`` wrapper).
+    Returns ``{buy_volume, sell_volume, buy_count, sell_count, best_buy_price,
+    best_sell_price}`` or None. ``buy_volume`` (``bbq``) is the buy-queue share
+    count auto-sell compares against its threshold.
     """
-    obj = payload
-    if isinstance(obj, list) and obj:
-        obj = obj[0]
-    if isinstance(obj, dict) and isinstance(obj.get("symbolinfo"), dict):
-        obj = obj["symbolinfo"]
-    if not isinstance(obj, dict):
+    rows = payload
+    if not isinstance(rows, list):
+        return None
+    row = next((r for r in rows if isinstance(r, dict) and r.get("nc") == isin), None)
+    if row is None:
         return None
 
     def _num(*keys):
         for k in keys:
-            v = obj.get(k)
+            v = row.get(k)
             if v is None:
                 continue
             try:
@@ -253,32 +260,30 @@ def _extract_queue(payload: object) -> dict | None:
                 continue
         return None
 
-    buy_volume = _num("qd", "bestBuyQuantity", "totalBuyVolume", "buyQueueVolume", "qbd")
-    sell_volume = _num("qo", "bestSellQuantity", "totalSellVolume", "sellQueueVolume", "qbo")
-    if buy_volume is None and sell_volume is None:
-        return None
     return {
-        "buy_volume": buy_volume or 0,
-        "sell_volume": sell_volume or 0,
-        "buy_count": _num("zd", "buyCount") or 0,
-        "sell_count": _num("zo", "sellCount") or 0,
-        "raw": obj,
+        "buy_volume": _num("bbq") or 0,    # best-buy qty = buy-queue volume
+        "sell_volume": _num("bsq") or 0,   # best-sell qty = sell-queue volume
+        "buy_count": _num("nbb") or 0,
+        "sell_count": _num("nbs") or 0,
+        "best_buy_price": _num("bbp") or 0,
+        "best_sell_price": _num("bsp") or 0,
     }
 
 
 def get_queue(isin: str, timeout: int = 10) -> dict | None:
-    """Order-queue snapshot for ``isin`` (``{buy_volume, sell_volume, ...}``).
+    """Best-level order-queue snapshot for ``isin`` (``{buy_volume, sell_volume,
+    ...}``).
 
-    Used by auto-sell (sell when the buy-queue share count drops below a
-    threshold). 2s TTL. Returns None when unavailable (logged, never raises) so
-    the caller can decide (auto-sell holds rather than sells on missing data).
+    Used by auto-sell (sell when the buy-queue share count ``buy_volume`` drops
+    below a threshold). 2s TTL. Returns None when unavailable (logged, never
+    raises) so the caller holds rather than sells on missing data.
     """
     with _lock:
         hit = _queue_cache.get(isin)
         if hit is not None and (time.monotonic() - hit[1]) < _QUEUE_TTL_S:
             return hit[0]
-    url = _FUTURE_INFO_URL + "?" + _blob(
-        {"Type": "getLightSymbolInfoAndQueue", "la": "Fa", "nscCode": isin}
+    url = _STOCK_INFO_URL + "?" + _blob(
+        {"Type": "getstockprice2", "la": "Fa", "arr": isin}
     )
     try:
         resp = _session.get(url, timeout=timeout)
@@ -287,8 +292,8 @@ def get_queue(isin: str, timeout: int = 10) -> dict | None:
     except (requests.RequestException, ValueError) as exc:
         logger.warning("rlc_market queue fetch failed for %s: %s", isin, exc)
         return None
-    _log_raw_once("queue", payload)
-    q = _extract_queue(payload)
+    _log_raw_once("queue", payload[:1] if isinstance(payload, list) else payload)
+    q = _extract_queue(payload, isin)
     if q is not None:
         with _lock:
             _queue_cache[isin] = (q, time.monotonic())
