@@ -70,72 +70,81 @@ def build_fee_workbook(
     customer_names: dict[UUID, str],
     generated_for: str = "",
 ) -> bytes:
-    """Render ``report`` (+ the raw ``orders``) into an .xlsx workbook."""
+    """Render ``report`` (+ the raw ``orders``) into an .xlsx workbook.
+
+    Sheets: per-row Sells & fees · Per-customer totals (owed) · Per-agent
+    totals · Raw orders (audit). Each fee row is a real bot **sell** or a 20-day
+    **virtual** sell (mark-to-market on an unsold bot buy).
+    """
     wb = Workbook()
 
-    # ---- Sheet 1: Buys & fees -------------------------------------------
+    # ---- Sheet 1: Sells & fees ------------------------------------------
     ws = wb.active
-    ws.title = "Buys & fees"
+    ws.title = "Sells & fees"
     headers = [
-        "Agent", "Customer", "Broker", "ISIN", "Symbol",
-        "Buy date", "Buy volume", "Buy price", "Buy value (matched)",
-        "Last sell date", "Sold volume", "Sell value",
-        "Realized profit", "Fee %", "Fee amount", "Open volume", "Status",
+        "Agent", "Customer", "Broker", "ISIN", "Symbol", "Kind",
+        "Date", "Qty", "Price", "Value", "Fee %", "Fee amount", "Age (days)",
     ]
     _write_header(ws, headers)
-    for row in report.buy_rows:
-        o = row.buy
+    for row in report.rows:
         ws.append([
-            agent_names.get(o.agent_id, "—") if o.agent_id else "—",
-            customer_names.get(o.customer_id, o.account_username) if o.customer_id else o.account_username,
-            o.broker,
-            o.isin,
-            o.symbol or o.symbol_title or "",
-            _xl_dt(o.placed_at or o.created_at_broker),
-            int(o.executed_volume or 0),
-            _num(o.price),
-            _num(row.buy_value),
-            _xl_dt(row.last_sell_at),
-            row.matched_volume,
-            _num(row.sell_value),
-            _num(row.realized_profit),
+            agent_names.get(row.agent_id, "—") if row.agent_id else "—",
+            customer_names.get(row.customer_id, "—") if row.customer_id else "—",
+            row.broker,
+            row.isin,
+            row.symbol or "",
+            row.kind,
+            _xl_dt(row.at),
+            int(row.qty),
+            _num(row.price),
+            _num(row.value),
             _num(row.fee_percent),
             _num(row.fee),
-            row.open_volume,
-            row.status,
+            row.age_days if row.age_days is not None else "",
         ])
     _apply_formats(
         ws,
-        date_cols=[6, 10],
-        money_cols=[8, 9, 12, 13, 15],
-        pct_cols=[14],
-        nrows=len(report.buy_rows),
+        date_cols=[7],
+        money_cols=[9, 10, 12],
+        pct_cols=[11],
+        nrows=len(report.rows),
     )
-    _autosize(ws, [16, 16, 10, 16, 10, 19, 12, 12, 18, 19, 12, 16, 16, 8, 16, 12, 10])
+    _autosize(ws, [16, 18, 10, 16, 12, 9, 19, 12, 12, 18, 8, 16, 10])
 
-    # ---- Sheet 2: Per-agent totals --------------------------------------
-    ws2 = wb.create_sheet("Per-agent totals")
+    # ---- Sheet 2: Per-customer totals (owed) ----------------------------
+    wsc = wb.create_sheet("Per-customer totals")
     _write_header(
-        ws2,
-        ["Agent", "# buys", "Total buy value", "Realized profit",
-         "Total fee", "Open volume"],
+        wsc,
+        ["Customer", "Agent", "# sells", "# virtual", "Sell fee",
+         "Virtual fee", "Total fee (owed)"],
     )
+    for t in report.per_customer.values():
+        wsc.append([
+            customer_names.get(t.customer_id, "—") if t.customer_id else "—",
+            agent_names.get(t.agent_id, "—") if t.agent_id else "—",
+            t.num_sells,
+            t.num_virtual,
+            _num(t.sell_fee),
+            _num(t.virtual_fee),
+            _num(t.total_fee),
+        ])
+    _apply_formats(wsc, date_cols=[], money_cols=[5, 6, 7], pct_cols=[], nrows=len(report.per_customer))
+    _autosize(wsc, [18, 16, 10, 10, 16, 16, 18])
+
+    # ---- Sheet 3: Per-agent totals --------------------------------------
+    ws2 = wb.create_sheet("Per-agent totals")
+    _write_header(ws2, ["Agent", "# fee rows", "Total value", "Total fee"])
     for totals in report.per_agent.values():
         ws2.append([
             agent_names.get(totals.agent_id, "—") if totals.agent_id else "—",
-            totals.num_buys,
-            _num(totals.total_buy_value),
-            _num(totals.realized_profit),
+            totals.num_rows,
+            _num(totals.total_value),
             _num(totals.total_fee),
-            totals.open_volume,
         ])
-    # Grand total row.
     ws2.append([])
-    ws2.append([
-        "TOTAL", "", "", _num(report.grand_realized), _num(report.grand_fee), "",
-    ])
-    _apply_formats(ws2, date_cols=[], money_cols=[3, 4, 5], pct_cols=[], nrows=len(report.per_agent) + 2)
-    _autosize(ws2, [18, 10, 18, 18, 18, 12])
+    ws2.append(["TOTAL", "", _num(report.grand_value), _num(report.grand_fee)])
+    _apply_formats(ws2, date_cols=[], money_cols=[3, 4], pct_cols=[], nrows=len(report.per_agent) + 2)
+    _autosize(ws2, [18, 12, 18, 18])
 
     # ---- Sheet 3: Raw orders (audit) ------------------------------------
     ws3 = wb.create_sheet("Raw orders")

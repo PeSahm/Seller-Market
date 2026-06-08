@@ -148,87 +148,83 @@
     </form>
   </details>
 
-  {% if not fr or not fr.buy_rows %}
+  <p class="text-small text-muted" style="margin-bottom:12px;">
+    Fee = the configured % of each <strong>bot sell's value</strong>
+    (<code>price × qty</code>), charged once on the sell. Any bot buy still
+    unsold after 20 days is <strong>virtually sold at today's price</strong>
+    (mark-to-market) and billed too. Manual sells earn no fee.
+  </p>
+
+  {% if not fr or not fr.rows %}
     <div class="card">
-      <p class="text-muted">No matched buys in scope.</p>
+      <p class="text-muted">No fee-generating activity in scope.</p>
       <p class="text-small text-muted">
-        Use <strong>Refresh from broker</strong> to pull order history, then
-        widen the date range. Only buys in the market-open window (or tagged
-        by the fire-log) count as bot buys.
+        Fees come from <strong>bot sells</strong> and from bot buys held
+        <strong>&gt; 20 days</strong> (marked to market at today's price). Use
+        <strong>Refresh from broker</strong> to pull order history, then widen
+        the date range. (No fees yet is expected until the bot starts selling
+        or a bot buy ages past 20 days.)
       </p>
     </div>
   {% else %}
-    {# Per-agent totals #}
+    {# Per-customer totals (owed) #}
     <table class="table" style="margin-bottom: 16px;">
       <thead>
-        <tr><th>Agent</th><th># buys</th><th>Matched buy value</th><th>Realized profit</th><th>Fee due</th><th>Open vol</th></tr>
+        <tr><th>Customer</th><th>Agent</th><th># sells</th><th># virtual</th><th>Fee owed</th></tr>
       </thead>
       <tbody>
-        {% for ag_id, t in fr.per_agent.items() %}
-        {% set ag = agents_by_id.get(ag_id) %}
+        {% for cid, t in fr.per_customer.items() %}
+        {% set cust = customers_by_id.get(cid) %}
+        {% set ag = agents_by_id.get(t.agent_id) %}
         <tr>
-          <td dir="auto">{{ ag.username if ag else '—' }}</td>
-          <td class="text-small">{{ t.num_buys }}</td>
-          <td class="text-small">{{ '{:,.0f}'.format(t.total_buy_value) }}</td>
-          <td class="text-small">{{ '{:,.0f}'.format(t.realized_profit) }}</td>
+          <td dir="auto" class="text-small">{{ cust.display_name if cust else '—' }}</td>
+          <td dir="auto" class="text-small text-muted">{{ ag.username if ag else '—' }}</td>
+          <td class="text-small">{{ t.num_sells }}</td>
+          <td class="text-small">{{ t.num_virtual }}</td>
           <td class="text-small"><strong>{{ '{:,.0f}'.format(t.total_fee) }}</strong></td>
-          <td class="text-small">{{ t.open_volume }}</td>
         </tr>
         {% endfor %}
         <tr>
-          <td><strong>TOTAL</strong></td><td></td><td></td>
-          <td class="text-small"><strong>{{ '{:,.0f}'.format(fr.grand_realized) }}</strong></td>
+          <td><strong>TOTAL</strong></td><td></td><td></td><td></td>
           <td class="text-small"><strong>{{ '{:,.0f}'.format(fr.grand_fee) }}</strong></td>
-          <td></td>
         </tr>
       </tbody>
     </table>
 
-    {# Per-buy detail #}
+    {# Per-row detail: each bot sell + each 20-day virtual sell #}
     <table class="table">
       <thead>
         <tr>
-          <th>Agent</th><th>Customer</th><th>Symbol / ISIN</th>
-          <th>Buy date</th><th>Buy vol</th><th>Buy price</th>
-          <th>Sold</th><th>Sell value</th><th>Realized</th>
-          <th>Fee %</th><th>Fee</th><th>Status</th>
+          <th>Agent</th><th>Customer</th><th>Symbol / ISIN</th><th>Kind</th>
+          <th>Date</th><th>Qty</th><th>Price</th><th>Value</th>
+          <th>Fee %</th><th>Fee</th>
         </tr>
       </thead>
       <tbody>
-        {% for r in fr.buy_rows %}
-        {% set o = r.buy %}
-        {% set cust = customers_by_id.get(o.customer_id) %}
-        {% set ag = agents_by_id.get(o.agent_id) %}
+        {% for r in fr.rows %}
+        {% set cust = customers_by_id.get(r.customer_id) %}
+        {% set ag = agents_by_id.get(r.agent_id) %}
         <tr>
           <td dir="auto" class="text-small">{{ ag.username if ag else '—' }}</td>
-          <td class="text-small" dir="auto">{{ cust.display_name if cust else o.account_username }}</td>
+          <td class="text-small" dir="auto">{{ cust.display_name if cust else '—' }}</td>
           <td>
-            {% if o.symbol %}<code class="text-small" dir="auto">{{ o.symbol }}</code><div class="text-small text-muted"><code>{{ o.isin }}</code></div>
-            {% else %}<code class="text-small">{{ o.isin }}</code>{% endif %}
+            {% if r.symbol %}<code class="text-small" dir="auto">{{ r.symbol }}</code><div class="text-small text-muted"><code>{{ r.isin }}</code></div>
+            {% else %}<code class="text-small">{{ r.isin }}</code>{% endif %}
           </td>
-          <td class="text-small text-muted">{{ o.placed_at.strftime('%Y-%m-%d %H:%M:%S') if o.placed_at else '—' }}</td>
-          <td class="text-small">{{ '{:,}'.format(o.executed_volume) }}</td>
-          <td class="text-small">{{ '{:,.0f}'.format(o.price) if o.price is not none else '—' }}</td>
-          <td class="text-small">{{ '{:,}'.format(r.matched_volume) }}{% if r.open_volume %}<span class="text-muted"> / {{ '{:,}'.format(r.open_volume) }} open</span>{% endif %}</td>
-          <td class="text-small">{{ '{:,.0f}'.format(r.sell_value) }}</td>
-          <td class="text-small">{{ '{:,.0f}'.format(r.realized_profit) }}</td>
+          <td>
+            {% if r.kind == 'sell' %}<span class="badge badge--up">bot sell</span>
+            {% else %}<span class="badge badge--pending" title="held > 20 days, marked to market at today's price">virtual{% if r.age_days %} · {{ r.age_days }}d{% endif %}</span>{% endif %}
+          </td>
+          <td class="text-small text-muted">{{ r.at.strftime('%Y-%m-%d %H:%M:%S') if r.at else '—' }}</td>
+          <td class="text-small">{{ '{:,}'.format(r.qty) }}</td>
+          <td class="text-small">{{ '{:,.0f}'.format(r.price) }}</td>
+          <td class="text-small">{{ '{:,.0f}'.format(r.value) }}</td>
           <td class="text-small">{{ r.fee_percent }}</td>
           <td class="text-small"><strong>{{ '{:,.0f}'.format(r.fee) }}</strong></td>
-          <td>
-            {% if r.status == 'realized' %}<span class="badge badge--up">realized</span>
-            {% elif r.status == 'partial' %}<span class="badge badge--pending">partial</span>
-            {% else %}<span class="badge">open / possible sell</span>{% endif %}
-          </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
-    {% if fr.unmatched_sell_qty %}
-      <p class="text-small text-muted">
-        {{ '{:,}'.format(fr.unmatched_sell_qty) }} sold share(s) had no matching bot buy in
-        range (pre-existing/manual holdings) — excluded from the fee.
-      </p>
-    {% endif %}
   {% endif %}
 
 {% else %}

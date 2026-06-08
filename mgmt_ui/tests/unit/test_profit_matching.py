@@ -11,7 +11,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from app.services.profit_matching import OrderLeg, match_lots
+from app.services.profit_matching import (
+    OrderLeg,
+    compute_open_lots,
+    match_lots,
+)
 
 
 def _buy(tracking, qty, price, *, minute=0):
@@ -199,3 +203,41 @@ def test_zero_executed_volume_buys_ignored():
     assert len(summary.matched) == 1
     assert summary.matched[0].buy_tracking == 2
     assert summary.open_position_qty == 0
+
+
+# ---------------------------------------------------------------------------
+# compute_open_lots — the unsold remainder driving the 20-day rule (#111)
+# ---------------------------------------------------------------------------
+
+
+def test_open_lots_no_sells_returns_all_buys():
+    lots = compute_open_lots(buys=[_buy(1, 100, 10), _buy(2, 50, 12, minute=1)], sells=[])
+    assert {(l.buy_tracking, l.qty) for l in lots} == {(1, 100), (2, 50)}
+
+
+def test_open_lots_fully_sold_returns_empty():
+    lots = compute_open_lots(buys=[_buy(1, 100, 10)], sells=[_sell(2, 100, 15)])
+    assert lots == []
+
+
+def test_open_lots_partial_sell_leaves_remainder():
+    lots = compute_open_lots(buys=[_buy(1, 100, 10)], sells=[_sell(2, 60, 15)])
+    assert len(lots) == 1
+    assert lots[0].buy_tracking == 1 and lots[0].qty == 40
+    assert lots[0].buy_ts == _buy(1, 100, 10).ts  # carries the buy timestamp
+
+
+def test_open_lots_fifo_consumes_oldest_first():
+    # Sell 120 against two buys (100 @ t0, 80 @ t1) → first buy gone, second has 60.
+    lots = compute_open_lots(
+        buys=[_buy(1, 100, 10), _buy(2, 80, 11, minute=1)],
+        sells=[_sell(3, 120, 15)],
+    )
+    assert len(lots) == 1
+    assert lots[0].buy_tracking == 2 and lots[0].qty == 60
+
+
+def test_open_lots_oversell_drops_everything():
+    # More sold than bought → no open lots (excess sell is just ignored here).
+    lots = compute_open_lots(buys=[_buy(1, 100, 10)], sells=[_sell(2, 150, 15)])
+    assert lots == []

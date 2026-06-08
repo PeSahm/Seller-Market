@@ -1,14 +1,24 @@
-"""Build the per-buy profit/fee report from stored ``broker_orders``.
+"""Build the sell-side fee report from stored ``broker_orders`` (#111 redesign).
 
-Glues the pure FIFO matcher (:mod:`app.services.profit_matching`) to the DB:
-loads fully-executed orders, classifies which BUYs were the bot's, FIFO-matches
-them against the account's SELLs per (customer, isin), and rolls the matched
-lots up into ONE ROW PER BUY — the shape the owner asked for in the Excel
-report ("one row per successful buy with its matched/possible sell and the
-realized fee").
+The operator's fee model (redesigned):
 
-Fee resolution is layered: a per-agent ``agent_fee_configs`` override beats the
-global ``profit_fee_percent`` setting, which beats a hardcoded default.
+* **Fee = X% of each BOT SELL's VALUE** (``sell_price × sold_qty``), charged once
+  on the sell — fixed/final at sale time. Only sells the bot placed (``is_bot``)
+  earn a fee; the agent's manual sells don't.
+* **20-day mark-to-market on UNSOLD bot buys**: FIFO-consume every sell against
+  every buy ("each buy with the first sell, for all"); any bot buy lot still
+  open after >20 calendar days is **virtually sold at today's live price** (from
+  the per-host market-data sidecar), and X% of that value is billed. Recomputed
+  live each time the report runs — until the lot is actually sold.
+
+So the fee comes from two row kinds: real bot **sells** and 20-day **virtual**
+sells. Rows roll up per customer (owed) and per agent. ``X`` resolves per-agent
+override → global ``profit_fee_percent`` → default (per-customer override is
+added in #116).
+
+Pairs the pure matcher (:mod:`app.services.profit_matching`) to the DB; a bug
+here is a wrong invoice, so the engine is exhaustively unit-tested with the
+sidecar price client mocked.
 """
 
 from __future__ import annotations
@@ -26,60 +36,75 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.broker_orders import BrokerOrder
 from app.models.customers import Customer
 from app.models.fees import AgentFeeConfig
-from app.services import settings_store
+from app.services import market_data_client, settings_store
 from app.services.broker_orders import in_time_window, is_excluded
-from app.services.profit_matching import OrderLeg, match_lots
+from app.services.profit_matching import OrderLeg, compute_open_lots
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_FEE_PERCENT = Decimal("1.0")
+_MARK_TO_MARKET_DAYS = 20
 
-# Buy is fully sold / partly sold / not sold yet ("possible sell" still to come).
-STATUS_REALIZED = "realized"
-STATUS_PARTIAL = "partial"
-STATUS_OPEN = "open"
+# Row kinds.
+KIND_SELL = "sell"        # a real bot sell — X% of the sell value
+KIND_VIRTUAL = "virtual"  # 20-day mark-to-market on an unsold bot buy
 
-
-@dataclass
-class BuyFeeRow:
-    """One bot BUY with its matched sells rolled up + the fee it earns."""
-
-    buy: BrokerOrder
-    matched_volume: int = 0
-    open_volume: int = 0
-    buy_value: Decimal = Decimal("0")  # buy_price * matched_volume
-    sell_value: Decimal = Decimal("0")  # Σ sell_price * matched qty
-    realized_profit: Decimal = Decimal("0")  # sell_value − buy_value
-    fee: Decimal = Decimal("0")  # fee_percent% of realized_profit (if > 0)
-    fee_percent: Decimal = Decimal("0")
-    last_sell_at: Optional[datetime] = None
-    sell_trackings: list[int] = field(default_factory=list)
-    status: str = STATUS_OPEN
+_MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 
 
 @dataclass
-class AgentTotals:
+class FeeRow:
+    """One fee-generating event — a bot sell, or a 20-day virtual sell."""
+
+    customer_id: Optional[UUID]
     agent_id: Optional[UUID]
-    num_buys: int = 0
-    total_buy_value: Decimal = Decimal("0")  # matched buy value
-    realized_profit: Decimal = Decimal("0")
+    broker: str
+    isin: str
+    symbol: str
+    kind: str  # KIND_SELL | KIND_VIRTUAL
+    qty: int
+    price: Decimal           # sell price, or today's price for a virtual row
+    value: Decimal           # price * qty
+    fee_percent: Decimal
+    fee: Decimal             # fee_percent% of value
+    at: Optional[datetime]   # sell time, or the buy time for a virtual row
+    tracking: Optional[int]  # sell tracking, or buy tracking for a virtual row
+    age_days: Optional[int] = None  # virtual rows: age of the unsold buy lot
+
+
+@dataclass
+class CustomerFeeTotals:
+    customer_id: Optional[UUID]
+    agent_id: Optional[UUID]
+    num_sells: int = 0
+    num_virtual: int = 0
+    sell_fee: Decimal = Decimal("0")
+    virtual_fee: Decimal = Decimal("0")
+    total_fee: Decimal = Decimal("0")  # owed (paid/remaining added in #116)
+
+
+@dataclass
+class AgentFeeTotals:
+    agent_id: Optional[UUID]
+    num_rows: int = 0
+    total_value: Decimal = Decimal("0")
     total_fee: Decimal = Decimal("0")
-    open_volume: int = 0
 
 
 @dataclass
 class FeeReport:
-    buy_rows: list[BuyFeeRow] = field(default_factory=list)
-    per_agent: dict[Optional[UUID], AgentTotals] = field(default_factory=dict)
-    grand_realized: Decimal = Decimal("0")
+    rows: list[FeeRow] = field(default_factory=list)
+    per_customer: dict[Optional[UUID], CustomerFeeTotals] = field(default_factory=dict)
+    per_agent: dict[Optional[UUID], AgentFeeTotals] = field(default_factory=dict)
+    grand_value: Decimal = Decimal("0")
     grand_fee: Decimal = Decimal("0")
-    unmatched_sell_qty: int = 0
 
 
 async def get_fee_percent(db: AsyncSession, agent_id: Optional[UUID]) -> Decimal:
     """Resolve the fee % for an agent: per-agent override → global → default.
 
-    Returns a PERCENT (e.g. ``Decimal("1.5")`` == 1.5%).
+    Returns a PERCENT (e.g. ``Decimal("1.5")`` == 1.5%). (#116 layers a
+    per-customer override on top of this.)
     """
     if agent_id is not None:
         cfg = await db.get(AgentFeeConfig, agent_id)
@@ -93,15 +118,10 @@ async def get_fee_percent(db: AsyncSession, agent_id: Optional[UUID]) -> Decimal
 
 
 def _leg(order: BrokerOrder) -> OrderLeg:
-    """Project a BrokerOrder into the matcher's minimal leg.
-
-    FIFO ordering uses execution_date when present (when the fill actually
-    happened) else the placement time, so a buy placed at open but filled
-    later still orders before a same-day sell.
-    """
+    """Project a BrokerOrder into the matcher's minimal leg (FIFO by exec time)."""
     ts = order.execution_date or order.created_at_broker or order.placed_at
     if ts is None:
-        ts = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        ts = _MIN_DT
     return OrderLeg(
         tracking_number=order.tracking_number,
         order_side=order.order_side,
@@ -114,14 +134,46 @@ def _leg(order: BrokerOrder) -> OrderLeg:
 def _is_bot_buy(
     order: BrokerOrder, window_start: Optional[time], window_end: Optional[time]
 ) -> bool:
-    """A buy counts as the bot's when the fire-log tagged it (authoritative)
-    OR — for historical data with no fire-log — it landed in the market-open
-    window."""
+    """A buy is the bot's when the fire-log tagged it (authoritative) OR — for
+    historical rows with no fire-log — it landed in the market-open window."""
     if order.order_side != 1:
         return False
     if order.is_bot:
         return True
     return in_time_window(order, window_start, window_end)
+
+
+def _order_ts(o: BrokerOrder) -> Optional[datetime]:
+    return o.execution_date or o.created_at_broker or o.placed_at
+
+
+def _sort_key(r: FeeRow) -> datetime:
+    """Newest-first sort key, tolerant of naive vs tz-aware stored datetimes."""
+    at = r.at
+    if at is None:
+        return _MIN_DT
+    return at.replace(tzinfo=timezone.utc) if at.tzinfo is None else at
+
+
+def _add_row(report: FeeReport, row: FeeRow) -> None:
+    report.rows.append(row)
+    ct = report.per_customer.setdefault(
+        row.customer_id,
+        CustomerFeeTotals(customer_id=row.customer_id, agent_id=row.agent_id),
+    )
+    if row.kind == KIND_SELL:
+        ct.num_sells += 1
+        ct.sell_fee += row.fee
+    else:
+        ct.num_virtual += 1
+        ct.virtual_fee += row.fee
+    ct.total_fee += row.fee
+    at = report.per_agent.setdefault(
+        row.agent_id, AgentFeeTotals(agent_id=row.agent_id)
+    )
+    at.num_rows += 1
+    at.total_value += row.value
+    at.total_fee += row.fee
 
 
 async def build_fee_report(
@@ -135,20 +187,25 @@ async def build_fee_report(
     window_start: Optional[time] = None,
     window_end: Optional[time] = None,
     exclude: Optional[set[str]] = None,
+    today: Optional[date] = None,
+    mark_to_market_days: int = _MARK_TO_MARKET_DAYS,
     max_rows: int = 20000,
 ) -> FeeReport:
-    """Compute per-buy profit + operator fee across the filtered orders.
+    """Compute the sell-side fee across the filtered orders.
 
-    Loads fully-executed (``state==3``) orders in the filter scope, classifies
-    bot buys (fire-log tag or market-open window), FIFO-matches per
-    (customer, isin) against ALL sells, and rolls matched lots up per buy.
+    Loads fully-executed (``state==3``) orders in scope, then per
+    ``(customer, isin)``: bills X% of each **bot sell's value**, and — for any
+    bot buy lot still unsold after ``mark_to_market_days`` — bills X% of the
+    open qty valued at **today's live price** (the sidecar). Rolls up per
+    customer (owed) and per agent.
     """
+    today = today or datetime.now(timezone.utc).date()
+
     stmt = (
         select(BrokerOrder)
         .where(BrokerOrder.state == 3)
-        # A NULL price would be coerced to 0 by _leg and massively inflate
-        # realized profit (and the fee). A fully-executed order should always
-        # carry a price; exclude any that don't rather than corrupt the math.
+        # A NULL price would corrupt value/fee math — a fully-executed order
+        # should always carry a price; drop any that don't.
         .where(BrokerOrder.price.isnot(None))
         .order_by(BrokerOrder.placed_at)
         .limit(max_rows)
@@ -170,14 +227,11 @@ async def build_fee_report(
 
     orders = list((await db.execute(stmt)).scalars().all())
     if exclude:
-        # Drop excluded instruments (e.g. agent-bought bonds) BEFORE matching so
-        # they never contribute to profit or fee.
         orders = [o for o in orders if not is_excluded(o, exclude)]
 
-    # Resolve each customer's CURRENT agent. broker_orders.agent_id is a
-    # fetch-time snapshot; if a customer is reassigned to another agent it
-    # goes stale and would misattribute the profit/fee. Always bill the
-    # customer's current owner (review finding).
+    # Resolve each customer's CURRENT agent (broker_orders.agent_id is a
+    # fetch-time snapshot that goes stale on reassignment — always bill the
+    # current owner).
     cust_agent: dict[UUID, Optional[UUID]] = {}
     cust_ids_present = {o.customer_id for o in orders if o.customer_id is not None}
     if cust_ids_present:
@@ -188,8 +242,6 @@ async def build_fee_report(
         )
         cust_agent = {cid: aid for cid, aid in rows.all()}
 
-    # Group by (customer_id, isin). A null customer_id (unassigned account)
-    # groups on its own so its orders still match among themselves.
     groups: dict[tuple, list[BrokerOrder]] = {}
     for o in orders:
         groups.setdefault((o.customer_id, o.isin), []).append(o)
@@ -197,98 +249,96 @@ async def build_fee_report(
     by_tracking = {o.tracking_number: o for o in orders}
     report = FeeReport()
     fee_pct_cache: dict[Optional[UUID], Decimal] = {}
+    price_cache: dict[str, Optional[int]] = {}
 
-    for (cust_id, _isin), group in groups.items():
-        agent_id_of_group = (
+    async def _today_price(isin: str) -> Optional[int]:
+        if isin not in price_cache:
+            price_cache[isin] = await market_data_client.get_last_price(db, isin)
+        return price_cache[isin]
+
+    for (cust_id, isin), group in groups.items():
+        agent_of = (
             cust_agent.get(cust_id) if cust_id is not None else group[0].agent_id
         )
-        if agent_id_of_group not in fee_pct_cache:
-            fee_pct_cache[agent_id_of_group] = await get_fee_percent(
-                db, agent_id_of_group
+        if agent_of not in fee_pct_cache:
+            fee_pct_cache[agent_of] = await get_fee_percent(db, agent_of)
+        fee_pct = fee_pct_cache[agent_of]
+        rate = fee_pct / Decimal("100")
+        broker_code = group[0].broker
+        group_symbol = next(
+            (o.symbol or o.symbol_title for o in group if (o.symbol or o.symbol_title)),
+            "",
+        ) or ""
+
+        all_buys = [o for o in group if o.order_side == 1 and int(o.executed_volume or 0) > 0]
+        all_sells = [o for o in group if o.order_side == 2]
+
+        # (a) Real bot-SELL fees: X% of the sell's value. Manual sells excluded.
+        for s in all_sells:
+            if not s.is_bot:
+                continue
+            qty = int(s.executed_volume or 0)
+            price = Decimal(s.price) if s.price is not None else Decimal("0")
+            if qty <= 0 or price <= 0:
+                continue
+            value = price * qty
+            _add_row(report, FeeRow(
+                customer_id=cust_id, agent_id=agent_of, broker=broker_code,
+                isin=isin, symbol=s.symbol or group_symbol, kind=KIND_SELL,
+                qty=qty, price=price, value=value, fee_percent=fee_pct,
+                fee=rate * value, at=_order_ts(s), tracking=s.tracking_number,
+            ))
+
+        # (b) 20-day virtual sells on UNSOLD bot buy lots. FIFO all buys vs all
+        #     sells ("each buy with the first sell, for all"); keep only the
+        #     bot-attributed open lots, mark to market at today's live price.
+        if all_buys:
+            open_lots = compute_open_lots(
+                buys=[_leg(o) for o in all_buys],
+                sells=[_leg(o) for o in all_sells],
             )
-        fee_pct = fee_pct_cache[agent_id_of_group]
+            for lot in open_lots:
+                if lot.qty <= 0:
+                    continue
+                buy = by_tracking.get(lot.buy_tracking)
+                if buy is None or not _is_bot_buy(buy, window_start, window_end):
+                    continue
+                buy_ts = _order_ts(buy)
+                if buy_ts is None:
+                    continue
+                age = (today - buy_ts.date()).days
+                if age <= mark_to_market_days:
+                    continue
+                price_today = await _today_price(isin)
+                if not price_today or price_today <= 0:
+                    logger.warning(
+                        "fee 20-day: no live price for %s — skipping virtual sell "
+                        "(qty=%d, age=%dd)", isin, lot.qty, age,
+                    )
+                    continue
+                price_dec = Decimal(price_today)
+                value = price_dec * lot.qty
+                _add_row(report, FeeRow(
+                    customer_id=cust_id, agent_id=agent_of, broker=broker_code,
+                    isin=isin, symbol=group_symbol, kind=KIND_VIRTUAL,
+                    qty=lot.qty, price=price_dec, value=value, fee_percent=fee_pct,
+                    fee=rate * value, at=buy_ts, tracking=lot.buy_tracking,
+                    age_days=age,
+                ))
 
-        bot_buys = [o for o in group if _is_bot_buy(o, window_start, window_end)]
-        sells = [o for o in group if o.order_side == 2]
-        if not bot_buys:
-            continue
-
-        summary = match_lots(
-            buys=[_leg(o) for o in bot_buys],
-            sells=[_leg(o) for o in sells],
-            fee_pct=fee_pct,
-        )
-        report.unmatched_sell_qty += summary.unmatched_sell_qty
-
-        # Roll matched lots up per buy.
-        per_buy: dict[int, BuyFeeRow] = {}
-        for o in bot_buys:
-            per_buy[o.tracking_number] = BuyFeeRow(
-                buy=o,
-                open_volume=int(o.executed_volume or 0),
-                fee_percent=fee_pct,
-            )
-        for lot in summary.matched:
-            row = per_buy[lot.buy_tracking]
-            row.matched_volume += lot.matched_volume
-            row.open_volume -= lot.matched_volume
-            row.buy_value += lot.buy_price * lot.matched_volume
-            row.sell_value += lot.sell_price * lot.matched_volume
-            row.realized_profit += lot.realized_profit
-            row.sell_trackings.append(lot.sell_tracking)
-            sell_order = by_tracking.get(lot.sell_tracking)
-            if sell_order is not None:
-                sell_ts = (
-                    sell_order.execution_date
-                    or sell_order.created_at_broker
-                    or sell_order.placed_at
-                )
-                if sell_ts is not None and (
-                    row.last_sell_at is None or sell_ts > row.last_sell_at
-                ):
-                    row.last_sell_at = sell_ts
-
-        for row in per_buy.values():
-            if row.matched_volume == 0:
-                row.status = STATUS_OPEN
-            elif row.open_volume > 0:
-                row.status = STATUS_PARTIAL
-            else:
-                row.status = STATUS_REALIZED
-            # Fee only on positive realized profit (default basis).
-            if row.realized_profit > 0:
-                row.fee = (fee_pct / Decimal("100")) * row.realized_profit
-            report.buy_rows.append(row)
-
-            totals = report.per_agent.setdefault(
-                agent_id_of_group, AgentTotals(agent_id=agent_id_of_group)
-            )
-            totals.num_buys += 1
-            totals.total_buy_value += row.buy_value
-            totals.realized_profit += row.realized_profit
-            totals.total_fee += row.fee
-            totals.open_volume += row.open_volume
-
-    report.buy_rows.sort(
-        key=lambda r: (r.buy.placed_at or datetime.min.replace(tzinfo=timezone.utc)),
-        reverse=True,
-    )
-    report.grand_realized = sum(
-        (t.realized_profit for t in report.per_agent.values()), Decimal("0")
-    )
-    report.grand_fee = sum(
-        (t.total_fee for t in report.per_agent.values()), Decimal("0")
-    )
+    report.rows.sort(key=_sort_key, reverse=True)
+    report.grand_value = sum((r.value for r in report.rows), Decimal("0"))
+    report.grand_fee = sum((r.fee for r in report.rows), Decimal("0"))
     return report
 
 
 __all__ = [
-    "BuyFeeRow",
-    "AgentTotals",
+    "FeeRow",
+    "CustomerFeeTotals",
+    "AgentFeeTotals",
     "FeeReport",
     "get_fee_percent",
     "build_fee_report",
-    "STATUS_REALIZED",
-    "STATUS_PARTIAL",
-    "STATUS_OPEN",
+    "KIND_SELL",
+    "KIND_VIRTUAL",
 ]
