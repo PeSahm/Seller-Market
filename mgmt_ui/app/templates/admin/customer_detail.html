@@ -135,4 +135,30 @@
   </table>
   {% endif %}
 </section>
+
+<section class="card" style="margin-top: 16px;">
+  <h2 class="h2">Copy to another agent</h2>
+  <p class="text-small text-muted">
+    Duplicate this account and all its trade instructions under another
+    agent so the same person can be traded for two agents. The copy is
+    independent (later edits don't sync) and is created
+    <strong>pending / unassigned</strong> — assign it a server afterwards.
+  </p>
+  {% if copy_targets %}
+  <form method="post" action="/admin/customers/{{ customer.id }}/copy"
+        style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;"
+        onsubmit="return confirm('Copy this account + its trade instructions to the selected agent?');">
+    {% include "partials/csrf.html" %}
+    <select name="target_agent_id" class="input" required>
+      <option value="" disabled selected>Choose an agent…</option>
+      {% for a in copy_targets %}
+        <option value="{{ a.id }}" dir="auto">{{ a.username }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn btn--primary btn--sm" type="submit">Copy</button>
+  </form>
+  {% else %}
+  <p class="text-muted">No other agents to copy to.</p>
+  {% endif %}
+</section>
 {% endblock %}

@@ -1000,11 +1000,19 @@ async def admin_customer_detail(
     trade_instructions = await services_trade_instructions.list_trade_instructions(
         db, customer_id
     )
+    # Agents the account can be copied to (any agent other than the current
+    # owner). Soft-deleted agents are excluded — you can't copy onto them.
+    copy_targets = [
+        a
+        for a in await services_agents.list_agents(db)
+        if a.id != customer.agent_id
+    ]
     ctx = _ctx(request, user, current_tab="/admin/customers")
     ctx["customer"] = customer
     ctx["agent"] = agent
     ctx["server"] = server
     ctx["trade_instructions"] = trade_instructions
+    ctx["copy_targets"] = sorted(copy_targets, key=lambda a: (a.username or "").lower())
     return templates.TemplateResponse("admin/customer_detail.html", ctx)
 
 
@@ -1661,6 +1669,31 @@ async def admin_customer_move(
         logger.warning("move_customer: SSH push failed customer=%s: %s", customer_id, exc)
 
     return _flash_redirect(request, f"/admin/customers/{customer_id}")
+
+
+@router.post("/customers/{customer_id}/copy")
+async def admin_customer_copy(
+    customer_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    target_agent_id: UUID = Form(...),
+):
+    """Copy a customer (account + all trade instructions) to another agent.
+
+    The copy is independent and left pending/unassigned. On success we
+    redirect to the NEW customer's detail page so the operator can assign it.
+    """
+    try:
+        new_customer = await services_customers.copy_customer_to_agent(
+            db, customer_id, target_agent_id=target_agent_id, actor_id=user.id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return _flash_redirect(request, f"/admin/customers/{new_customer.id}")
 
 
 # ---------------------------------------------------------------------------

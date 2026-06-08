@@ -172,6 +172,125 @@ async def test_optimistic_lock_version_mismatch_raises(
 
 
 # ---------------------------------------------------------------------------
+# copy_customer_to_agent (#115)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_copy_customer_to_agent_duplicates_account_and_instructions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A copy creates a new pending Customer under the target agent with the
+    same creds + a fresh TradeInstruction per source row (section_name
+    regenerated for the new agent/customer)."""
+    from app.models.customers import Customer
+    from app.models.trade_instructions import TradeInstruction
+
+    source_id = uuid.uuid4()
+    source_agent = uuid.uuid4()
+    target_agent = uuid.uuid4()
+
+    source = SimpleNamespace(
+        id=source_id,
+        agent_id=source_agent,
+        broker="bbi",
+        username="acct1",
+        password_enc=b"cipher",
+        display_name="Acme",
+    )
+
+    async def _fake_get(_db, _cid):
+        return source
+
+    monkeypatch.setattr(customers_svc, "get_customer", _fake_get)
+
+    src_tis = [
+        SimpleNamespace(isin="IRO1AAA0001", side=1, comment="buy a"),
+        SimpleNamespace(isin="IRO1BBB0001", side=2, comment=None),
+    ]
+
+    added: list = []
+
+    def _add(obj):
+        added.append(obj)
+
+    async def _flush():
+        # Simulate Postgres server-default id assignment on insert/flush.
+        for obj in added:
+            if getattr(obj, "id", None) is None:
+                obj.id = uuid.uuid4()
+
+    ti_result = MagicMock()
+    ti_result.scalars.return_value.all.return_value = src_tis
+
+    db = MagicMock()
+    db.add = MagicMock(side_effect=_add)
+    db.flush = AsyncMock(side_effect=_flush)
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    db.refresh = AsyncMock()
+    db.execute = AsyncMock(return_value=ti_result)  # the source-TI select
+    db.get = AsyncMock(
+        return_value=SimpleNamespace(id=target_agent, deleted_at=None)
+    )  # the target User lookup
+
+    new_customer = await customers_svc.copy_customer_to_agent(
+        db, source_id, target_agent_id=target_agent, actor_id=uuid.uuid4()
+    )
+
+    assert isinstance(new_customer, Customer)
+    assert new_customer.agent_id == target_agent
+    assert new_customer.broker == "bbi"
+    assert new_customer.username == "acct1"
+    assert new_customer.password_enc == b"cipher"
+    assert new_customer.assignment_status == "pending"
+    assert new_customer.server_id is None and new_customer.stack_id is None
+
+    new_tis = [o for o in added if isinstance(o, TradeInstruction)]
+    assert len(new_tis) == 2
+    for nti in new_tis:
+        assert nti.customer_id == new_customer.id
+        # section_name embeds the TARGET agent's id, not the source's.
+        assert nti.section_name.startswith(f"a{target_agent.hex[:8]}_")
+        assert nti.section_name != ""
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_copy_customer_to_same_agent_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = uuid.uuid4()
+    source = SimpleNamespace(
+        id=uuid.uuid4(), agent_id=agent, broker="bbi",
+        username="u", password_enc=b"", display_name="x",
+    )
+
+    async def _fake_get(_db, _cid):
+        return source
+
+    monkeypatch.setattr(customers_svc, "get_customer", _fake_get)
+    with pytest.raises(ValueError):
+        await customers_svc.copy_customer_to_agent(
+            MagicMock(), source.id, target_agent_id=agent, actor_id=uuid.uuid4()
+        )
+
+
+@pytest.mark.asyncio
+async def test_copy_customer_missing_source_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _none(_db, _cid):
+        return None
+
+    monkeypatch.setattr(customers_svc, "get_customer", _none)
+    with pytest.raises(LookupError):
+        await customers_svc.copy_customer_to_agent(
+            MagicMock(), uuid.uuid4(), target_agent_id=uuid.uuid4(), actor_id=uuid.uuid4()
+        )
+
+
+# ---------------------------------------------------------------------------
 # Search by name / username (the operator-requested feature)
 # ---------------------------------------------------------------------------
 

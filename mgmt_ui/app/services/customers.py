@@ -293,6 +293,124 @@ async def create_customer(
 
 
 # ---------------------------------------------------------------------------
+# Copy to another agent (admin)
+# ---------------------------------------------------------------------------
+
+
+async def copy_customer_to_agent(
+    db: AsyncSession,
+    customer_id: UUID,
+    target_agent_id: UUID,
+    actor_id: UUID,
+) -> Customer:
+    """Copy an account + all its trade instructions to another agent.
+
+    Lets the same brokerage account serve two agents without re-keying it.
+    The copy is INDEPENDENT (its own rows; later edits don't sync) and is
+    left **pending / unassigned** for the operator to assign a server.
+
+    The composite UNIQUE ``(agent_id, broker, username)`` permits the copy
+    because the target agent differs from the source. Raises:
+      * ``LookupError`` — source customer missing.
+      * ``ValueError`` — target is the same agent, the target agent doesn't
+        exist (or is soft-deleted), or the target already has this account
+        (broker/username) — the duplicate UNIQUE fires.
+    """
+    # Lazy import to keep the shared section-name builder the single source of
+    # truth without risking an import-time cycle between the two services.
+    from app.models.users import User
+    from app.services.trade_instructions import _build_section_name
+
+    source = await get_customer(db, customer_id)
+    if source is None:
+        raise LookupError(f"customer {customer_id} not found")
+    if target_agent_id == source.agent_id:
+        raise ValueError("customer already belongs to that agent")
+
+    target = await db.get(User, target_agent_id)
+    if target is None or target.deleted_at is not None:
+        raise ValueError("target agent not found")
+
+    # Snapshot the source's trade instructions BEFORE adding the copy.
+    source_tis = list(
+        (
+            await db.execute(
+                select(TradeInstruction).where(
+                    TradeInstruction.customer_id == source.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    new_customer = Customer(
+        agent_id=target_agent_id,
+        server_id=None,
+        stack_id=None,
+        assignment_status="pending",
+        display_name=source.display_name,
+        username=source.username,
+        password_enc=source.password_enc,  # reuse ciphertext; never decrypted here
+        broker=source.broker,
+        version=1,
+    )
+    db.add(new_customer)
+
+    try:
+        # Flush to mint new_customer.id (server-default gen_random_uuid()).
+        await db.flush()
+
+        new_tis: list[TradeInstruction] = []
+        for ti in source_tis:
+            nti = TradeInstruction(
+                customer_id=new_customer.id,
+                isin=ti.isin,
+                side=ti.side,
+                section_name="",  # placeholder until the flush mints the id
+                comment=ti.comment,
+                version=1,
+            )
+            db.add(nti)
+            new_tis.append(nti)
+
+        if new_tis:
+            await db.flush()  # mint each new TradeInstruction.id
+            for nti in new_tis:
+                nti.section_name = _build_section_name(
+                    target_agent_id,
+                    new_customer.id,
+                    nti.id,
+                    new_customer.broker,
+                    nti.isin,
+                    nti.side,
+                )
+            await db.flush()
+
+        await _write_audit(
+            db,
+            actor_id=actor_id,
+            action="customer.copy",
+            target_id=new_customer.id,
+            before=None,
+            after={
+                **_public_snapshot(new_customer),
+                "source_customer_id": str(source.id),
+                "copied_trade_instructions": len(new_tis),
+            },
+        )
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise ValueError(
+            "target agent already has a customer for this broker / account"
+        ) from exc
+
+    await db.refresh(new_customer)
+    return new_customer
+
+
+# ---------------------------------------------------------------------------
 # Update
 # ---------------------------------------------------------------------------
 
@@ -381,6 +499,7 @@ async def decrypt_password(customer: Customer) -> str:
 
 __all__ = [
     "OptimisticLockError",
+    "copy_customer_to_agent",
     "create_customer",
     "decrypt_password",
     "get_customer",
