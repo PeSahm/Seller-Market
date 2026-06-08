@@ -3356,7 +3356,7 @@ async def admin_bot_report(
             window_end=p_we,
             exclude=exclude_set,
         )
-        cust_ids = {r.buy.customer_id for r in fee_report.buy_rows}
+        cust_ids = {r.customer_id for r in fee_report.rows}
     else:
         orders = await services_broker_orders.list_orders(
             db,
@@ -3598,7 +3598,7 @@ async def admin_bot_report_export(
         a.id: a.username
         for a in await services_agents.list_agents(db, include_deleted=True)
     }
-    cust_ids = {r.buy.customer_id for r in fee_report.buy_rows} | {
+    cust_ids = {r.customer_id for r in fee_report.rows} | {
         o.customer_id for o in orders
     }
     cust_map = await _bot_report_customer_map(db, cust_ids)
