@@ -3530,8 +3530,9 @@ async def admin_bot_report_fee_config(
     db: AsyncSession = Depends(get_db),
     agent_id: str = Form(...),
     fee_percent: str = Form(...),
+    loss_fee_toman: str = Form(""),
 ):
-    """Upsert a per-agent profit-share fee % override."""
+    """Upsert a per-agent profit-share fee % + 20-day fixed loss-fee (Toman)."""
     p_agent = _bot_report_parse_uuid(agent_id)
     if p_agent is None:
         raise HTTPException(status_code=400, detail="invalid agent_id")
@@ -3539,15 +3540,28 @@ async def admin_bot_report_fee_config(
         pct = Decimal(fee_percent)
     except (InvalidOperation, ValueError):
         raise HTTPException(status_code=400, detail="fee_percent must be numeric")
+    # Blank loss fee = clear the per-agent override (fall back to the global).
+    loss: Optional[Decimal] = None
+    if loss_fee_toman.strip():
+        try:
+            loss = Decimal(loss_fee_toman.replace(",", ""))
+        except (InvalidOperation, ValueError):
+            raise HTTPException(status_code=400, detail="loss_fee_toman must be numeric")
+        if loss < 0:
+            raise HTTPException(status_code=400, detail="loss_fee_toman must be ≥ 0")
 
     existing = await db.get(AgentFeeConfig, p_agent)
     prev_pct = existing.fee_percent if existing is not None else None
     if existing is None:
         db.add(
-            AgentFeeConfig(agent_id=p_agent, fee_percent=pct, updated_by=user.id)
+            AgentFeeConfig(
+                agent_id=p_agent, fee_percent=pct,
+                loss_fee_toman=loss, updated_by=user.id,
+            )
         )
     else:
         existing.fee_percent = pct
+        existing.loss_fee_toman = loss
         existing.updated_by = user.id
         existing.updated_at = datetime.now(timezone.utc)
     # Audit trail — mirror the setting.update / customer.* mutations so fee
@@ -3559,7 +3573,10 @@ async def admin_bot_report_fee_config(
             target_type="agent_fee_config",
             target_id=str(p_agent),
             before_json={"fee_percent": str(prev_pct) if prev_pct is not None else None},
-            after_json={"fee_percent": str(pct)},
+            after_json={
+                "fee_percent": str(pct),
+                "loss_fee_toman": str(loss) if loss is not None else None,
+            },
             ts=datetime.now(timezone.utc),
         )
     )

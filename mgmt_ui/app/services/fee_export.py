@@ -158,6 +158,30 @@ def build_fee_workbook(
     _apply_formats(wsc, date_cols=[], money_cols=[4, 5, 6, 7], pct_cols=[], nrows=len(report.per_customer))
     _autosize(wsc, [18, 16, 10, 18, 16, 16, 16, 12])
 
+    # ---- Sheet: Realized remainder (on sell / held > 20 days) -----------
+    if report.virtual_rows:
+        wsv = wb.create_sheet("Realized remainder")
+        _write_header(
+            wsv,
+            ["Customer", "Agent", "ISIN", "Symbol", "Open qty",
+             "Avg buy price", "Price", "Trigger", "Status", "Fee"],
+        )
+        for v in report.virtual_rows:
+            wsv.append([
+                customer_names.get(v.customer_id, "—") if v.customer_id else "—",
+                agent_names.get(v.agent_id, "—") if v.agent_id else "—",
+                v.isin,
+                v.symbol or "",
+                int(v.open_qty),
+                _num(v.avg_buy_price),
+                int(v.price),
+                "sold" if v.trigger == "sell" else "20d",
+                "loss" if v.in_loss else "profit",
+                _num(v.fee),
+            ])
+        _apply_formats(wsv, date_cols=[], money_cols=[6, 7, 10], pct_cols=[], nrows=len(report.virtual_rows))
+        _autosize(wsv, [18, 16, 16, 12, 12, 16, 14, 8, 8, 16])
+
     # ---- Sheet 3: Raw orders (audit) ------------------------------------
     ws3 = wb.create_sheet("Raw orders")
     _write_header(
