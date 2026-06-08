@@ -38,6 +38,7 @@ async def list_trades(
     side: Optional[int] = None,
     since: Optional[datetime] = None,
     until: Optional[datetime] = None,
+    executed_only: bool = False,
     limit: int = 200,
 ) -> list[TradeResult]:
     """Filter trades on common dimensions; newest-first.
@@ -46,6 +47,12 @@ async def list_trades(
     :class:`Customer` so only that agent's trades are visible. The
     ``broker`` filter also needs the :class:`Customer` join because
     broker lives on the customer record, not on the trade row itself.
+
+    ``executed_only`` (the UI default) keeps only rows that actually filled
+    (``executed_volume > 0``); placed-but-rejected orders (broker codes
+    1018/1005/1017/1011, ingested with ``executed_volume=0``) are hidden so
+    the list isn't padded with non-trades. Pass ``False`` ("show all") for the
+    full placement log / forensics (issue #107).
 
     We join :class:`Customer` at most once even if both ``agent_id`` and
     ``broker`` are set — SQLAlchemy's ``select.join`` against the same
@@ -78,6 +85,8 @@ async def list_trades(
         stmt = stmt.where(TradeResult.state == state)
     if side is not None:
         stmt = stmt.where(TradeResult.side == side)
+    if executed_only:
+        stmt = stmt.where(TradeResult.executed_volume > 0)
     if since is not None:
         stmt = stmt.where(TradeResult.ingested_at >= since)
     if until is not None:

@@ -2830,10 +2830,12 @@ async def admin_runs(
     }
     stacks_by_id = {s.id: s for s in await services_stacks.list_stacks(db)}
 
-    # Bulk-count trades per run so the table can show "failed but placed N
-    # trades" — when a bot exits non-zero AFTER having placed orders we
-    # don't want to mark the row as a plain failure, that's misleading.
-    # One query for the whole page.
+    # Bulk-count EXECUTED trades per run so the table shows "failed but placed
+    # N trades" only when orders actually filled. Count only executed_volume>0
+    # — placed-but-rejected orders (broker codes 1018/1005 rate-limit, 1017
+    # market-closed, 1011 insufficient-BP) are ingested with executed_volume=0
+    # and must NOT inflate the badge, else a no-trade/failed run looks like
+    # "partial · N trades" (issue #107). One query for the whole page.
     from sqlalchemy import func as _sa_func
     from app.models.trades import TradeResult
     trade_counts_by_run: dict[UUID, int] = {}
@@ -2842,6 +2844,7 @@ async def admin_runs(
         rows = await db.execute(
             select(TradeResult.run_id, _sa_func.count(TradeResult.id))
             .where(TradeResult.run_id.in_(run_ids))
+            .where(TradeResult.executed_volume > 0)
             .group_by(TradeResult.run_id)
         )
         trade_counts_by_run = {rid: cnt for rid, cnt in rows.all()}
@@ -3037,6 +3040,7 @@ async def admin_trades(
     side: Optional[str] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
+    show_all: Optional[str] = None,
 ):
     """Global trade history with filter chips.
 
@@ -3080,6 +3084,9 @@ async def admin_trades(
         except (ValueError, TypeError):
             return None
 
+    # Default to executed trades only; "Show all" surfaces the full placement
+    # log incl. broker-rejected (executed_volume=0) orders for forensics (#107).
+    executed_only = not bool(show_all)
     trades = await services_trades.list_trades(
         db,
         agent_id=_parse_uuid_or_none(agent_id),
@@ -3090,6 +3097,7 @@ async def admin_trades(
         side=_parse_int_or_none(side),
         since=_parse_date_or_none(since),
         until=_parse_date_or_none(until),
+        executed_only=executed_only,
         limit=500,
     )
 
@@ -3123,6 +3131,7 @@ async def admin_trades(
     ctx["filter_side"] = side
     ctx["filter_since"] = since
     ctx["filter_until"] = until
+    ctx["filter_show_all"] = bool(show_all)
     ctx["all_agents"] = sorted(agents.values(), key=lambda a: a.username)
     return templates.TemplateResponse("admin/trades.html", ctx)
 

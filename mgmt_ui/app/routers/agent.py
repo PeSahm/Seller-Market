@@ -1530,8 +1530,9 @@ async def agent_runs(
         if user.role == "admin" or s.agent_id == user.id
     }
 
-    # Bulk-count trades per run so a "failed" run that actually placed
-    # orders is rendered as "partial" rather than misleading red.
+    # Bulk-count EXECUTED trades per run (executed_volume>0) so a failed/
+    # no-trade run is not shown as "partial · N" from placed-but-rejected
+    # orders (executed_volume=0); see issue #107.
     from sqlalchemy import func as _sa_func
     from app.models.trades import TradeResult
     trade_counts_by_run: dict[UUID, int] = {}
@@ -1540,6 +1541,7 @@ async def agent_runs(
         rows = await db.execute(
             select(TradeResult.run_id, _sa_func.count(TradeResult.id))
             .where(TradeResult.run_id.in_(run_ids))
+            .where(TradeResult.executed_volume > 0)
             .group_by(TradeResult.run_id)
         )
         trade_counts_by_run = {rid: cnt for rid, cnt in rows.all()}
@@ -1676,6 +1678,7 @@ async def agent_trades(
     side: Optional[str] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
+    show_all: Optional[str] = None,
 ):
     """List the current agent's own trades (admin sees all).
 
@@ -1717,6 +1720,9 @@ async def agent_trades(
     # is the SAME shape as agent_runs and the customers list — keep it.
     own_agent_id = None if user.role == "admin" else user.id
 
+    # Default to executed trades only; "Show all" reveals placed-but-rejected
+    # (executed_volume=0) orders for forensics (#107).
+    executed_only = not bool(show_all)
     trades = await services_trades.list_trades(
         db,
         agent_id=own_agent_id,
@@ -1727,6 +1733,7 @@ async def agent_trades(
         side=_parse_int_or_none(side),
         since=_parse_date_or_none(since),
         until=_parse_date_or_none(until),
+        executed_only=executed_only,
         limit=500,
     )
 
@@ -1766,6 +1773,7 @@ async def agent_trades(
     ctx["filter_side"] = side or ""
     ctx["filter_since"] = since or ""
     ctx["filter_until"] = until or ""
+    ctx["filter_show_all"] = bool(show_all)
     return templates.TemplateResponse("agent/trades.html", ctx)
 
 

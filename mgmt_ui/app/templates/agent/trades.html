@@ -18,7 +18,9 @@
 <p class="text-muted text-small">
   Every broker order returned by a successful <code>run_trading</code> run
   on one of your stacks shows up here once the ingestor has picked it up.
-  Click any row to inspect the raw broker payload.
+  Click any row to inspect the raw broker payload. By default only
+  <strong>executed</strong> trades are listed; tick <em>Show all</em> to
+  include placed-but-rejected orders (executed volume 0).
 </p>
 
 <form method="get" action="/agent/trades" class="filter-bar"
@@ -61,6 +63,11 @@
       <option value="1"{% if filter_side == '1' %} selected{% endif %}>Buy (1)</option>
       <option value="2"{% if filter_side == '2' %} selected{% endif %}>Sell (2)</option>
     </select>
+  </label>
+  <label class="field" style="flex-direction:row;align-items:center;gap:6px;"
+         title="Include placed-but-rejected orders (executed volume 0)">
+    <input type="checkbox" name="show_all" value="1"{% if filter_show_all %} checked{% endif %}>
+    <span class="field-label text-small text-muted">Show all</span>
   </label>
   <button type="submit" class="btn btn--ghost btn--sm">Apply</button>
   <a href="/agent/trades" class="btn btn--ghost btn--sm">Reset</a>
