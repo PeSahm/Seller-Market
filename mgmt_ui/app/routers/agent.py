@@ -54,6 +54,7 @@ from app.services import brokers_admin
 from app.services import customers as services_customers
 from app.services import health_signals as services_health
 from app.services import locust_configs as services_locust
+from app.services import market_data_client
 from app.services import run_executor
 from app.services import runs as services_runs
 from app.services import scheduler_jobs as services_scheduler
@@ -956,6 +957,24 @@ async def agent_trade_instructions_delete_all(
         status_code=status.HTTP_303_SEE_OTHER,
         headers={"Location": redirect_to},
     )
+
+
+@router.get("/instruments/search")
+async def agent_instruments_search(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    q: str = "",
+    limit: int = 20,
+):
+    """Typeahead source (name/symbol → ISIN) for the agent trade-instruction
+    form, via the market-data sidecar. Market-data is public/market-wide, so no
+    per-agent scoping is needed; we only gate on being a logged-in agent/admin."""
+    _require_agent_or_admin(user)
+    rows = await market_data_client.search_instruments(
+        db, q, limit=min(max(limit, 1), 50)
+    )
+    return {"instruments": rows}
 
 
 # ---------------------------------------------------------------------------
