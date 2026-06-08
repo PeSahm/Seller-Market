@@ -60,55 +60,6 @@ class MatchedLot:
     realized_profit: Decimal  # (sell_price - buy_price) * matched_volume
 
 
-@dataclass(frozen=True)
-class OpenLot:
-    """A buy lot slice still unsold after FIFO-consuming every sell.
-
-    Used by the sell-side fee redesign (#111): a bot buy lot still open after
-    >20 days is virtually sold at today's price. ``buy_ts`` is the buy's
-    execution/placement time so the report can age it.
-    """
-
-    buy_tracking: int
-    qty: int
-    buy_price: Decimal
-    buy_ts: datetime
-
-
-def compute_open_lots(
-    buys: list[OrderLeg], sells: list[OrderLeg]
-) -> list[OpenLot]:
-    """FIFO-consume ``sells`` against ``buys`` and return the UNSOLD remainder.
-
-    Mirrors :func:`match_lots`' FIFO consumption but returns one
-    :class:`OpenLot` per buy lot that still has volume left (qty > 0), carrying
-    the buy's timestamp so the caller can age it. Buys are fed in **as a
-    whole** (bot AND manual) so the global FIFO matches the operator's "every
-    buy with the first sell, for all" rule; the caller then keeps only the
-    bot-attributed open lots for the 20-day mark-to-market.
-    """
-    open_lots: deque[list] = deque(
-        [b.executed_volume, b.price, b.tracking_number, b.ts]
-        for b in sorted(buys, key=lambda o: (o.ts, o.tracking_number))
-        if b.executed_volume > 0
-    )
-    for sell in sorted(sells, key=lambda o: (o.ts, o.tracking_number)):
-        remaining = sell.executed_volume
-        while remaining > 0 and open_lots:
-            lot = open_lots[0]
-            take = min(lot[0], remaining)
-            remaining -= take
-            if take == lot[0]:
-                open_lots.popleft()
-            else:
-                lot[0] = lot[0] - take
-    return [
-        OpenLot(buy_tracking=l[2], qty=l[0], buy_price=l[1], buy_ts=l[3])
-        for l in open_lots
-        if l[0] > 0
-    ]
-
-
 @dataclass
 class MatchSummary:
     """Aggregate result of matching one (customer, isin)'s buys and sells."""
@@ -188,11 +139,4 @@ def match_lots(
     return summary
 
 
-__all__ = [
-    "OrderLeg",
-    "MatchedLot",
-    "MatchSummary",
-    "match_lots",
-    "OpenLot",
-    "compute_open_lots",
-]
+__all__ = ["OrderLeg", "MatchedLot", "MatchSummary", "match_lots"]
