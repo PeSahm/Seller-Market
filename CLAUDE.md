@@ -8,6 +8,9 @@ A running record of the findings, gotchas, and runbooks discovered while making 
 |---|---|---|
 | `5.10.248.55` (PouyanIt-linux) | Mgmt UI (FastAPI + Postgres) **and** Mostafa+hamid bot stacks | `/opt/seller-market-mgmt/` for mgmt; `/root/seller-market/agents/<stack-id>/` per stack |
 | `185.232.152.246` (Tebyan-Saeed) | Mostafa+hamid bot stacks | `/root/seller-market/agents/<stack-id>/` per stack |
+| `45.139.10.192` (ParsPack, Debian 13) | Bot stacks (added Session 10) — 1 hamid stack (`ca0a9617-…`) live + healthy on the staged image | `/root/seller-market/agents/<stack-id>/` per stack |
+
+**The fleet is 3 VPSes** (PouyanIt + Tebyan + ParsPack as of Session 10).
 
 The mgmt UI image is built by the GitHub Actions workflow `.github/workflows/docker-publish-mgmt-ui.yml` on every merge to `main` and pushed to `ghcr.io/pesahm/seller-market-mgmt-ui:latest`.
 
@@ -675,3 +678,32 @@ Session-8's "captured decisions" said fee = X% of each **bot SELL's value** + a 
 
 ### Remaining (Session 9) — only auto-sell is left
 - **#110 auto-sell** (operator wants a dedicated planning session): bot long-running monitor polling sidecar `/queue` → SELL when buy-queue share count < per-instrument threshold; thread `auto_sell_threshold` through `config_ini.py`; emit a SELL fire-log; deploy the sidecar on the TRADING hosts. The queue source (`bbq`/`bsq` on the getstockprice2 row) is already live-verified.
+
+---
+
+## Session 10 — provisioned a 3rd trading VPS (ParsPack `45.139.10.192`); operator added it + 1 stack
+
+Operator bought a new VPS and asked to prep it for the fleet (Docker + image + mirrors + Tehran time) so it could be added from the dashboard. **The fleet is now 3 VPSes** (PouyanIt + Tebyan + ParsPack). Done + verified: operator then added the server in the mgmt UI and a **hamid stack** (`ca0a9617-…`) deployed live + healthy on the pre-staged image.
+
+### New host facts
+- `45.139.10.192` — **ParsPack**, hostname `srv8637097178`, **Debian 13 (trixie)**, 2 cores / ~2 GB. Egress: **ghcr.io BLOCKED** (000), **download.docker.com BLOCKED** (000), **github.com 200 but the releases CDN times out**, `ghcr-mirror.liara.ir` **up** (401). apt works via the provider mirror **`repo.abrha.net/debian`** (already configured, Iranian). DNS/`ntp.time.ir` resolve fine.
+
+### Provisioning runbook (reusable for the next VPS — no `download.docker.com`, no github releases)
+1. **Key-based SSH** — password-login non-interactively with **paramiko** (the Bash tool can't answer an SSH password prompt; `sshpass` isn't installed, `plink`/`paramiko` are). Append this machine's `~/.ssh/id_rsa.pub` to `/root/.ssh/authorized_keys`, then verify `ssh -o BatchMode=yes` works.
+2. **Tehran time** — `timedatectl set-timezone Asia/Tehran` + `/etc/systemd/timesyncd.conf.d/10-iran.conf` (`NTP=ntp.time.ir`, fallbacks cloudflare/google) + restart `systemd-timesyncd` → `System clock synchronized: yes`.
+3. **Docker engine** — Debian's **`docker.io`** (Docker 26.1.5) via apt (avoids the blocked `download.docker.com`). `systemctl enable --now docker`.
+4. **Compose v2 plugin** — **NOT a Debian package** (`docker-compose-v2`/`docker-compose-plugin` are "Unable to locate"), and the github-releases CDN is blocked. **Solution: copy the working binary from an existing host** — `ssh PouyanIt 'cat /usr/libexec/docker/cli-plugins/docker-compose' | ssh newhost 'cat > /usr/libexec/docker/cli-plugins/docker-compose && chmod 755 …'` (31,284,792 bytes; the fleet's build reports `Docker Compose version v5.0.0`). Verify `docker compose version`.
+5. **Mirror + DNS** — `/etc/docker/daemon.json` = replicate PouyanIt: `{"registry-mirrors":["https://ghcr-mirror.liara.ir"],"dns":["78.157.42.101","217.218.155.155"]}`; `systemctl restart docker`. (registry-mirrors only covers docker.io; ghcr is reached by mirror-path pull + retag below.)
+6. **Pre-stage the bot image** — `docker pull ghcr-mirror.liara.ir/pesahm/seller-market:latest` → `docker tag … ghcr.io/pesahm/seller-market:latest` (so the mgmt UI's `--pull never` redeploys hit the local image). Verify the `org.opencontainers.image.revision` label.
+7. **Base dir** — `mkdir -p /root/seller-market/agents`.
+8. **For the dashboard to manage it**: the **mgmt UI's public key** must be in the new host's `/root/.ssh/authorized_keys`, then add a server row (host / ssh_port / ssh_user=`root` / base_dir / **`image_pull_policy=never`**). The operator did this step themselves this session (the auto-mode classifier blocks reading the mgmt container's SSH key, so leave that to the operator or get explicit authorization).
+
+### Liara also mirrors Debian apt (operator pointer)
+`https://liara.ir/mirrors/debian/` → `deb http://linux-mirror.liara.ir/repository/debian{,-security} …`. Not needed here (the Abrha provider mirror already works), but it's the fallback if a provider's apt mirror is down.
+
+### Learnings (Session 10)
+- **Iranian VPS egress varies by provider** — ParsPack blocks ghcr **and** download.docker.com **and** the github releases CDN (github.com itself answers 200, misleadingly). Always probe `curl -s -o /dev/null -w %{http_code}` per endpoint before choosing an install path.
+- **The compose v2 plugin is the pain point on a fresh Iranian Debian host** — not in apt, CDN blocked. Copying the binary host-to-host (PouyanIt → new) is the reliable fix and keeps the fleet on one build.
+- **Password SSH from the Bash tool needs paramiko/plink** (no TTY for a prompt; `sshpass` absent). Use it once to install the key, then key-based for everything else.
+- **The provider's own apt mirror** (`repo.abrha.net`) was already set + working — don't switch a working apt source unnecessarily.
+- The pre-staged image + `image_pull_policy=never` is what lets the mgmt UI deploy a stack on a ghcr-blocked host with no network pull; verified end-to-end (hamid stack came up healthy on rev `cbc2970`).
