@@ -28,6 +28,9 @@
       broker order — partially-filled orders show their remaining
       volume in the detail page. Manual and scheduler-fired runs are
       interleaved here; use the filters below to narrow the list.
+      By default only <strong>executed</strong> trades are shown; tick
+      <em>Show all</em> to include placed-but-rejected orders
+      (executed volume 0).
     </p>
   </div>
 </div>
@@ -104,8 +107,13 @@
     <option value="1" {% if filter_side == '1' %}selected{% endif %}>Buy</option>
     <option value="2" {% if filter_side == '2' %}selected{% endif %}>Sell</option>
   </select>
+  <label class="text-small" style="display:inline-flex;align-items:center;gap:4px;"
+         title="Include placed-but-rejected orders (executed volume 0)">
+    <input type="checkbox" name="show_all" value="1" {% if filter_show_all %}checked{% endif %}>
+    Show all
+  </label>
   <button class="btn btn--ghost btn--sm" type="submit">Apply</button>
-  {% if _any_filter %}
+  {% if _any_filter or filter_show_all %}
     <a class="btn btn--ghost btn--sm" href="/admin/trades">Clear all</a>
   {% endif %}
 </form>
