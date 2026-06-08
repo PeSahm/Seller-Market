@@ -628,3 +628,50 @@ The fee/auto-sell cluster, with the operator decisions already locked (don't re-
 - **#114**: `/agent/fees` page reusing the report scoped to `agent_id=user.id` (read-only).
 - **#110 auto-sell + sidecar part 2**: bot long-running monitor polling sidecar `/queue` → SELL when `buy_volume < per-instrument threshold` (thread `auto_sell_threshold` shares through `config_ini.py`); emit a SELL fire-log line; deploy the sidecar on the TRADING hosts too (mgmt-managed per-host deploy is still future infra — for now it could ride each stack's compose or a manual per-host container).
 - Plan file with full detail: `~/.claude/plans/read-all-md-and-modular-turing.md`.
+
+---
+
+## Session 9 — fee cluster shipped; fee MODEL iterated 3× to the final shape; all deployed
+
+Continued the Session-8 roadmap. Shipped the remaining fee work + a critical revert + the operator's evolving fee spec; **everything deployed live**. PR map: **#125** dropdown DOMContentLoaded fix · **#126** sell-side fee (later REVERTED) · **#127** per-customer fee + payments ledger (#116, migration 0010) · **#128** agent fee panel (#114) · **#129** revert to buy-side fee · **#130** whole-position-on-sell + 20-day mark-to-market + per-agent loss fee (migration 0011).
+
+### Deploy state (END OF SESSION — current live)
+- **mgmt-UI**: `5.10.248.55:/opt/seller-market-mgmt` on **`86fc847`**, alembic **`0011_agent_loss_fee`**, `/health=200`. Migrations **0010** (`customers.fee_percent` + `customer_fee_payments`) + **0011** (`agent_fee_configs.loss_fee_toman`) applied on startup.
+- **market-data sidecar**: running as the `market-data` compose service on the mgmt host (image `812d81e`), healthy; the api reaches it at `http://market-data:8077` (verified api→`/search` returns سرود). Data endpoints are PUBLIC RLC — no account configured.
+- **Bots/trading hosts UNCHANGED** (no bot redeploy this session; auto-sell #110 is future).
+
+### THE FEE MODEL — final, after 3 misreads (this is what's deployed; do NOT re-derive)
+Buy-side, position-realization:
+- **Realized fee = X% of the POSITIVE realized profit on bot buys** (`is_bot` fire-log tag OR market-open window), FIFO-matched against **ALL** sells (manual sells realize profit too — this is the data the operator relies on).
+- **Whole position realized on the FIRST sell**: when a customer sells ANY of a position, the SOLD shares bill via FIFO at their real price **and the unsold remainder is realized at the weighted-avg sell price** (so a 1-share sell of a 100-share buy realizes all 100 at the sell price → 500, not 5). `VirtualFeeRow.trigger == "sell"`.
+- **20-day mark-to-market**: a position with NO sell, held >20 calendar days, realizes its aged-unsold remainder at **today's market price** (sidecar `/last-price`). `trigger == "20d"`.
+- **Profit → X% of the gain; LOSS → a FIXED fee** per losing position (customer × stock). Fixed loss fee = **per-agent override (Toman)** → global `mark_to_market_loss_fee_toman` setting → 0; **×10 → Rial** (the report math is Rial).
+- **Per-customer fee % override** (nullable `customers.fee_percent`) resolves **customer → agent → global → default**.
+- **Received-payments ledger** (`customer_fee_payments`, admin-only) → per customer **owed − paid = remaining**. EVERY customer with orders shows (even at 0) so each is reachable for config/payment. **Agents** see their own on a read-only `/agent/fees` tab.
+- Grand fee is **additive**: `grand_fee == Σ(per-buy FIFO fee) + Σ(VirtualFeeRow fee)`. Verified live: FIFO 493.8M + remainder 63.6M = 557.4M Rial.
+
+### Why the sell-side redesign (#126) was REVERTED — the key data lesson
+Session-8's "captured decisions" said fee = X% of each **bot SELL's value** + a 20-day rule. Built + deployed (#126). On the LIVE data it was nearly empty ("only Mostafa"): **only 10 of 872 executed sells are `is_bot`** (the fire-log barely tags anything; the bot historically only BOUGHT and sells were MANUAL), and only 1 bot buy was >20 days old. So "fee only on the bot's own sell executions" produced almost nothing. **The operator actually meant: fee on sells OF bot-bought positions (regardless of who clicked sell).** Reverted to buy-side (#129), then layered whole-position-on-sell (#130). **Lesson: verify any billing model against the LIVE data before trusting it — a plausible `is_bot`-on-sell filter zeroed the report.**
+
+### Fee files
+- `services/profit_report.py` — buy-side `build_fee_report` + per-customer rollup + show-all + the remainder-realization pass (sell/20d) → `VirtualFeeRow`; `get_fee_percent` (customer tier) + `get_loss_fee_rial` (agent→global, Toman×10).
+- `services/profit_matching.py` — `match_lots` only (the sell-side `compute_open_lots` was added in #126, removed in #129).
+- `services/fee_payments.py` (ledger); `models/fees.py` (`CustomerFeePayment`, `AgentFeeConfig.loss_fee_toman`); `models/customers.py` (`fee_percent`).
+- migrations `0010_customer_fees`, `0011_agent_loss_fee`.
+- `services/fee_export.py` (sheets: Buys & fees / Per-customer / Per-agent / Realized remainder / Raw orders); `templates/admin/bot_report.html` (fees tab: per-customer owed/paid/remaining + "Realized remainder" table + fee-config form with a Toman loss-fee input); `templates/admin/customer_detail.html` (fee % + payments cards); `templates/agent/fees.html`; `routers/admin.py` (fee-config / fee-payment / customer-fee routes) + `routers/agent.py` (`agent_fees`).
+
+### Other deployed this session
+- **#125 dropdown fix**: the instrument typeahead `<script>` sits ABOVE the `#isin` field, so it ran before `#isin` was parsed → the guard bailed → the box behaved like plain text. Fixed: init on **`DOMContentLoaded`**. Backend was fine (httpx → sidecar 200; the api container has **no proxy env**).
+- **market-data sidecar added to the mgmt prod compose** and brought up; the dropdown now works live.
+
+### Learnings (Session 9)
+- **Verify a fee/billing model against LIVE data before trusting it** (see the #126 revert). Use the `grand = FIFO + virtual` breakdown to prove additivity after each change.
+- **The fee report recomputes LIVE** — its grand total tracks current order data (reconcilers/ingests shift it between runs), so don't treat an absolute-total change across time as a regression; use the breakdown.
+- **Iranian unit is Toman; report math is Rial (×10).** The fixed loss fee is entered in Toman, stored as-entered, converted ×10.
+- **Auto-mode classifier**: blocked an ad-hoc `docker run --rm` test container on the shared VPS, but ALLOWED read-only `curl` probes (confirming RLC shapes) and the documented `docker compose up -d` deploy (incl. migration-bearing — the entrypoint runs `alembic upgrade head`).
+- **Capture a module fn before an autouse fixture stubs it** — `_REAL_GET_FEE_PERCENT = pr.get_fee_percent` at import so the resolver's own unit tests don't hit the stub.
+- **Jinja inline `<script>` ordering**: an init that reads a later element must run on `DOMContentLoaded`, not inline.
+- **github.com still intermittently refused** — wrap `gh`/`git push`/merge in retries; after a graphql blip a foreground re-check often merges cleanly.
+
+### Remaining (Session 9) — only auto-sell is left
+- **#110 auto-sell** (operator wants a dedicated planning session): bot long-running monitor polling sidecar `/queue` → SELL when buy-queue share count < per-instrument threshold; thread `auto_sell_threshold` through `config_ini.py`; emit a SELL fire-log; deploy the sidecar on the TRADING hosts. The queue source (`bbq`/`bsq` on the getstockprice2 row) is already live-verified.
