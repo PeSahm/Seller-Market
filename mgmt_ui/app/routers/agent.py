@@ -338,10 +338,25 @@ async def agent_customers(
     trade_counts = await services_customers.get_customer_trade_counts(
         db, [c.id for c in customers]
     )
+    # True total of THIS agent's trade instructions (unfiltered) — powers the
+    # "delete all" danger-zone button, which is itself scoped to user.id. We
+    # scope to user.id even for admins so the count matches what the button
+    # would actually delete (the admin's own accounts, normally none).
+    from sqlalchemy import func as _sa_func
+    from app.models.trade_instructions import TradeInstruction
+    total_trade_instructions = (
+        await db.execute(
+            select(_sa_func.count())
+            .select_from(TradeInstruction)
+            .join(Customer, Customer.id == TradeInstruction.customer_id)
+            .where(Customer.agent_id == user.id)
+        )
+    ).scalar() or 0
     servers_by_id = {s.id: s for s in await services_servers.list_servers(db)}
     ctx = _ctx(request, user, current_tab="/agent/customers")
     ctx["customers"] = customers
     ctx["trade_counts"] = trade_counts
+    ctx["total_trade_instructions"] = total_trade_instructions
     ctx["servers_by_id"] = servers_by_id
     ctx["filter_status"] = status_filter
     ctx["filter_q"] = q or ""
@@ -891,6 +906,50 @@ async def agent_trade_instruction_delete(
     )
     await _push_customer_stack_config(db, customer_id, actor_id=user.id)
     redirect_to = f"/agent/customers/{customer_id}"
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": redirect_to})
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER,
+        headers={"Location": redirect_to},
+    )
+
+
+@router.post("/trade-instructions/delete-all")
+async def agent_trade_instructions_delete_all(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hard-delete EVERY trade instruction across ALL of the current agent's
+    customers, then re-push each affected stack's ``config.ini`` so the trading
+    hosts drop the sections.
+
+    Tenant-scoped to ``user.id`` — an agent can only clear their own customers'
+    instructions (an admin acting here clears only the accounts they own, which
+    is normally none). The accounts themselves are untouched.
+    """
+    _require_agent_or_admin(user)
+    deleted, affected_stacks = await services_trade_instructions.delete_all_for_agent(
+        db, user.id, actor_id=user.id
+    )
+    # Re-push config.ini for each affected stack (best-effort; the DB delete is
+    # already committed, so an SSH failure just means the host converges on the
+    # next push/redeploy).
+    for stack_id in affected_stacks:
+        try:
+            await services_stacks.push_config_ini_for_stack(
+                db, stack_id=stack_id, actor_id=user.id
+            )
+            await db.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "delete-all: config.ini push failed stack=%s", stack_id
+            )
+    logger.info(
+        "agent %s bulk-deleted %d trade instruction(s) across %d stack(s)",
+        user.id, deleted, len(affected_stacks),
+    )
+    redirect_to = "/agent/customers"
     if request.headers.get("HX-Request"):
         return Response(status_code=204, headers={"HX-Redirect": redirect_to})
     return Response(

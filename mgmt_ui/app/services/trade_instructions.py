@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -322,9 +322,61 @@ async def hard_delete_trade_instruction(
     await db.commit()
 
 
+async def delete_all_for_agent(
+    db: AsyncSession,
+    agent_id: UUID,
+    actor_id: UUID,
+) -> tuple[int, list[UUID]]:
+    """Hard-delete EVERY trade instruction across all of ``agent_id``'s customers.
+
+    Returns ``(deleted_count, affected_stack_ids)`` — the caller re-pushes
+    ``config.ini`` to each affected stack so the trading hosts drop the
+    sections. One SUMMARY audit row is written (per-row snapshots would flood
+    the log for a bulk clear); it records the count + a compact isin/side list.
+
+    No-op (returns ``(0, [])``) when the agent has no instructions.
+    """
+    rows = (
+        await db.execute(
+            select(
+                TradeInstruction.id,
+                TradeInstruction.isin,
+                TradeInstruction.side,
+                Customer.stack_id,
+            )
+            .join(Customer, Customer.id == TradeInstruction.customer_id)
+            .where(Customer.agent_id == agent_id)
+        )
+    ).all()
+    if not rows:
+        return 0, []
+
+    ti_ids = [r[0] for r in rows]
+    affected_stacks = sorted(
+        {r[3] for r in rows if r[3] is not None}, key=str
+    )
+    deleted_brief = [{"isin": r[1], "side": r[2]} for r in rows]
+
+    # Summary audit. target_type "agent" (the scope), not the individual rows.
+    db.add(
+        AuditLog(
+            actor_user_id=actor_id,
+            action="trade_instruction.delete_all",
+            target_type="agent",
+            target_id=str(agent_id),
+            before_json={"count": len(ti_ids), "deleted": deleted_brief},
+            after_json=None,
+        )
+    )
+    await db.execute(delete(TradeInstruction).where(TradeInstruction.id.in_(ti_ids)))
+    await db.commit()
+    return len(ti_ids), list(affected_stacks)
+
+
 __all__ = [
     "OptimisticLockError",
     "create_trade_instruction",
+    "delete_all_for_agent",
     "get_trade_instruction",
     "hard_delete_trade_instruction",
     "list_trade_instructions",
