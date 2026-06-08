@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import difflib
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from types import SimpleNamespace
 from typing import Optional
 from uuid import UUID
@@ -53,8 +53,10 @@ from app.services import agents as services_agents
 from app.services import brokers_admin
 from app.services import customers as services_customers
 from app.services import health_signals as services_health
+from app.services import broker_orders as services_broker_orders
 from app.services import locust_configs as services_locust
 from app.services import market_data_client
+from app.services import profit_report as services_profit_report
 from app.services import run_executor
 from app.services import runs as services_runs
 from app.services import scheduler_jobs as services_scheduler
@@ -975,6 +977,64 @@ async def agent_instruments_search(
         db, q, limit=min(max(limit, 1), 50)
     )
     return {"instruments": rows}
+
+
+@router.get("/fees")
+async def agent_fees(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Read-only fee panel: what the agent owes the operator, per customer
+    (owed − paid = remaining). Scoped to the agent's own customers; admins see
+    the whole fleet. Recording payments stays admin-only (#116)."""
+    _require_agent_or_admin(user)
+    own_agent_id = None if user.role == "admin" else user.id
+
+    def _parse_date(s):
+        try:
+            return date.fromisoformat((s or "").strip())
+        except (ValueError, TypeError):
+            return None
+
+    def _parse_time(s):
+        try:
+            return time.fromisoformat((s or "").strip())
+        except (ValueError, TypeError):
+            return None
+
+    # Same settings-backed defaults the admin bot-report uses, so the agent sees
+    # the same numbers for their customers.
+    since = _parse_date(await settings_store.get_setting(db, "robot_start_date"))
+    ws = _parse_time(await settings_store.get_setting(db, "bot_window_start"))
+    we = _parse_time(await settings_store.get_setting(db, "bot_window_end"))
+    exclude = services_broker_orders.parse_exclusions(
+        (await settings_store.get_setting(db, "excluded_instruments")) or ""
+    )
+
+    report = await services_profit_report.build_fee_report(
+        db,
+        agent_id=own_agent_id,
+        since=since,
+        window_start=ws,
+        window_end=we,
+        exclude=exclude,
+    )
+
+    cust_ids = [cid for cid in report.per_customer if cid is not None]
+    customers_by_id: dict[UUID, Customer] = {}
+    if cust_ids:
+        res = await db.execute(select(Customer).where(Customer.id.in_(cust_ids)))
+        customers_by_id = {c.id: c for c in res.scalars().all()}
+
+    ctx = _ctx(request, user, current_tab="/agent/fees")
+    ctx["fee_report"] = report
+    ctx["customers_by_id"] = customers_by_id
+    ctx["grand_paid"] = sum((t.paid for t in report.per_customer.values()), 0)
+    ctx["grand_remaining"] = sum(
+        (t.remaining for t in report.per_customer.values()), 0
+    )
+    return templates.TemplateResponse("agent/fees.html", ctx)
 
 
 # ---------------------------------------------------------------------------

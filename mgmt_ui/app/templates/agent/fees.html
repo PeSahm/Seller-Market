@@ -1,0 +1,50 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Fees{% endblock %}
+
+{% block page_body %}
+{% set fr = fee_report %}
+<h1 class="h1">Fees you owe</h1>
+<p class="text-muted text-small">
+  The operator's profit-share fee on your customers: a % of each bot sell's
+  value, plus a 20-day mark-to-market on bot buys held over 20 days.
+  <strong>Owed − paid = remaining.</strong> Payments are recorded by the operator.
+</p>
+
+{% if not fr or not fr.per_customer %}
+<div class="card">
+  <p class="text-muted">No fees yet.</p>
+  <p class="text-small text-muted">
+    Fees appear once the bot sells for one of your customers, or a bot buy is
+    held past 20 days.
+  </p>
+</div>
+{% else %}
+<table class="table">
+  <thead>
+    <tr><th>Customer</th><th># sells</th><th># virtual</th><th>Owed</th><th>Paid</th><th>Remaining</th></tr>
+  </thead>
+  <tbody>
+    {% for cid, t in fr.per_customer.items() %}
+    {% set cust = customers_by_id.get(cid) %}
+    <tr>
+      <td dir="auto" class="text-small">{{ cust.display_name if cust else '—' }}</td>
+      <td class="text-small">{{ t.num_sells }}</td>
+      <td class="text-small">{{ t.num_virtual }}</td>
+      <td class="text-small">{{ '{:,.0f}'.format(t.total_fee) }}</td>
+      <td class="text-small text-muted">{{ '{:,.0f}'.format(t.paid) }}</td>
+      <td class="text-small"><strong>{{ '{:,.0f}'.format(t.remaining) }}</strong></td>
+    </tr>
+    {% endfor %}
+    <tr>
+      <td><strong>TOTAL</strong></td><td></td><td></td>
+      <td class="text-small"><strong>{{ '{:,.0f}'.format(fr.grand_fee) }}</strong></td>
+      <td class="text-small text-muted">{{ '{:,.0f}'.format(grand_paid) }}</td>
+      <td class="text-small"><strong>{{ '{:,.0f}'.format(grand_remaining) }}</strong></td>
+    </tr>
+  </tbody>
+</table>
+<p class="text-small text-muted">
+  “Virtual” rows are bot buys held over 20 days, valued at today's market price.
+</p>
+{% endif %}
+{% endblock %}
