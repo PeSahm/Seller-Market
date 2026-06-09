@@ -707,3 +707,70 @@ Operator bought a new VPS and asked to prep it for the fleet (Docker + image + m
 - **Password SSH from the Bash tool needs paramiko/plink** (no TTY for a prompt; `sshpass` absent). Use it once to install the key, then key-based for everything else.
 - **The provider's own apt mirror** (`repo.abrha.net`) was already set + working — don't switch a working apt source unnecessarily.
 - The pre-staged image + `image_pull_policy=never` is what lets the mgmt UI deploy a stack on a ghcr-blocked host with no network pull; verified end-to-end (hamid stack came up healthy on rev `cbc2970`).
+
+---
+
+## Session 11 — Force-kill stacks (#133) + Auto-sell on a thinning buy-queue (#110, #135) + add-a-VPS quick runbook
+
+Two features this session, plus a consolidated "add a new VPS" runbook the operator asked for.
+
+### Force-kill stacks (PR #133, merged + deployed `7655aad`)
+Stop a stack's bot container on demand from the dashboard (admin + agent).
+- **Force kill** (per-stack): `services/stacks.force_stop_stack` runs `docker compose stop -t 0` (immediate SIGKILL), **project-scoped** (only that stack's `sm-agent-<agent_uuid>` compose project — a sibling agent's bot on the same host is untouched), flips the row to `down`, audits `stack.force_kill`. Reversible via Redeploy. Button on the admin + agent stack-detail pages (HTMX inline result, like Redeploy).
+- **Force kill — all** (`force_stop_stacks`) + **Run all** (`run_executor.run_all_stacks`) on the stacks-LIST page. The admin list gained an **agent filter** (`?agent_id=`) so the bulk actions hit exactly one agent's stacks. Best-effort per stack; lenient `agent_id` parse so the "All agents" empty value doesn't 422.
+- **Gotcha — `restart: unless-stopped` won't keep it dead if a host re-ups it.** Force-killing hamid's 3 stacks: all hit `Exited (137)`, but PouyanIt + ParsPack came back `Up` within ~30s while Tebyan stayed down. NO mgmt worker restarts stacks (`stack_health` only OBSERVES → DB status). So a **host-level keepalive** (a cron/timer doing `docker compose up -d` on the root-managed hosts) is the suspect — `docker compose stop` defeats the restart POLICY but not an external `compose up`. Operator accepted it ("its ok"). If a force-kill must STAY down, find + disable that host keepalive (PouyanIt + ParsPack re-upped; Tebyan didn't).
+- The `status='down'` write the force-kill does goes through the app (authorized); an ad-hoc `docker exec … psql UPDATE` was classifier-blocked.
+
+### Auto-sell on a thinning buy-queue (PR #134 `522cf20` + wiring PR #135 `6920ee7`) — the big one
+When an instrument's **best-buy-queue share count** drops to/below a **per-instruction threshold**, the bot sells the customer's whole holding **at the floor (lowest day price)**, **chunked to the per-order max volume**. Operator's exact rule: band [5,20], 1001 shares, max-vol 100 → **10×(vol 100, price 5) + 1×(vol 1, price 5)**. Both families. Orders placed by **new direct code, NOT locust**.
+
+**WS protocol cracked from the Exir SPA bundle (the gold — `SellerMarket/scratch/RLC_WS_FINDINGS.md`).** It is **NOT Lightstreamer** (the earlier CLAUDE.md assumption was wrong): a **plain JSON WebSocket** at `wss://<tenant>.exirbroker.com/sle/v2/ws?encoding=text&authToken=<token>&device=web`, subscribe with the text frame `"1,MW.<ISIN>"` (MW = Market Watch; instrument key = `insMaxLcode` = ISIN), inbound frames JSON `{"msgType":...}`. Auth = the **Exir `authToken` already obtained at login** — no separate scheme. The MW-frame field carrying the buy-queue count is the ONLY thing the bundle didn't hand over (it only streams during market hours), so `rlc_ws` **self-calibrates** it: matches each numeric field against the REST `bbq` (`rlc_market.get_queue`) and binds only when unambiguous.
+
+**Architecture (operator-chosen):**
+- **ONE shared WS service on PouyanIt** (`5.10.248.55`), co-located with mgmt + OCR (every bot already calls PouyanIt for OCR at `:18080`, so this rides the same cross-host pattern; one Khobregan connection avoids the multi-IP login lock). NOT per-host.
+- **Monitor INSIDE the bot container** (not a second container): `bot_entrypoint.py` = scheduler in a daemon thread (unchanged) + the auto-sell monitor foreground (the `simple_config_bot.main()` pattern).
+
+**Bot modules (flat top-level, `COPY *.py ./`):**
+- `auto_sell_engine.py` — `chunk_volumes(holdings, max)` (1001/100 → `[100]*10+[1]`) + `sell_entire_position(...)` (fire the ladder ALL AT THE FLOOR, spaced ≥350ms past the broker's 300ms guard, re-read live holdings → flat; I/O injected → hermetic).
+- `direct_sell.py` — `send_prepared_order(prepared)`: one `requests.post` mirroring `locustfile_new.place_order` (ephoenix Bearer; exir cookies + fresh X-App-N), `trust_env=False`.
+- `broker_adapters.SellContext` + `open_sell_context` (ephoenix + exir): floor (ephoenix `min_price` / exir RLC `lap`) + cap (ephoenix `max_volume` / exir RLC `mxqo`) + live `fetch_holdings` + `prepare_chunk(volume)`. `prepare_order` (BUY path) byte-for-byte unchanged.
+- `rlc_ws.py` — upstream Khobregan WS client (self-calibrating field; `trust_env=False`; TLS verify ON; reconnect/backoff; one socket per ISIN so frames need no routing field).
+- `market_data_ws.py` — the bot's local feed client: `QueueFeed` consumes `ws://MARKET_DATA_URL/ws/queue?isin=` → `on_update(isin, buy_volume)`; disconnect → `None` (HOLD); keepalives ignored.
+- `auto_sell_monitor.py` — `load_auto_sell_targets` (config.ini sections with `auto_sell_threshold>0` **AND `side==1`**), `DayState` (idempotent per-day `(account,isin)` latch in `run_results/`, thread-safe, **rotates at midnight**), `on_buy_volume` gating (market-hours `AUTO_SELL_WINDOW` default 09:00–12:30 Tehran, done-today, **fail-safe HOLD on `None`**), `_trigger` (open_sell_context → sell_entire_position → direct_sell → side=2 fire).
+- `order_fire_log.py` — standalone side=2 fire writer, **byte-identical schema** to `locustfile_new._emit_order_fire` (so the mgmt `fire_log_ingestor` reads both; reconciliation already supports side=2). No edit to the live locust file.
+- `bot_entrypoint.py` — scheduler (daemon) + monitor (fg); scheduler-only when nothing armed / no `MARKET_DATA_URL`.
+- Sidecar `market_data_app.py` gained a `/ws/queue` **flask-sock** fan-out (one upstream Khobregan WS → many local subscribers) + `_QueueHub`. REST endpoints unchanged. requirements: `websocket-client` + `flask-sock`.
+
+**mgmt UI:**
+- Migration **0012** `trade_instructions.auto_sell_threshold` (nullable int). `0`→None normalized at storage (create + update); **BUY-only** enforced both paths.
+- Buy-only **form field** ("Auto-sell when buy-queue ≤ (shares)", JS toggle on the side radio) on admin + agent trade-instruction forms; lenient int parse.
+- `config_ini.py` renders `auto_sell_threshold` per section when set.
+- **Active auto-sell page** `/admin/auto-sell` + `/agent/auto-sell` (nav tabs): armed positions + **live buy-queue** (`market_data_client.get_queue`, 3s HTMX refresh) + fired-today (`order_fires` side=2 today). `services/auto_sell_view.build_auto_sell_rows`; `services/trade_instructions.list_armed_auto_sell`.
+- **Opt-in wiring (#135):** setting **`bot_market_data_url`** (default ""). EMPTY = auto-sell OFF fleet-wide → bot stacks keep the byte-identical scheduler-only command. SET (e.g. `http://5.10.248.55:8077`) → `compose_yaml` renders `command: ["python","-u","bot_entrypoint.py"]` + `MARKET_DATA_URL` env → the next redeploy of a stack activates its monitor.
+
+**Tests:** ~250 across both suites (bot 167, mgmt 472). Live-trading paths hermetic (injected I/O); BUY path byte-for-byte unchanged. CodeRabbit reviewed 3 passes — fixed all substantive (TLS verify, `trust_env=False`, calibration ambiguity, 401-crash, DayState lock + midnight rotation, BUY-only gating, holdings-error handling, heartbeat→HOLD, orphan-queue, 0-threshold consistency); declined the doc-lint nits + the `ephoenix` "spelling" (it's the real provider name).
+
+### Auto-sell DEPLOY runbook (Phase 5 — **infra-deploy approved; the live canary is still pending market hours + operator go-ahead**)
+Operator chose "deploy infra now, hold the live steps." Status: #134 + #135 merged; all 3 images built on the merge. Remaining:
+1. **Deploy the WS-enhanced market-data sidecar on PouyanIt** (`/opt/seller-market-mgmt` compose, the `market-data` service): the new `ghcr.io/pesahm/seller-market-md:latest` (has `/ws/queue` + flask-sock), **host-publish its port** (so Tebyan/ParsPack bots reach it cross-host, like OCR `:18080`), and add the **Khobregan creds** env (`MARKET_DATA_BROKER=khobregan`, `MARKET_DATA_USERNAME=…`, `MARKET_DATA_PASSWORD=…`) — **a prod secret the operator sets** (classifier blocks me reading/writing it). Verify `/health` + `ws://5.10.248.55:<port>/ws/queue?isin=IRO1SROD0001` pushes `buy_volume`.
+2. **Deploy the new mgmt-UI image** (`compose up -d api`) — migration 0012 runs on startup; verify `/admin/auto-sell` renders.
+3. **Read-only WS probe** `SellerMarket/scratch/rlc_ws_spike.py` **during market hours** on PouyanIt → confirm the self-calibration locks onto the right MW field + whether one Khobregan account allows concurrent WS sessions. No orders.
+4. **Canary**: set the `bot_market_data_url` setting → redeploy **Mostafa's stack** (flips to `bot_entrypoint.py`) → arm a سرود (`IRO1SROD0001`) **Buy** with an `auto_sell_threshold` the live queue will cross → watch a **real chunked floor-SELL** → confirm on the Active-auto-sell page + `/admin/bot-report`. **Fires a live order — market hours + explicit go-ahead required.**
+5. **Roll the fleet** (`bot_market_data_url` is fleet-wide; each stack activates on its next redeploy).
+
+### Learnings (Session 11)
+- **The Exir live stream is a raw JSON WebSocket, not Lightstreamer** — `/sle/v2/ws`, subscribe `"1,MW.<ISIN>"`, auth = the login `authToken`. Cracked from the SPA `main-es2015.*.js` bundle (the "Subscription" hits there are RxJS red herrings; the real lead was `new WebSocket` + `baseWsSleUrl:"/sle"`).
+- **Self-calibrate an unknown stream field against a known REST value** — `rlc_ws` finds the buy-queue field by matching the REST `bbq`, so it works WITHOUT a market-hours probe (the probe just confirms at deploy).
+- **`**/rlc*.py` + any direct broker fetch must set `requests.Session(trust_env=False)`** — reach the Iranian host DIRECTLY, never via a foreign proxy in `/etc/environment` (CodeRabbit flagged the missing one as critical; same foreign-exit failure as Sessions 5/6).
+- **The bot's JobScheduler runs jobs as one-shot `subprocess.run(timeout=600)`** — a continuous monitor can't be a scheduler job (600s cap), so it's a long-running foreground process alongside the scheduler thread (`bot_entrypoint.py`).
+- **A side=2 fire-log writer can be standalone** (matching the schema) so the monitor never imports `locustfile_new` (which truncates `trading_bot.log` + builds locust classes at import).
+- **`#134` merged WITHOUT the compose-renderer change** (the plan flagged it as a follow-up) — so the bot stacks would have stayed scheduler-only. Caught post-merge; #135 wired it opt-in. **When a bot PR's behavior depends on a mgmt renderer change, ship the renderer change in the SAME PR or it silently no-ops.**
+- **CodeRabbit "full review" is invokable** (`@coderabbitai full review`) and re-reviews each new commit; reply per-finding (fixed / declined-with-reason) so it resolves. It downgrades to COMMENTED, but on a small PR it can also pass/approve (it did on #135).
+
+### Add a new VPS — quick runbook (the operator wants this ready)
+Full detail in **Session 10**. Short version for a fresh Iranian Debian host:
+1. **Probe egress first**: `for u in ghcr.io download.docker.com github.com ghcr-mirror.liara.ir; do curl -s -o /dev/null -w "$u %{http_code}\n" --max-time 8 https://$u/; done` — egress varies by provider.
+2. **Key SSH** (paramiko one-shot to install `~/.ssh/id_rsa.pub`), **Tehran time** (`ntp.time.ir`), **`docker.io`** via apt, **compose v2 plugin copied from PouyanIt** (`ssh PouyanIt 'cat /usr/libexec/docker/cli-plugins/docker-compose' | ssh new 'cat > … && chmod 755'`), **`daemon.json`** (registry-mirrors=`ghcr-mirror.liara.ir` + Iranian DNS), **pre-stage the bot image** (mirror-pull + retag to `ghcr.io/pesahm/seller-market:latest`), **base dir** `/root/seller-market/agents`.
+3. **Add to the dashboard**: the **mgmt UI's public key** into the host's `/root/.ssh/authorized_keys` (operator/secret), then a server row (ssh_user=`root`, **`image_pull_policy=never`**).
+4. **For auto-sell on the new host**: nothing host-specific — the bots reach the shared WS service on PouyanIt via the fleet-wide `bot_market_data_url=http://5.10.248.55:<port>` setting. **Confirm the new host's egress can reach `5.10.248.55:<port>`** (same path it already uses for OCR `:18080`).
+- **The fleet is 3 VPSes** today (PouyanIt + Tebyan + ParsPack); update the topology table when a 4th is added.
