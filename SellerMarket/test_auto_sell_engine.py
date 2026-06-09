@@ -100,7 +100,7 @@ def test_sell_noop_when_nothing_held():
 
 def test_sell_not_flat_when_holdings_remain():
     # Broker filled nothing (holdings unchanged) -> not flat; monitor will re-fire.
-    fetch, place, calls, _fires, emit = _fakes([1001, 1001])
+    fetch, place, _calls, _fires, emit = _fakes([1001, 1001])
     res = sell_entire_position(
         isin="IRO1X", floor_price=5, max_order_volume=100,
         fetch_holdings=fetch, place_order=place, emit_fire=emit, sleep=lambda _s: None,

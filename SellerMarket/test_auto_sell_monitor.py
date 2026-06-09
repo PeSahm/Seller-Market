@@ -5,11 +5,9 @@ injected. Run: ``python -m pytest test_auto_sell_monitor.py -q``.
 """
 from __future__ import annotations
 
-import os
 import tempfile
 from datetime import datetime, timezone, timedelta
 
-import auto_sell_monitor as m
 import market_data_ws as mdws
 import order_fire_log
 from auto_sell_monitor import AutoSellMonitor, AutoSellTarget, DayState, load_auto_sell_targets

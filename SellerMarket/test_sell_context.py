@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 
 import ephoenix_adapter
-import exir_adapter
 import rlc_price
 from ephoenix_adapter import EphoenixAdapter
 from exir_adapter import ExirAdapter
