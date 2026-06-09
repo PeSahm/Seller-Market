@@ -50,6 +50,7 @@ from app.schemas.locust import LocustUpsert
 from app.schemas.scheduler import SchedulerJobUpsert
 from app.security.deps import get_current_user
 from app.services import agents as services_agents
+from app.services import auto_sell_view as services_auto_sell_view
 from app.services import brokers_admin
 from app.services import customers as services_customers
 from app.services import health_signals as services_health
@@ -87,6 +88,16 @@ router = APIRouter(prefix="/agent", tags=["agent-ui"], include_in_schema=False)
 def _require_agent_or_admin(user: User) -> None:
     if user.role not in ("agent", "admin"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+
+
+def _parse_optional_int(value: Optional[str]) -> Optional[int]:
+    """Lenient int parse for an optional number form field (empty/invalid → None)."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _stacks_bulk_location(base: str, **params) -> str:
@@ -296,6 +307,40 @@ async def agent_stacks(
     ctx["stacks"] = stacks
     ctx["servers_by_id"] = servers_by_id
     return templates.TemplateResponse("agent/stacks.html", ctx)
+
+
+@router.get("/auto-sell")
+async def agent_auto_sell(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Active auto-sell for the agent's own armed positions (admin sees all).
+
+    Live buy-queue refreshes every 3s via the rows partial (HTMX poll).
+    """
+    _require_agent_or_admin(user)
+    own_agent_id = None if user.role == "admin" else user.id
+    rows = await services_auto_sell_view.build_auto_sell_rows(db, agent_id=own_agent_id)
+    ctx = _ctx(request, user, current_tab="/agent/auto-sell")
+    ctx["rows"] = rows
+    ctx["rows_url"] = "/agent/auto-sell/rows"
+    return templates.TemplateResponse("agent/auto_sell.html", ctx)
+
+
+@router.get("/auto-sell/rows")
+async def agent_auto_sell_rows(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """HTMX-polled table body for the agent Active auto-sell page."""
+    _require_agent_or_admin(user)
+    own_agent_id = None if user.role == "admin" else user.id
+    rows = await services_auto_sell_view.build_auto_sell_rows(db, agent_id=own_agent_id)
+    ctx = _ctx(request, user, current_tab="/agent/auto-sell")
+    ctx["rows"] = rows
+    return templates.TemplateResponse("partials/auto_sell_rows.html", ctx)
 
 
 @router.get("/history")
@@ -693,6 +738,7 @@ async def agent_trade_instruction_create(
     isin: str = Form(...),
     side: int = Form(...),
     comment: Optional[str] = Form(None),
+    auto_sell_threshold: Optional[str] = Form(None),
 ):
     """Create a new TradeInstruction under a customer the agent owns."""
     _require_agent_or_admin(user)
@@ -710,13 +756,19 @@ async def agent_trade_instruction_create(
         username=customer.username,
     )
 
-    sticky = {"isin": isin, "side": str(side), "comment": comment or ""}
+    sticky = {
+        "isin": isin,
+        "side": str(side),
+        "comment": comment or "",
+        "auto_sell_threshold": auto_sell_threshold or "",
+    }
 
     try:
         payload = TradeInstructionCreate(
             isin=isin,
             side=side,  # type: ignore[arg-type]
             comment=comment if comment else None,
+            auto_sell_threshold=_parse_optional_int(auto_sell_threshold),
         )
     except (ValidationError, ValueError) as exc:
         ctx = _ctx(request, user, current_tab="/agent/customers")
@@ -790,6 +842,7 @@ async def agent_trade_instruction_edit_form(
         "isin": ti.isin,
         "side": str(ti.side),
         "comment": ti.comment or "",
+        "auto_sell_threshold": ti.auto_sell_threshold if ti.auto_sell_threshold is not None else "",
         "version": ti.version,
     }
     ctx["mode"] = "edit"
@@ -806,6 +859,7 @@ async def agent_trade_instruction_update(
     isin: Optional[str] = Form(None),
     side: Optional[int] = Form(None),
     comment: Optional[str] = Form(None),
+    auto_sell_threshold: Optional[str] = Form(None),
     version: int = Form(...),
 ):
     _require_agent_or_admin(user)
@@ -823,6 +877,10 @@ async def agent_trade_instruction_update(
         fields["side"] = side
     if comment is not None:
         fields["comment"] = comment if comment != "" else None
+    # Always include it (form submits empty when unset / on a Sell) so the
+    # operator can clear an existing threshold. ``0`` → None (disabled).
+    if auto_sell_threshold is not None:
+        fields["auto_sell_threshold"] = _parse_optional_int(auto_sell_threshold) or None
 
     # PR #73 pattern: snapshot both the TI and the parent Customer to
     # primitives before the service call. After ``db.rollback()`` on a
@@ -834,6 +892,7 @@ async def agent_trade_instruction_update(
         isin=ti.isin,
         side=ti.side,
         comment=ti.comment,
+        auto_sell_threshold=ti.auto_sell_threshold,
         version=ti.version,
     )
     _customer_snap = SimpleNamespace(
@@ -847,6 +906,10 @@ async def agent_trade_instruction_update(
         "isin": isin if isin is not None and isin != "" else ti.isin,
         "side": str(side if side is not None else ti.side),
         "comment": comment if comment is not None else (ti.comment or ""),
+        "auto_sell_threshold": (
+            auto_sell_threshold if auto_sell_threshold is not None
+            else (ti.auto_sell_threshold if ti.auto_sell_threshold is not None else "")
+        ),
         "version": ti.version,
     }
 

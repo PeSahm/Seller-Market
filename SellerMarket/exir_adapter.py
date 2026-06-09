@@ -40,7 +40,7 @@ from typing import Any, Callable, Optional
 import requests
 
 import rlc_price
-from broker_adapters import BrokerAdapter, PreparedOrder
+from broker_adapters import BrokerAdapter, PreparedOrder, SellContext
 from captcha_utils import decode_captcha as _default_decode_captcha
 from exir_token import build_app_n, make_signer, pw_fingerprint
 
@@ -382,3 +382,71 @@ class ExirAdapter(BrokerAdapter):
                 f"Exir prepare_order failed for {self.username}@{self.broker_code} "
                 f"isin={isin} side={side}: {e}"
             ) from e
+
+    def open_sell_context(self, *, isin: str, config_section: dict) -> SellContext:
+        """Auto-sell context (#110): floor = RLC band ``lap``, cap = ``mxqo``.
+
+        Reproduces the SELL branch of :meth:`prepare_order` for an EXPLICIT
+        per-chunk volume. Authenticates once (cached ``_SESSION_CACHE``);
+        ``fetch_holdings`` re-reads LIVE via ``portfoReport`` each call;
+        ``prepare_chunk(volume)`` builds the byte-identical ``/api/v1/order``
+        body (SIDE_SALE, price=floor) with a FRESH ``X-App-N`` signer.
+        """
+        config_section = config_section or {}
+        override = config_section.get("price")
+        if override:
+            floor = int(float(override))
+        else:
+            _ceiling, floor = rlc_price.get_price_band(isin)
+            floor = int(floor)
+        if floor <= 0:
+            raise ValueError(f"no rlc price band (floor) for {isin}")
+        cap = int(rlc_price.get_max_order_qty(isin) or 0)
+        # Auth once + fail-fast if broker_id is unresolved (never POST a null code).
+        descriptor = self._session()
+        if descriptor.get("broker_id") is None:
+            raise ValueError(
+                f"Exir broker_id unresolved for {self.username}@{self.broker_code}"
+            )
+        # Match prepare_order's float-string price format exactly.
+        price_str = str(float(floor))
+
+        def fetch_holdings() -> int:
+            d = self._session()  # refreshes on expiry
+            return int(self._holdings(isin, d) or 0)
+
+        def prepare_chunk(volume: int) -> PreparedOrder:
+            d = self._session()
+            if d.get("broker_id") is None:
+                raise ValueError(
+                    f"Exir broker_id unresolved for {self.username}@{self.broker_code}"
+                )
+            body = json.dumps({
+                "bankAccountId": -1,
+                "brokerCode": d["broker_id"],
+                "disclosedQuantity": 0,
+                "hasUnderCautionAgreement": True,
+                "insMaxLcode": isin,
+                "orderType": "ORDER_TYPE_LIMIT",
+                "price": price_str,
+                "quantity": str(int(volume)),
+                "side": "SIDE_SALE",
+                "validityType": "VALIDITY_TYPE_DAY",
+                "coreType": "c",
+            })
+            return PreparedOrder(
+                order_url=self.base + "/api/v1/order",
+                body=body,
+                bearer_token=None,
+                signer=make_signer(d["nt"], "/api/v1/order"),
+                cookies=d["cookies"],
+                price=floor,
+                volume=int(volume),
+            )
+
+        return SellContext(
+            floor_price=floor,
+            max_order_volume=cap,
+            fetch_holdings=fetch_holdings,
+            prepare_chunk=prepare_chunk,
+        )

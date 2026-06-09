@@ -474,6 +474,9 @@ async def _load_stack_customers(
                     broker=c.broker,
                     isin=ti.isin,
                     side=ti.side,
+                    # getattr keeps older test fakes (built before this column)
+                    # working; real ORM rows always carry the attribute.
+                    auto_sell_threshold=getattr(ti, "auto_sell_threshold", None),
                 )
             )
     return tuple(rendered)

@@ -28,6 +28,10 @@ import os
 
 from flask import Flask, jsonify, request
 
+import json
+import queue
+import threading
+
 import rlc_market
 
 logging.basicConfig(
@@ -40,11 +44,91 @@ app = Flask(__name__)
 
 # Reference account (optional) — present so an authenticated RLC/Exir call can be
 # added later without redeploying the wiring. The data endpoints don't need it.
+# The auto-sell WS fan-out (/ws/queue, #110) DOES need it: the broker/username/
+# password authenticate the single upstream Khobregan WebSocket.
 _ACCOUNT = {
     "broker": os.environ.get("MARKET_DATA_BROKER") or "",
     "username": os.environ.get("MARKET_DATA_USERNAME") or "",
     "password": os.environ.get("MARKET_DATA_PASSWORD") or "",
 }
+
+
+class _QueueHub:
+    """Fan-out from ONE upstream Khobregan WS to many local /ws/queue subscribers.
+
+    Local subscribers for an ISIN share a single upstream subscription (one
+    ``rlc_ws.RlcQueueClient``). ``publish`` pushes each ``buy_volume`` to every
+    local subscriber's bounded queue (dropping on a slow consumer, never blocking
+    the upstream reader).
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._subs: dict[str, set] = {}
+        self._latest: dict[str, object] = {}
+        self._client = None
+
+    def _ensure_client(self):
+        with self._lock:
+            if self._client is not None:
+                return self._client
+            if not (_ACCOUNT["broker"] and _ACCOUNT["username"] and _ACCOUNT["password"]):
+                raise RuntimeError("market-data account not configured (MARKET_DATA_*)")
+            import rlc_ws
+            from captcha_utils import decode_captcha
+            self._client = rlc_ws.RlcQueueClient(
+                tenant=_ACCOUNT["broker"],
+                username=_ACCOUNT["username"],
+                password=_ACCOUNT["password"],
+                decode_captcha=decode_captcha,
+                on_update=self.publish,
+            )
+            return self._client
+
+    def subscribe_local(self, isin: str) -> "queue.Queue":
+        # Resolve the upstream client FIRST: if the account isn't configured this
+        # raises before we register the queue, so a failed subscribe can't leave
+        # an orphan in ``_subs``.
+        client = self._ensure_client()
+        q: "queue.Queue" = queue.Queue(maxsize=8)
+        with self._lock:
+            self._subs.setdefault(isin, set()).add(q)
+            latest = self._latest.get(isin)
+        client.subscribe(isin)  # idempotent upstream subscribe
+        if latest is not None:
+            try:
+                q.put_nowait(latest)
+            except queue.Full:
+                pass
+        return q
+
+    def unsubscribe_local(self, isin: str, q: "queue.Queue") -> None:
+        with self._lock:
+            subs = self._subs.get(isin)
+            if subs:
+                subs.discard(q)
+
+    def publish(self, isin: str, buy_volume) -> None:
+        with self._lock:
+            self._latest[isin] = buy_volume
+            subs = list(self._subs.get(isin, ()))
+        for q in subs:
+            try:
+                q.put_nowait(buy_volume)
+            except queue.Full:
+                pass  # slow local consumer — drop this tick
+
+
+_HUB = _QueueHub()
+
+# Local push transport (flask-sock). Optional so the REST endpoints still import
+# + run if the dep is missing; /ws/queue just won't be registered.
+try:
+    from flask_sock import Sock
+    _sock = Sock(app)
+except Exception:  # noqa: BLE001
+    _sock = None
+    logger.warning("flask-sock not available — /ws/queue (auto-sell push) disabled")
 
 
 def _isin_arg() -> str:
@@ -109,6 +193,37 @@ def search():
         limit = 20
     rows = rlc_market.search_instruments(q, limit=limit)
     return jsonify(count=len(rows), instruments=rows)
+
+
+if _sock is not None:
+    @_sock.route("/ws/queue")
+    def ws_queue(ws):
+        """Stream live ``{isin, buy_volume}`` for ``?isin=`` to one local bot (#110).
+
+        Subscribes the ISIN upstream (shared) and forwards each best-buy-queue
+        update. A 30s keepalive ``{"ping": true}`` is sent during quiet periods so
+        the bot's client distinguishes "idle" from "disconnected".
+        """
+        isin = (request.args.get("isin") or "").strip().upper()
+        if not isin:
+            return
+        try:
+            q = _HUB.subscribe_local(isin)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("/ws/queue subscribe failed for %s: %s", isin, exc)
+            return
+        try:
+            while True:
+                try:
+                    bv = q.get(timeout=30)
+                except queue.Empty:
+                    ws.send(json.dumps({"isin": isin, "ping": True}))
+                    continue
+                ws.send(json.dumps({"isin": isin, "buy_volume": bv}))
+        except Exception:  # noqa: BLE001 — client gone / send failed
+            pass
+        finally:
+            _HUB.unsubscribe_local(isin, q)
 
 
 def main() -> None:

@@ -105,6 +105,7 @@ def _public_snapshot(ti: TradeInstruction) -> dict:
         "customer_id": str(ti.customer_id),
         "isin": ti.isin,
         "side": ti.side,
+        "auto_sell_threshold": ti.auto_sell_threshold,
         "section_name": ti.section_name,
         "comment": ti.comment,
         "version": ti.version,
@@ -164,6 +165,29 @@ async def get_trade_instruction(
     return result.scalar_one_or_none()
 
 
+async def list_armed_auto_sell(
+    db: AsyncSession,
+    agent_id: Optional[UUID] = None,
+) -> list[tuple[TradeInstruction, Customer]]:
+    """Return ``(TradeInstruction, Customer)`` pairs armed for auto-sell (#110).
+
+    "Armed" = ``auto_sell_threshold`` is set and ``> 0``. Scoped to ``agent_id``
+    when given (the agent's Active-auto-sell page), else all (admin). Joined to
+    Customer so the page can show the owner + broker + account without a second
+    round-trip.
+    """
+    stmt = (
+        select(TradeInstruction, Customer)
+        .join(Customer, Customer.id == TradeInstruction.customer_id)
+        .where(TradeInstruction.auto_sell_threshold.isnot(None))
+        .where(TradeInstruction.auto_sell_threshold > 0)
+        .order_by(Customer.agent_id, TradeInstruction.isin)
+    )
+    if agent_id is not None:
+        stmt = stmt.where(Customer.agent_id == agent_id)
+    return list((await db.execute(stmt)).all())
+
+
 # ---------------------------------------------------------------------------
 # Create
 # ---------------------------------------------------------------------------
@@ -191,6 +215,9 @@ async def create_trade_instruction(
         customer_id=customer_id,
         isin=data.isin,
         side=data.side,
+        # Auto-sell only makes sense for a BUY. Normalize 0 → None so "disabled"
+        # has ONE representation in the DB (the bot also treats <= 0 as disabled).
+        auto_sell_threshold=(data.auto_sell_threshold if (data.side == 1 and data.auto_sell_threshold) else None),
         # Placeholder until the flush gives us the id.
         section_name="",
         comment=data.comment,
@@ -252,6 +279,11 @@ async def update_trade_instruction(
     changes = data.model_dump(exclude={"version"}, exclude_unset=True)
     for field, value in changes.items():
         setattr(ti, field, value)
+
+    # Auto-sell is BUY-only and "disabled" is a single representation: clear the
+    # threshold on a SELL row (incl. a side 1->2 flip), and normalize 0 -> None.
+    if ti.side != 1 or not ti.auto_sell_threshold:
+        ti.auto_sell_threshold = None
 
     # Section name embeds isin+side — regenerate when either changed.
     if "isin" in data.model_fields_set or "side" in data.model_fields_set:
