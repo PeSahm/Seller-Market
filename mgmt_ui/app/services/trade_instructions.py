@@ -280,6 +280,11 @@ async def update_trade_instruction(
     for field, value in changes.items():
         setattr(ti, field, value)
 
+    # Auto-sell is BUY-only and "disabled" is a single representation: clear the
+    # threshold on a SELL row (incl. a side 1->2 flip), and normalize 0 -> None.
+    if ti.side != 1 or not ti.auto_sell_threshold:
+        ti.auto_sell_threshold = None
+
     # Section name embeds isin+side — regenerate when either changed.
     if "isin" in data.model_fields_set or "side" in data.model_fields_set:
         customer_stmt = select(Customer).where(Customer.id == ti.customer_id)

@@ -66,6 +66,7 @@ def test_exir_sends_cookies_and_fresh_signature():
     status, body = send_prepared_order(p, session=sess)
     assert status == 200
     url, kwargs = sess.calls[0]
+    assert url == p.order_url                               # correct endpoint
     assert kwargs["data"] == p.body
     assert kwargs["headers"]["X-App-N"] == "12345.678"     # fresh signature applied
     assert "authorization" not in kwargs["headers"]

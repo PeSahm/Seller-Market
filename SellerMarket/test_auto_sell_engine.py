@@ -77,7 +77,7 @@ def test_sell_fires_full_ladder_at_floor_and_goes_flat():
 
 
 def test_sell_aborts_on_bad_floor():
-    fetch, place, calls, fires, emit = _fakes([1001, 0])
+    fetch, place, calls, _fires, emit = _fakes([1001, 0])
     res = sell_entire_position(
         isin="IRO1X", floor_price=0, max_order_volume=100,
         fetch_holdings=fetch, place_order=place, emit_fire=emit, sleep=lambda _s: None,
@@ -88,7 +88,7 @@ def test_sell_aborts_on_bad_floor():
 
 
 def test_sell_noop_when_nothing_held():
-    fetch, place, calls, fires, emit = _fakes([0])
+    fetch, place, calls, _fires, emit = _fakes([0])
     res = sell_entire_position(
         isin="IRO1X", floor_price=5, max_order_volume=100,
         fetch_holdings=fetch, place_order=place, emit_fire=emit, sleep=lambda _s: None,
@@ -100,7 +100,7 @@ def test_sell_noop_when_nothing_held():
 
 def test_sell_not_flat_when_holdings_remain():
     # Broker filled nothing (holdings unchanged) -> not flat; monitor will re-fire.
-    fetch, place, calls, fires, emit = _fakes([1001, 1001])
+    fetch, place, calls, _fires, emit = _fakes([1001, 1001])
     res = sell_entire_position(
         isin="IRO1X", floor_price=5, max_order_volume=100,
         fetch_holdings=fetch, place_order=place, emit_fire=emit, sleep=lambda _s: None,

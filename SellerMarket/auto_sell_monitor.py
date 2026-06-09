@@ -68,7 +68,13 @@ def load_auto_sell_targets(config_path: str = "/app/config.ini") -> list[AutoSel
             threshold = int(s.get("auto_sell_threshold", "0") or 0)
         except (TypeError, ValueError):
             threshold = 0
-        if threshold <= 0:
+        try:
+            side = int(s.get("side", "0") or 0)
+        except (TypeError, ValueError):
+            side = 0
+        # Arm BUY sections only — a stray threshold on a SELL section (manual edit
+        # / migration drift) must not auto-fire.
+        if threshold <= 0 or side != 1:
             continue
         targets.append(AutoSellTarget(
             account=s.get("username", ""),
@@ -172,10 +178,25 @@ class AutoSellMonitor:
         self._now = now_fn
         self._start, self._end = parse_window(window or os.environ.get("AUTO_SELL_WINDOW", ""))
         self._sleep = sleep
-        self._day_state = day_state or DayState(self._now().strftime("%Y%m%d"))
+        # Rotate the per-day latch when the calendar day changes (the monitor
+        # process stays up across midnight). An injected day_state (tests) is
+        # used as-is and never rotated.
+        self._external_day_state = day_state is not None
+        self._day_key = self._now().strftime("%Y%m%d")
+        self._day_state = day_state or DayState(self._day_key)
         self._by_isin: dict[str, list[AutoSellTarget]] = {}
         for t in targets:
             self._by_isin.setdefault(t.isin, []).append(t)
+
+    def _ds(self) -> DayState:
+        """The current-day latch, rotating it when the calendar day flips."""
+        if self._external_day_state:
+            return self._day_state
+        key = self._now().strftime("%Y%m%d")
+        if key != self._day_key:
+            self._day_key = key
+            self._day_state = DayState(key)
+        return self._day_state
 
     def market_open(self) -> bool:
         t = self._now().time()
@@ -186,7 +207,7 @@ class AutoSellMonitor:
         for tgt in self._by_isin.get(isin, []):
             if not self.market_open():
                 continue
-            if self._day_state.is_done(tgt.account, tgt.isin):
+            if self._ds().is_done(tgt.account, tgt.isin):
                 continue
             if buy_volume is None:
                 # Fail-safe: a missing / stale feed must NEVER trigger a sell.
@@ -217,7 +238,7 @@ class AutoSellMonitor:
             sleep=self._sleep,
         )
         if res.flat:
-            self._day_state.mark_done(tgt.account, tgt.isin)
+            self._ds().mark_done(tgt.account, tgt.isin)
             logger.info("auto-sell %s %s: position FLAT — done for the day", tgt.isin, tgt.account)
 
     def _emit_fire(self, tgt: AutoSellTarget, body: object) -> None:

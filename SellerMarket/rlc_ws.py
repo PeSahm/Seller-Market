@@ -55,6 +55,10 @@ def login(tenant: str, username: str, password: str,
     """
     base = f"https://{tenant}.exirbroker.com"
     s = requests.Session()
+    # Reach the Iranian broker DIRECTLY — never via a foreign HTTP proxy that may
+    # be set in the host's /etc/environment (the rlc*.py convention; a foreign
+    # exit can't reach these hosts). The WS itself also goes direct.
+    s.trust_env = False
     s.headers.update({"User-Agent": _UA, "Accept": "*/*"})
     s.get(base + "/exir", timeout=TIMEOUT)
     for attempt in range(1, CAPTCHA_RETRIES + 1):

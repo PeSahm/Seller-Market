@@ -83,7 +83,7 @@ def login() -> tuple[requests.Session, str]:
         print(f"  captcha attempt {attempt}: bytes={len(rc.content)} ocr={captcha_text!r}")
         if captcha_text and captcha_text.isdigit() and len(captcha_text) == 5:
             break
-    if not (captcha_text and captcha_text.isdigit()):
+    if not (captcha_text and captcha_text.isdigit() and len(captcha_text) == 5):
         raise SystemExit("!! OCR did not return a numeric captcha — gate FAILS here.")
 
     rl = s.post(

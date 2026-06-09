@@ -31,6 +31,11 @@ _UA = (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
+# Default poster: a dedicated session that reaches the broker DIRECTLY (never via
+# a foreign HTTP proxy in the host env) — same hardening rlc_price/rlc_market use.
+_DIRECT = requests.Session()
+_DIRECT.trust_env = False
+
 
 def send_prepared_order(
     prepared: PreparedOrder,
@@ -46,7 +51,7 @@ def send_prepared_order(
     ``requests.RequestException`` on a transport failure (the caller logs +
     treats the chunk as not-fired; it re-fires on the next push).
     """
-    poster = session.post if session is not None else requests.post
+    poster = (session or _DIRECT).post
     if prepared.signer is None:
         # ephoenix — static Bearer.
         headers = {

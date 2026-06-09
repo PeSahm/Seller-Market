@@ -100,7 +100,12 @@ def sell_entire_position(
         return SellResult(isin=isin, chunks_fired=0, holdings_before=0,
                           holdings_after=0, flat=False, error="bad floor price")
 
-    holdings = int(fetch_holdings() or 0)
+    try:
+        holdings = int(fetch_holdings() or 0)
+    except Exception as exc:  # noqa: BLE001 — a transient read error → HOLD, retry next push
+        log.exception("auto-sell %s: fetch_holdings (before) failed", isin)
+        return SellResult(isin=isin, chunks_fired=0, holdings_before=0,
+                          holdings_after=0, flat=False, error=str(exc))
     if holdings <= 0:
         log.info("auto-sell %s: nothing held (holdings=%d) — already flat", isin, holdings)
         return SellResult(isin=isin, chunks_fired=0, holdings_before=holdings,
@@ -141,7 +146,11 @@ def sell_entire_position(
         if i < len(ladder) - 1:
             sleep(min_interval_s)
 
-    holdings_after = int(fetch_holdings() or 0)
+    try:
+        holdings_after = int(fetch_holdings() or 0)
+    except Exception:  # noqa: BLE001 — unknown post-state → treat as NOT flat (don't latch done)
+        log.exception("auto-sell %s: fetch_holdings (after) failed", isin)
+        holdings_after = holdings
     flat = holdings_after <= 0
     log.info("auto-sell %s: fired %d chunk(s); holdings %d -> %d (%s)", isin, fired,
              holdings, holdings_after, "FLAT" if flat else "remaining")
