@@ -5,3 +5,4 @@ flask>=2.0.0
 pytelegrambotapi>=4.0.0
 pytest>=7.0.0
 pyyaml>=6.0.0
+websocket-client>=1.6.0
