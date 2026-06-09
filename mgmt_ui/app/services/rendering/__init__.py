@@ -88,6 +88,11 @@ class StackRenderContext:
     # setting. ``locust_users_multiplier`` is the "3×" knob (``users = 3×sections``).
     autoscale_locust: bool = False
     locust_users_multiplier: int = 3
+    # #110 auto-sell: URL of the shared market-data WS service the bot's auto-sell
+    # monitor consumes (e.g. "http://5.10.248.55:8077"). EMPTY = auto-sell off →
+    # the bot keeps the byte-identical scheduler-only command. Set it to switch the
+    # container to bot_entrypoint.py (scheduler + monitor) with MARKET_DATA_URL.
+    bot_market_data_url: str = ""
 
 
 # Re-exports so callers can do

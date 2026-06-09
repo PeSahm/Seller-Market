@@ -83,6 +83,23 @@ def test_compose_yaml_shape() -> None:
     assert "basicConfig" in bootstrap
 
 
+def test_compose_yaml_auto_sell_opt_in() -> None:
+    """#110: bot_market_data_url empty → scheduler-only (unchanged); set → entrypoint."""
+    # Default (empty) → byte-identical scheduler-only command, no MARKET_DATA_URL.
+    out = render_compose_yaml(_ctx())
+    assert "MARKET_DATA_URL" not in out
+    assert "bot_entrypoint.py" not in out
+
+    # Set → switch the command to bot_entrypoint.py + inject MARKET_DATA_URL.
+    out2 = render_compose_yaml(_ctx(bot_market_data_url="http://5.10.248.55:8077"))
+    parsed = yaml.safe_load(out2)
+    cmd = parsed["services"]["trading-bot"]["command"]
+    assert cmd == ["python", "-u", "bot_entrypoint.py"]
+    env = parsed["services"]["trading-bot"]["environment"]
+    assert "MARKET_DATA_URL=http://5.10.248.55:8077" in env
+    assert "OCR_SERVICE_URL=" + OCR_URL in env  # existing env preserved
+
+
 def test_compose_yaml_no_telegram_no_ocr_sidecar() -> None:
     """Belt-and-braces: scan for forbidden strings case-insensitively."""
     out = render_compose_yaml(_ctx()).lower()

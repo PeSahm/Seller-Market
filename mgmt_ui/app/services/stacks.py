@@ -342,6 +342,8 @@ async def _build_render_context(
     ocr_url = await _read_setting(
         db, "ocr_service_url", _DEFAULT_OCR_SERVICE_URL
     )
+    # #110 auto-sell: empty by default → bot keeps the scheduler-only command.
+    bot_market_data_url = (await _read_setting(db, "bot_market_data_url", "") or "").strip()
 
     customers = await _load_stack_customers(db, stack.id)
 
@@ -412,6 +414,7 @@ async def _build_render_context(
         locust=locust_row,
         autoscale_locust=autoscale_locust,
         locust_users_multiplier=users_multiplier,
+        bot_market_data_url=bot_market_data_url,
     )
 
 
