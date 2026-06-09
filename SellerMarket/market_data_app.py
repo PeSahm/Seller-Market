@@ -29,7 +29,7 @@ import os
 from flask import Flask, jsonify, request
 
 import json
-import queue
+import queue as _queuelib  # NOT ``queue`` — the /queue route fn shadows that name
 import threading
 
 import rlc_market
@@ -85,12 +85,12 @@ class _QueueHub:
             )
             return self._client
 
-    def subscribe_local(self, isin: str) -> "queue.Queue":
+    def subscribe_local(self, isin: str) -> "_queuelib.Queue":
         # Resolve the upstream client FIRST: if the account isn't configured this
         # raises before we register the queue, so a failed subscribe can't leave
         # an orphan in ``_subs``.
         client = self._ensure_client()
-        q: "queue.Queue" = queue.Queue(maxsize=8)
+        q: "_queuelib.Queue" = _queuelib.Queue(maxsize=8)
         with self._lock:
             self._subs.setdefault(isin, set()).add(q)
             latest = self._latest.get(isin)
@@ -98,11 +98,11 @@ class _QueueHub:
         if latest is not None:
             try:
                 q.put_nowait(latest)
-            except queue.Full:
+            except _queuelib.Full:
                 pass
         return q
 
-    def unsubscribe_local(self, isin: str, q: "queue.Queue") -> None:
+    def unsubscribe_local(self, isin: str, q: "_queuelib.Queue") -> None:
         with self._lock:
             subs = self._subs.get(isin)
             if subs:
@@ -115,7 +115,7 @@ class _QueueHub:
         for q in subs:
             try:
                 q.put_nowait(buy_volume)
-            except queue.Full:
+            except _queuelib.Full:
                 pass  # slow local consumer — drop this tick
 
 
@@ -216,7 +216,7 @@ if _sock is not None:
             while True:
                 try:
                     bv = q.get(timeout=30)
-                except queue.Empty:
+                except _queuelib.Empty:
                     ws.send(json.dumps({"isin": isin, "ping": True}))
                     continue
                 ws.send(json.dumps({"isin": isin, "buy_volume": bv}))
