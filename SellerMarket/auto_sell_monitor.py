@@ -24,6 +24,7 @@ import configparser
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, time as dtime, timezone, timedelta
@@ -104,6 +105,9 @@ class DayState:
 
     def __init__(self, today_str: str, directory: str = _RUN_RESULTS_DIR):
         self._done: set[tuple[str, str]] = set()
+        # on_buy_volume runs on one QueueFeed thread PER ISIN, so the latch is
+        # read/written concurrently — guard it.
+        self._lock = threading.Lock()
         self._path = os.path.join(directory, f"auto_sell_state_{today_str}.jsonl")
         try:
             os.makedirs(directory, exist_ok=True)
@@ -119,19 +123,21 @@ class DayState:
             logger.exception("auto-sell: failed to load day-state %s", self._path)
 
     def is_done(self, account: str, isin: str) -> bool:
-        return (account, isin) in self._done
+        with self._lock:
+            return (account, isin) in self._done
 
     def mark_done(self, account: str, isin: str) -> None:
         key = (account, isin)
-        if key in self._done:
-            return
-        self._done.add(key)
-        try:
-            with open(self._path, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"account": account, "isin": isin,
-                                    "at": datetime.now(timezone.utc).isoformat()}) + "\n")
-        except Exception:  # noqa: BLE001
-            logger.exception("auto-sell: failed to persist day-state")
+        with self._lock:
+            if key in self._done:
+                return
+            self._done.add(key)
+            try:
+                with open(self._path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"account": account, "isin": isin,
+                                        "at": datetime.now(timezone.utc).isoformat()}) + "\n")
+            except Exception:  # noqa: BLE001
+                logger.exception("auto-sell: failed to persist day-state")
 
 
 def _default_build_adapter(tgt: AutoSellTarget):

@@ -878,9 +878,9 @@ async def agent_trade_instruction_update(
     if comment is not None:
         fields["comment"] = comment if comment != "" else None
     # Always include it (form submits empty when unset / on a Sell) so the
-    # operator can clear an existing threshold.
+    # operator can clear an existing threshold. ``0`` → None (disabled).
     if auto_sell_threshold is not None:
-        fields["auto_sell_threshold"] = _parse_optional_int(auto_sell_threshold)
+        fields["auto_sell_threshold"] = _parse_optional_int(auto_sell_threshold) or None
 
     # PR #73 pattern: snapshot both the TI and the parent Customer to
     # primitives before the service call. After ``db.rollback()`` on a

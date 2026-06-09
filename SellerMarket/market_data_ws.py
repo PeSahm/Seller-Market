@@ -89,7 +89,12 @@ class QueueFeed:
                     msg = ws.recv()
                     if not msg:
                         continue
-                    self._on_update(isin, parse_buy_volume(msg))
+                    bv = parse_buy_volume(msg)
+                    # Only forward real values. A keepalive / non-data frame
+                    # (buy_volume absent) is NOT a feed loss — the disconnect
+                    # branch below is what signals HOLD via on_update(isin, None).
+                    if bv is not None:
+                        self._on_update(isin, bv)
             except Exception as exc:  # noqa: BLE001 — disconnect / timeout → HOLD + reconnect
                 logger.warning("queue feed %s disconnected: %s", isin, exc)
                 self._on_update(isin, None)  # fail-safe HOLD

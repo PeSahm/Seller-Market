@@ -15,10 +15,13 @@ FLAT package layout — top-level module (Dockerfile ``COPY *.py ./``).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 FIRE_LOG_SCHEMA = 1
 RUN_RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_results")
@@ -60,7 +63,10 @@ def emit_order_fire(
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001 — fire-log I/O must never break trading
-        pass
+        # Log so a persistent failure (bad mount, full disk) is visible, but
+        # NEVER re-raise — a missed fire-log line must not abort a real sell.
+        logger.warning("order_fire_log: failed to append fire for %s/%s side=%s",
+                       broker_code, isin, side, exc_info=True)
 
 
 __all__ = ["FIRE_LOG_SCHEMA", "emit_order_fire"]

@@ -41,6 +41,11 @@ def test_find_buy_queue_field_none_when_no_match_or_no_expected():
     assert rlc_ws.find_buy_queue_field({"flag": True}, 1) is None
 
 
+def test_find_buy_queue_field_none_when_ambiguous():
+    # Two fields share the value → ambiguous → don't bind (wait for a clean frame).
+    assert rlc_ws.find_buy_queue_field({"bbq": 100, "other": 100}, 100) is None
+
+
 # ---------------------------------------------------------------------------
 # extract_field
 # ---------------------------------------------------------------------------

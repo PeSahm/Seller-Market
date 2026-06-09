@@ -215,8 +215,9 @@ async def create_trade_instruction(
         customer_id=customer_id,
         isin=data.isin,
         side=data.side,
-        # Auto-sell only makes sense for a BUY; ignore any value sent on a SELL.
-        auto_sell_threshold=(data.auto_sell_threshold if data.side == 1 else None),
+        # Auto-sell only makes sense for a BUY. Normalize 0 → None so "disabled"
+        # has ONE representation in the DB (the bot also treats <= 0 as disabled).
+        auto_sell_threshold=(data.auto_sell_threshold if (data.side == 1 and data.auto_sell_threshold) else None),
         # Placeholder until the flush gives us the id.
         section_name="",
         comment=data.comment,

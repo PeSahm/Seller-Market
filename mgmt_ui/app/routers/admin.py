@@ -1397,9 +1397,10 @@ async def admin_trade_instruction_update(
     if comment is not None:
         fields["comment"] = comment if comment != "" else None
     # The form always submits this (empty when unset / on a Sell), so include it
-    # explicitly — that lets the operator CLEAR an existing threshold.
+    # explicitly — that lets the operator CLEAR an existing threshold. ``0`` is
+    # normalized to None ("disabled" has one representation).
     if auto_sell_threshold is not None:
-        fields["auto_sell_threshold"] = _parse_optional_int(auto_sell_threshold)
+        fields["auto_sell_threshold"] = _parse_optional_int(auto_sell_threshold) or None
 
     # Snapshot both the TradeInstruction AND the parent Customer for the
     # error renderer (PR #73 pattern). The service rollback expires every

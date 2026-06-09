@@ -52,8 +52,10 @@ def render_config_ini(ctx: StackRenderContext) -> str:
         lines.append(f"broker_family = {family}")
         lines.append(f"isin = {c.isin}")
         lines.append(f"side = {c.side}")
-        # #110 auto-sell: emit only when set (>0). Additive — the current bot
-        # image ignores unknown keys, so this can't break existing stacks.
+        # #110 auto-sell: emit only when armed. None AND 0 both mean "disabled"
+        # (the service normalizes 0 -> None at storage, and the bot likewise
+        # treats threshold <= 0 as disabled), so the truthy guard is the single
+        # consistent representation. Additive — the bot ignores unknown keys.
         if c.auto_sell_threshold:
             lines.append(f"auto_sell_threshold = {c.auto_sell_threshold}")
     lines.append("")  # trailing newline

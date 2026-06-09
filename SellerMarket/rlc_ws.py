@@ -25,7 +25,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import ssl
 import threading
 import time
 from typing import Callable, Optional
@@ -83,26 +82,30 @@ def login(tenant: str, username: str, password: str,
 
 
 def find_buy_queue_field(frame: dict, expected_bbq: int) -> Optional[str]:
-    """Return the top-level field whose numeric value == ``expected_bbq`` (or None).
+    """Return the field whose numeric value == ``expected_bbq``, IFF unambiguous.
 
-    Used to self-calibrate which MW-frame key is the best-buy queue against the
-    REST cross-check. Dotted ``"a.b"`` for a one-level-nested match.
+    Self-calibrates which MW-frame key is the best-buy queue against the REST
+    cross-check. If two or more fields share that value in one frame the match is
+    ambiguous, so we return ``None`` and the caller waits for a cleaner frame —
+    binding the wrong field would corrupt every later sell decision. Dotted
+    ``"a.b"`` for a one-level-nested match.
     """
     if expected_bbq is None:
         return None
+    candidates: list[str] = []
     for k, v in frame.items():
         if isinstance(v, bool):
             continue
         if isinstance(v, (int, float)) and int(v) == int(expected_bbq):
-            return k
+            candidates.append(k)
     for k, v in frame.items():
         if isinstance(v, dict):
             for kk, vv in v.items():
                 if isinstance(vv, bool):
                     continue
                 if isinstance(vv, (int, float)) and int(vv) == int(expected_bbq):
-                    return f"{k}.{kk}"
-    return None
+                    candidates.append(f"{k}.{kk}")
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def extract_field(frame: dict, field: str) -> Optional[int]:
@@ -178,12 +181,13 @@ class RlcQueueClient:
                 url = (f"wss://{self.tenant}.exirbroker.com/sle/v2/ws"
                        f"?encoding=text&authToken={token}&device=web")
                 cookie = "; ".join(f"{k}={v}" for k, v in self._cookies.items())
+                # Default TLS verification ON — this WS carries the authToken; a
+                # MITM must not be able to read it. The tenant serves a valid cert.
                 ws = websocket.create_connection(
                     url,
                     header=[f"User-Agent: {_UA}",
                             f"Origin: https://{self.tenant}.exirbroker.com"],
                     cookie=cookie,
-                    sslopt={"cert_reqs": ssl.CERT_NONE},
                     timeout=15,
                 )
                 ws.send("1,MW." + isin)
@@ -206,7 +210,11 @@ class RlcQueueClient:
             except Exception as exc:  # noqa: BLE001 — disconnect/auth → HOLD + reconnect
                 logger.warning("rlc_ws %s: disconnected: %s", isin, exc)
                 self.on_update(isin, None)         # fail-safe HOLD
-                self._ensure_auth(force=True) if "401" in str(exc) else None
+                if "401" in str(exc):
+                    try:
+                        self._ensure_auth(force=True)
+                    except Exception:  # noqa: BLE001 — re-auth failure must not kill the worker
+                        logger.exception("rlc_ws %s: forced re-auth failed", isin)
                 self._stop.wait(backoff)
                 backoff = min(backoff * 2, self._reconnect_max)
             finally:

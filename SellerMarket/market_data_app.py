@@ -86,11 +86,15 @@ class _QueueHub:
             return self._client
 
     def subscribe_local(self, isin: str) -> "queue.Queue":
+        # Resolve the upstream client FIRST: if the account isn't configured this
+        # raises before we register the queue, so a failed subscribe can't leave
+        # an orphan in ``_subs``.
+        client = self._ensure_client()
         q: "queue.Queue" = queue.Queue(maxsize=8)
         with self._lock:
             self._subs.setdefault(isin, set()).add(q)
             latest = self._latest.get(isin)
-        self._ensure_client().subscribe(isin)  # idempotent upstream subscribe
+        client.subscribe(isin)  # idempotent upstream subscribe
         if latest is not None:
             try:
                 q.put_nowait(latest)
