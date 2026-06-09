@@ -4,6 +4,26 @@ Read-only reverse-engineering of the Exir/RLC live market-data stream, from the
 Angular SPA bundle of `https://khobregan.exirbroker.com/exir/` (reachable 200 from
 the Iranian host). **No orders, no live WS connect yet** — bundle analysis only.
 
+> ## ⚠️ CORRECTION — confirmed LIVE on PouyanIt (2026-06, Khobregan login)
+> The bundle-only derivation below got three things WRONG; the live connect fixed them.
+> `rlc_ws.py` now uses these (the calibration also confirmed live):
+> - **WS host = one of the login response's `pushServerUrls`** (e.g.
+>   `push103.irbroker.com`, `push3.rhabroker.ir`), **NOT** the tenant host.
+>   `wss://<pushServerUrl>/v2/ws?encoding=text&authToken=<rlcAuthHeader>&device=web`.
+>   (The bundle's `assignWsUrl()` reads `userInfo.pushServerUrls`; `baseWsSleUrl:"/sle"`
+>   is the REST base, not the WS path.)
+> - **Auth param = the login response's `rlcAuthHeader`** (the JWT with the broker
+>   claim), **NOT** the login `authToken`.
+> - **Inbound frames are comma-separated TEXT, NOT JSON.** The MW frame is
+>   `MW,<insCode>,<ISIN>,<name>,<price>,<lap>,<hap>,...` — ~85 positional fields; the
+>   queue numbers are positional. A `V,,,<date>,<n>` frame carries server time.
+>   (The SPA's `parseMessage` JSON.parse is a different code path.)
+> - The exact buy-queue field INDEX is **self-calibrated** at runtime by matching a
+>   field's value to the REST `bbq` (`rlc_market.get_queue`) — it needs LIVE data
+>   (at market close every queue field is 0 → ambiguous → it waits). Subscribe is
+>   still `"1,MW.<ISIN>"`. Login (captcha→OCR→login), the published port, and the
+>   upstream WS connect are all verified working market-closed.
+
 ## Headline: it is NOT Lightstreamer
 
 CLAUDE.md assumed the queue streams over **Lightstreamer** (`push*.rhbroker.ir`).
