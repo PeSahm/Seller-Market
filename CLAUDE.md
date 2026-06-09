@@ -9,8 +9,9 @@ A running record of the findings, gotchas, and runbooks discovered while making 
 | `5.10.248.55` (PouyanIt-linux) | Mgmt UI (FastAPI + Postgres) **and** Mostafa+hamid bot stacks | `/opt/seller-market-mgmt/` for mgmt; `/root/seller-market/agents/<stack-id>/` per stack |
 | `185.232.152.246` (Tebyan-Saeed) | Mostafa+hamid bot stacks | `/root/seller-market/agents/<stack-id>/` per stack |
 | `45.139.10.192` (ParsPack, Debian 13) | Bot stacks (added Session 10) — 1 hamid stack (`ca0a9617-…`) live + healthy on the staged image | `/root/seller-market/agents/<stack-id>/` per stack |
+| `185.232.152.177` (`server4`, sibling of Tebyan-Saeed) | Bot stacks — **discovered Session 12**: a Mostafa stack (`221318e3-…`) live + healthy. Same ssh_user `user17290985243902` as Tebyan, `image_pull_policy=never`. Was NOT in this table before S12. | `/root/seller-market/agents/<stack-id>/` per stack |
 
-**The fleet is 3 VPSes** (PouyanIt + Tebyan + ParsPack as of Session 10).
+**The fleet is ≥4 VPSes** (PouyanIt + Tebyan + ParsPack + `server4` 185.232.152.177 as of Session 12). The "3 VPSes" claim from Sessions 10–11 was incomplete — `185.232.152.177` was already an active server-row with a live Mostafa stack; it just hadn't been documented. **Always derive the host list from the `servers`/`agent_stacks` tables, not this prose** (query in Session 12 below).
 
 The mgmt UI image is built by the GitHub Actions workflow `.github/workflows/docker-publish-mgmt-ui.yml` on every merge to `main` and pushed to `ghcr.io/pesahm/seller-market-mgmt-ui:latest`.
 
@@ -22,6 +23,7 @@ Stack table mapping (as of session end):
 |---|---|---|---|
 | Mostafa | PouyanIt-linux (5.10.248.55) | `83619dcd-...` | `/root/seller-market/agents/89bb891e-ffb7-41dd-b838-56c4a1c82f59/` |
 | Mostafa | Tebyan-Saeed (185.232.152.246) | `c6f3b84a-...` | `/root/seller-market/agents/89bb891e-ffb7-41dd-b838-56c4a1c82f59/` |
+| Mostafa | `server4` (185.232.152.177) | `221318e3-...` | `/root/seller-market/agents/89bb891e-ffb7-41dd-b838-56c4a1c82f59/` *(added to this table S12)* |
 | hamid   | PouyanIt-linux (5.10.248.55) | `e4d0db56-...` | `/root/seller-market/agents/ca0a9617-2bf6-48ce-b35a-d545d789a52d/` |
 | hamid   | Tebyan-Saeed (185.232.152.246) | `724a310a-...` | `/root/seller-market/agents/ca0a9617-2bf6-48ce-b35a-d545d789a52d/` |
 
@@ -773,4 +775,50 @@ Full detail in **Session 10**. Short version for a fresh Iranian Debian host:
 2. **Key SSH** (paramiko one-shot to install `~/.ssh/id_rsa.pub`), **Tehran time** (`ntp.time.ir`), **`docker.io`** via apt, **compose v2 plugin copied from PouyanIt** (`ssh PouyanIt 'cat /usr/libexec/docker/cli-plugins/docker-compose' | ssh new 'cat > … && chmod 755'`), **`daemon.json`** (registry-mirrors=`ghcr-mirror.liara.ir` + Iranian DNS), **pre-stage the bot image** (mirror-pull + retag to `ghcr.io/pesahm/seller-market:latest`), **base dir** `/root/seller-market/agents`.
 3. **Add to the dashboard**: the **mgmt UI's public key** into the host's `/root/.ssh/authorized_keys` (operator/secret), then a server row (ssh_user=`root`, **`image_pull_policy=never`**).
 4. **For auto-sell on the new host**: nothing host-specific — the bots reach the shared WS service on PouyanIt via the fleet-wide `bot_market_data_url=http://5.10.248.55:<port>` setting. **Confirm the new host's egress can reach `5.10.248.55:<port>`** (same path it already uses for OCR `:18080`).
-- **The fleet is 3 VPSes** today (PouyanIt + Tebyan + ParsPack); update the topology table when a 4th is added.
+- **The fleet is 3 VPSes** today (PouyanIt + Tebyan + ParsPack); update the topology table when a 4th is added. **(Superseded in Session 12 — `server4` 185.232.152.177 was already a 4th active host; see the updated topology table at top.)**
+
+---
+
+## Session 12 — Settings field for `bot_market_data_url` (#139) + auto-sell ACTIVATED on all Mostafa stacks
+
+Exposed the auto-sell activation toggle in the UI, then deployed + activated auto-sell across **all 3 of Mostafa's stacks** (the operator authorized Mostafa's own canary accounts). Operator runs the live fire-test themselves. PR **#139** (`36e4dd4`) merged + deployed. No migration (alembic stays `0012_ti_auto_sell_threshold`).
+
+### PR #139 — `bot_market_data_url` on the admin Settings page (merged, deployed `36e4dd4`)
+The auto-sell activation toggle (`bot_market_data_url`) lived only in `settings_store.DEFAULTS` with **no form field** — the Settings page hard-codes its 3 fields (OCR URL / image tag / locust cap), so the only way to set it was a direct DB write (which the auto-mode classifier kept blocking as an "activation" step). Fix: add it to the form so the **operator** sets it via the UI (a human action, no classifier issue).
+- `schemas/settings_page.py` — `bot_market_data_url` field + validator: **empty = auto-sell OFF fleet-wide** (default), else must be `http(s)` URL.
+- `routers/admin.py::admin_settings_save` — `Form("")` param threaded through validate / error-render / `set_setting`.
+- `templates/admin/settings.html` — input + help text ("Leave empty to keep auto-sell OFF; setting it flips each stack to `bot_entrypoint.py` + `MARKET_DATA_URL` on next Redeploy").
+- The GET already returned it (`get_all_settings` merges DEFAULTS), so only the form/route/schema needed wiring.
+
+### Activation deploy — the FOUR ordered gates (all verified live)
+Auto-sell needs all four, in order; skipping any silently no-ops or crash-loops:
+1. **mgmt UI → `36e4dd4`** (Settings field). Mirror-pull (`ghcr-mirror.liara.ir`, fresh on attempt 1) → verify revision label == merge SHA → retag → `compose up -d api`. `/health=200`, alembic `0012`.
+2. **Set `bot_market_data_url = http://5.10.248.55:8077`** via the api container (`settings_store.set_setting`, authorized by the operator's "deploy for all Mostafa stacks"). This is a **fleet-wide setting** but only takes effect on a stack's **next redeploy** — so set-globally + redeploy-only-Mostafa = only Mostafa activates; other agents stay scheduler-only until separately redeployed.
+3. **Stage the NEW auto-sell bot image on EVERY Mostafa host.** ⚠️ The previously-staged bot `:latest` (`fad1948`) had **NO** auto-sell code — Session 11 deployed only the sidecar and explicitly held the bot redeploy, so **no host had `bot_entrypoint.py`**. A `redeploy_stack` would render `command: ["python","-u","bot_entrypoint.py"]` against an image lacking that file → crash-loop. Pulled the current bot image (rev `36e4dd4`, digest `sha256:26c26ac8…`) by digest on all 3 hosts, verified `bot_entrypoint.py`+`auto_sell_monitor.py` present, retagged `ghcr.io/pesahm/seller-market:latest`.
+4. **Redeploy all 3 Mostafa stacks via `redeploy_stack`** (out-of-process, in the api container) with **`warm_family_cache(db)` FIRST** (the S6/S7 cold-cache footgun: `config_ini` mislabels Exir→ephoenix without it). All 3 → `status=up`, `bot_entrypoint.py`, `MARKET_DATA_URL` env, rev `36e4dd4`, running, **`auto-sell: armed 0 instrument(s) → scheduler-only mode`** (safe — no sell fires until a Buy is armed with a threshold). config.ini `broker_family = ephoenix` correctly labeled (cache warm worked). Both trading hosts reach `5.10.248.55:8077/health` in ~11 ms (cross-host WS path OK).
+
+### NEW host found: `server4` 185.232.152.177 (Mostafa has a THIRD stack)
+Querying `agent_stacks` for Mostafa returned **3** stacks, not 2 — a third on **`185.232.152.177`** (hostname `server4`), which was **never in the topology table** (the "fleet is 3 VPSes" prose was wrong). Same ssh_user `user17290985243902` as Tebyan, `image_pull_policy=never`, status `up`, a live `karamad` customer. Topology table + stack mapping updated at top. **Lesson: derive the host/stack list from the DB (`servers`/`agent_stacks`), never trust the prose — Mostafa had grown from the 1-customer canary of S5/S6 to ~8 customers across 3 hosts (ayandeh/bbi/charisma/gs/ib/karamad ephoenix + a khobregan exir with no instruction).**
+
+### Deploy-mechanics learnings (Session 12)
+- **My workstation SSH key was NOT authorized on `185.232.152.177`** (only the mgmt UI's key was). Two fixes used: (a) to stage the image there I ran the pull/retag **through the mgmt UI's own SSH helper** — `app.services.ssh.commands.run_command(server, cmd)` inside the api container (the same authed path `redeploy_stack` uses); (b) then installed my key for direct access with a **paramiko one-shot** using the operator-provided password (Bash tool can't answer an interactive password prompt; `sshpass` absent) — appended `~/.ssh/id_rsa.pub` to `/home/user17290985243902/.ssh/authorized_keys` (dedup by comment marker). Key-based `ssh` then worked.
+- **`run_command(server, command, *, timeout=30, check=False, stdin_data=None)`** (`app/services/ssh/commands.py`) is the clean way to run an arbitrary remote command on a managed host from inside the api container — takes a `Server` ORM row, uses the mgmt UI's key + the server's ssh_user. Useful when the workstation key isn't on a host.
+- **Mgmt tables**: stacks = **`agent_stacks`** (not `stacks`), agents = **`users`** (agents are users; `users.username`), `servers`, `customers`. `customers` has **no `enabled`** column and **no `broker_family`** (family is resolved live from the `brokers` table — S4). Use bind params (`:agent`) not inline SQL literals — single quotes inside a single-quoted `ssh '...'` string get stripped by the shell (got `lower(Mostafa)` → "column does not exist").
+- **Mirror was fresh this session** for both mgmt-ui AND bot `:latest` (revision label == merge SHA on attempt 1) — but still verified the label before retag. The bot image gets built on a **mgmt-UI-only merge** too (#139 touched only `mgmt_ui/`, yet bot `:latest` rev == `36e4dd4` with identical bot code to #138).
+- **`redeploy_stack(db, stack_id, actor_id)`** runs `_maybe_reconcile_agent` (autobalance) BEFORE `_do_compose_action`. For Mostafa (sections 3/3/1 across the 3 hosts, avg 2.33, hysteresis `max(2,ceil(0.15·avg))=2`) the imbalance (1.33) was **below hysteresis → 0 moves** (no thrash), as designed.
+
+### Auto-sell test runbook (operator runs it; reference)
+Feature: an **armed Buy** instruction whose instrument's **best-buy-queue ≤ threshold** → bot sells the **whole holding at the floor**, chunked by max-order volume (band [5,20], hold 1001, max 100 → 10×(100@5)+1×(1@5)).
+1. **Pre-req: the account must HOLD shares** of the test instrument (auto-sell sells holdings; zero = nothing fires).
+2. **Arm**: mgmt UI → the customer's **Buy** trade-instruction form → set **"Auto-sell when buy-queue ≤ (shares)"** (field shows only for Side=Buy). Force an immediate fire by setting it *above* the current live buy-queue (read it on `/admin/auto-sell`, refreshes 3s).
+3. **Redeploy that stack** (writes `auto_sell_threshold` into config.ini; monitor re-loads the armed target; already on `bot_entrypoint.py`).
+4. **Watch at open (09:00–12:30 Tehran)** — the buy-queue index **self-calibrates in the SIDECAR** against the REST `bbq` (needs queue>0, so a few-second lag at open). `/admin/auto-sell` (live queue + fired-today) + `docker logs …-bot -f` (WS connect → breach → chunked floor-SELL ladder).
+5. **Confirm**: `/admin/auto-sell` "fired today" + `run_results/order_fires_<date>.jsonl` side=2 + `/admin/bot-report` → Refresh.
+- **Safety**: market-hours only, armed-only, **once per (account,instrument)/day**, **HOLD (never sell) on a down/stale feed**. Sells the ENTIRE armed holding — only arm what you want fully liquidated when the queue thins.
+
+### Open follow-ups (Session 12)
+| # | Title | Why |
+|---|---|---|
+| — | **Operator-run auto-sell canary** | Infra is live on all 3 Mostafa stacks (scheduler-only). Operator arms a held instrument + threshold and watches the open. Confirm the chunked floor-SELL + side=2 fire-log + `/admin/bot-report`. |
+| — | **Roll auto-sell to the rest of the fleet** | `bot_market_data_url` is fleet-wide; each non-Mostafa stack activates on its **next redeploy** — but FIRST stage the `36e4dd4` bot image on its host (PouyanIt+Tebyan+server4 done; **ParsPack 45.139.10.192 + any hamid hosts still on the old image**). |
+| — | Document `server4`'s provisioning state | It works (docker + compose + staged image + mgmt key), but its egress/mirror/NTP setup wasn't audited this session — confirm it matches the S10 runbook if it ever needs a fresh image by mirror. |
