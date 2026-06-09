@@ -89,6 +89,16 @@ def _require_agent_or_admin(user: User) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
 
 
+def _parse_optional_int(value: Optional[str]) -> Optional[int]:
+    """Lenient int parse for an optional number form field (empty/invalid → None)."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _stacks_bulk_location(base: str, **params) -> str:
     """Build a stacks-list redirect URL carrying a bulk-action result summary.
 
@@ -693,6 +703,7 @@ async def agent_trade_instruction_create(
     isin: str = Form(...),
     side: int = Form(...),
     comment: Optional[str] = Form(None),
+    auto_sell_threshold: Optional[str] = Form(None),
 ):
     """Create a new TradeInstruction under a customer the agent owns."""
     _require_agent_or_admin(user)
@@ -710,13 +721,19 @@ async def agent_trade_instruction_create(
         username=customer.username,
     )
 
-    sticky = {"isin": isin, "side": str(side), "comment": comment or ""}
+    sticky = {
+        "isin": isin,
+        "side": str(side),
+        "comment": comment or "",
+        "auto_sell_threshold": auto_sell_threshold or "",
+    }
 
     try:
         payload = TradeInstructionCreate(
             isin=isin,
             side=side,  # type: ignore[arg-type]
             comment=comment if comment else None,
+            auto_sell_threshold=_parse_optional_int(auto_sell_threshold),
         )
     except (ValidationError, ValueError) as exc:
         ctx = _ctx(request, user, current_tab="/agent/customers")
@@ -790,6 +807,7 @@ async def agent_trade_instruction_edit_form(
         "isin": ti.isin,
         "side": str(ti.side),
         "comment": ti.comment or "",
+        "auto_sell_threshold": ti.auto_sell_threshold if ti.auto_sell_threshold is not None else "",
         "version": ti.version,
     }
     ctx["mode"] = "edit"
@@ -806,6 +824,7 @@ async def agent_trade_instruction_update(
     isin: Optional[str] = Form(None),
     side: Optional[int] = Form(None),
     comment: Optional[str] = Form(None),
+    auto_sell_threshold: Optional[str] = Form(None),
     version: int = Form(...),
 ):
     _require_agent_or_admin(user)
@@ -823,6 +842,10 @@ async def agent_trade_instruction_update(
         fields["side"] = side
     if comment is not None:
         fields["comment"] = comment if comment != "" else None
+    # Always include it (form submits empty when unset / on a Sell) so the
+    # operator can clear an existing threshold.
+    if auto_sell_threshold is not None:
+        fields["auto_sell_threshold"] = _parse_optional_int(auto_sell_threshold)
 
     # PR #73 pattern: snapshot both the TI and the parent Customer to
     # primitives before the service call. After ``db.rollback()`` on a
@@ -834,6 +857,7 @@ async def agent_trade_instruction_update(
         isin=ti.isin,
         side=ti.side,
         comment=ti.comment,
+        auto_sell_threshold=ti.auto_sell_threshold,
         version=ti.version,
     )
     _customer_snap = SimpleNamespace(
@@ -847,6 +871,10 @@ async def agent_trade_instruction_update(
         "isin": isin if isin is not None and isin != "" else ti.isin,
         "side": str(side if side is not None else ti.side),
         "comment": comment if comment is not None else (ti.comment or ""),
+        "auto_sell_threshold": (
+            auto_sell_threshold if auto_sell_threshold is not None
+            else (ti.auto_sell_threshold if ti.auto_sell_threshold is not None else "")
+        ),
         "version": ti.version,
     }
 

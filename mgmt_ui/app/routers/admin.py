@@ -80,6 +80,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin-ui"], include_in_schema=False)
 
 
+def _parse_optional_int(value: Optional[str]) -> Optional[int]:
+    """Lenient int parse for an optional number form field.
+
+    An empty ``<input type=number>`` submits ``""`` (not omitted), which a typed
+    ``Optional[int] = Form()`` would 422 on. Empty / non-numeric → ``None``
+    (treated as "unset"); a real number passes through for schema validation
+    (e.g. the ``ge=0`` check rejects negatives with a friendly re-render).
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_optional_uuid(value: Optional[str]) -> Optional[UUID]:
     """Lenient UUID parse for an optional query/form field.
 
@@ -1247,6 +1263,7 @@ async def admin_trade_instruction_create(
     isin: str = Form(...),
     side: int = Form(...),
     comment: Optional[str] = Form(None),
+    auto_sell_threshold: Optional[str] = Form(None),
 ):
     """Create a new TradeInstruction under ``customer_id``."""
     customer = await services_customers.get_customer(db, customer_id)
@@ -1263,13 +1280,19 @@ async def admin_trade_instruction_create(
         username=customer.username,
     )
 
-    sticky = {"isin": isin, "side": str(side), "comment": comment or ""}
+    sticky = {
+        "isin": isin,
+        "side": str(side),
+        "comment": comment or "",
+        "auto_sell_threshold": auto_sell_threshold or "",
+    }
 
     try:
         payload = TradeInstructionCreate(
             isin=isin,
             side=side,  # type: ignore[arg-type]
             comment=comment if comment else None,
+            auto_sell_threshold=_parse_optional_int(auto_sell_threshold),
         )
     except ValidationError:
         ctx = _ctx(request, user, current_tab="/admin/customers")
@@ -1332,6 +1355,7 @@ async def admin_trade_instruction_edit_form(
         "isin": ti.isin,
         "side": str(ti.side),
         "comment": ti.comment or "",
+        "auto_sell_threshold": ti.auto_sell_threshold if ti.auto_sell_threshold is not None else "",
         "version": ti.version,
     }
     ctx = _ctx(request, user, current_tab="/admin/customers")
@@ -1353,6 +1377,7 @@ async def admin_trade_instruction_update(
     isin: Optional[str] = Form(None),
     side: Optional[int] = Form(None),
     comment: Optional[str] = Form(None),
+    auto_sell_threshold: Optional[str] = Form(None),
     version: int = Form(...),
 ):
     """Apply an optimistic-locked update to a TradeInstruction row."""
@@ -1370,6 +1395,10 @@ async def admin_trade_instruction_update(
         fields["side"] = side
     if comment is not None:
         fields["comment"] = comment if comment != "" else None
+    # The form always submits this (empty when unset / on a Sell), so include it
+    # explicitly — that lets the operator CLEAR an existing threshold.
+    if auto_sell_threshold is not None:
+        fields["auto_sell_threshold"] = _parse_optional_int(auto_sell_threshold)
 
     # Snapshot both the TradeInstruction AND the parent Customer for the
     # error renderer (PR #73 pattern). The service rollback expires every
@@ -1381,6 +1410,7 @@ async def admin_trade_instruction_update(
         "isin": ti.isin,
         "side": ti.side,
         "comment": ti.comment,
+        "auto_sell_threshold": ti.auto_sell_threshold,
         "version": ti.version,
     }
     _customer_snap = SimpleNamespace(
@@ -1391,10 +1421,12 @@ async def admin_trade_instruction_update(
     )
 
     def _render_with_error(message: str, code: int):
+        _ast = auto_sell_threshold if auto_sell_threshold is not None else _ti_snap["auto_sell_threshold"]
         form_values = {
             "isin": isin if isin is not None and isin != "" else _ti_snap["isin"],
             "side": str(side if side is not None else _ti_snap["side"]),
             "comment": comment if comment is not None else (_ti_snap["comment"] or ""),
+            "auto_sell_threshold": _ast if _ast is not None else "",
             "version": _ti_snap["version"],
         }
         ctx = _ctx(request, user, current_tab="/admin/customers")

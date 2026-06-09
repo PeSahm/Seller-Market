@@ -442,3 +442,36 @@ async def test_render_fanout_many_trades_per_customer(
     # Decrypt was called ONCE per customer, NOT once per trade. The
     # plaintext is reused across all of that customer's instructions.
     assert len(decrypt_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# #110 auto-sell: auto_sell_threshold rendered only when set
+# ---------------------------------------------------------------------------
+
+
+def test_render_emits_auto_sell_threshold_only_when_set() -> None:
+    """A section with ``auto_sell_threshold`` emits the line; otherwise omits it.
+
+    Pure-renderer test (no DB): the bot reads this key from config.ini and
+    arms the auto-sell monitor. Additive — sections without a threshold must
+    render byte-identically to before.
+    """
+    from app.services.rendering import CustomerRow
+
+    ctx = SimpleNamespace(
+        customers=[
+            CustomerRow("buy_armed", "u1", "p1", "ayandeh", "IRO1A", 1, auto_sell_threshold=500),
+            CustomerRow("buy_unarmed", "u2", "p2", "ayandeh", "IRO1B", 1),
+            CustomerRow("sell_section", "u3", "p3", "ayandeh", "IRO1C", 2, auto_sell_threshold=None),
+        ]
+    )
+    out = render_config_ini(ctx)
+
+    assert "auto_sell_threshold = 500" in out
+    # Exactly one threshold line — only the armed buy section gets it.
+    assert out.count("auto_sell_threshold") == 1
+    # A 0 is falsy → treated as "no auto-sell" (omitted).
+    ctx0 = SimpleNamespace(
+        customers=[CustomerRow("z", "u", "p", "ayandeh", "IRO1Z", 1, auto_sell_threshold=0)]
+    )
+    assert "auto_sell_threshold" not in render_config_ini(ctx0)

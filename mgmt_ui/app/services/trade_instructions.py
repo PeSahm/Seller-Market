@@ -105,6 +105,7 @@ def _public_snapshot(ti: TradeInstruction) -> dict:
         "customer_id": str(ti.customer_id),
         "isin": ti.isin,
         "side": ti.side,
+        "auto_sell_threshold": ti.auto_sell_threshold,
         "section_name": ti.section_name,
         "comment": ti.comment,
         "version": ti.version,
@@ -191,6 +192,8 @@ async def create_trade_instruction(
         customer_id=customer_id,
         isin=data.isin,
         side=data.side,
+        # Auto-sell only makes sense for a BUY; ignore any value sent on a SELL.
+        auto_sell_threshold=(data.auto_sell_threshold if data.side == 1 else None),
         # Placeholder until the flush gives us the id.
         section_name="",
         comment=data.comment,

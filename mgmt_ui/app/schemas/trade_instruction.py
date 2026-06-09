@@ -51,6 +51,9 @@ class TradeInstructionCreate(BaseModel):
     isin: str = Field(min_length=1, max_length=32)
     side: Side
     comment: Optional[str] = Field(default=None, max_length=1024)
+    # #110 auto-sell: best-buy-queue SHARE COUNT below which the bot sells the
+    # held position. Only meaningful on a BUY; the form surfaces it for Buy only.
+    auto_sell_threshold: Optional[int] = Field(default=None, ge=0)
 
     @field_validator("isin")
     @classmethod
@@ -69,6 +72,7 @@ class TradeInstructionUpdate(BaseModel):
     isin: Optional[str] = Field(default=None, min_length=1, max_length=32)
     side: Optional[Side] = None
     comment: Optional[str] = Field(default=None, max_length=1024)
+    auto_sell_threshold: Optional[int] = Field(default=None, ge=0)
     version: int = Field(..., ge=1)
 
     @field_validator("isin")
@@ -89,6 +93,7 @@ class TradeInstructionOut(BaseModel):
     customer_id: UUID
     isin: str
     side: int
+    auto_sell_threshold: Optional[int]
     section_name: str
     comment: Optional[str]
     version: int

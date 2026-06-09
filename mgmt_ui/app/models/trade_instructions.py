@@ -58,6 +58,10 @@ class TradeInstruction(Base):
     )
     isin: Mapped[str] = mapped_column(String(64), nullable=False)
     side: Mapped[int] = mapped_column(Integer, nullable=False)
+    # #110 auto-sell: best-buy-queue SHARE COUNT below which the bot sells the
+    # held position (chunked, at the floor). NULL = no auto-sell. Set on BUY
+    # instructions via the form; the bot reads it from config.ini.
+    auto_sell_threshold: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     section_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))

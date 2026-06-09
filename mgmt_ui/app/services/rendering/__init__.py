@@ -24,7 +24,7 @@ Design notes
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Optional, Sequence
 from uuid import UUID
 
 
@@ -38,6 +38,9 @@ class CustomerRow:
     broker: str
     isin: str
     side: int  # 1 or 2
+    # #110 auto-sell: best-buy-queue share count below which the bot sells. None
+    # = no auto-sell for this section (the renderer omits the key entirely).
+    auto_sell_threshold: Optional[int] = None
 
 
 @dataclass
