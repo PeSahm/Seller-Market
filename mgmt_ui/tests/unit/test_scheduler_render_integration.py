@@ -144,11 +144,12 @@ def _make_db(customer_rows: list[SimpleNamespace] | None = None) -> MagicMock:
     # they don't consume from this queue.
     db.execute = AsyncMock(
         side_effect=[
-            settings_result,
-            settings_result,
+            settings_result,   # agent_image_tag
+            settings_result,   # ocr_service_url
+            settings_result,   # bot_market_data_url (#110)
             customers_result,
-            autoscale_off,
-            settings_result,
+            autoscale_off,     # enable_locust_autoscale
+            settings_result,   # autobalance_users_multiplier
         ]
     )
     db.get = AsyncMock(return_value=_fake_server())

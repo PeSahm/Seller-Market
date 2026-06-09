@@ -174,8 +174,9 @@ def _make_db(customer_rows: list[SimpleNamespace]) -> MagicMock:
     # multiplier; these don't affect config.ini, only locust).
     db.execute = AsyncMock(
         side_effect=[
-            settings_result,
-            settings_result,
+            settings_result,  # agent_image_tag
+            settings_result,  # ocr_service_url
+            settings_result,  # bot_market_data_url (#110)
             customers_result,
             *ti_results,
             scheduler_result,
