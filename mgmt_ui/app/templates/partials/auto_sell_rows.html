@@ -1,0 +1,32 @@
+{#
+  Active-auto-sell table body (#110). Shared by the admin + agent pages AND
+  returned by the HTMX-polled /…/auto-sell/rows endpoint, so the live buy-queue
+  column refreshes every 3s without a page reload.
+
+  Context: rows = [{customer, broker, isin, threshold, buy_volume, triggered,
+                    fired_today}, ...]
+#}
+{% for r in rows %}
+<tr>
+  <td dir="auto">{{ r.customer }}</td>
+  <td><code class="text-small">{{ r.broker }}</code></td>
+  <td><code class="text-small">{{ r.isin }}</code></td>
+  <td>{{ "{:,}".format(r.threshold) }}</td>
+  <td>
+    {% if r.buy_volume is none %}
+      <span class="text-muted" title="market-data sidecar unavailable">—</span>
+    {% else %}
+      {{ "{:,}".format(r.buy_volume) }}
+    {% endif %}
+  </td>
+  <td>
+    {% if r.fired_today %}
+      <span class="badge badge--up">sold today</span>
+    {% elif r.triggered %}
+      <span class="badge badge--down">triggered (≤ threshold)</span>
+    {% else %}
+      <span class="badge badge--pending">armed</span>
+    {% endif %}
+  </td>
+</tr>
+{% endfor %}

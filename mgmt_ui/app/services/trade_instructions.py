@@ -165,6 +165,29 @@ async def get_trade_instruction(
     return result.scalar_one_or_none()
 
 
+async def list_armed_auto_sell(
+    db: AsyncSession,
+    agent_id: Optional[UUID] = None,
+) -> list[tuple[TradeInstruction, Customer]]:
+    """Return ``(TradeInstruction, Customer)`` pairs armed for auto-sell (#110).
+
+    "Armed" = ``auto_sell_threshold`` is set and ``> 0``. Scoped to ``agent_id``
+    when given (the agent's Active-auto-sell page), else all (admin). Joined to
+    Customer so the page can show the owner + broker + account without a second
+    round-trip.
+    """
+    stmt = (
+        select(TradeInstruction, Customer)
+        .join(Customer, Customer.id == TradeInstruction.customer_id)
+        .where(TradeInstruction.auto_sell_threshold.isnot(None))
+        .where(TradeInstruction.auto_sell_threshold > 0)
+        .order_by(Customer.agent_id, TradeInstruction.isin)
+    )
+    if agent_id is not None:
+        stmt = stmt.where(Customer.agent_id == agent_id)
+    return list((await db.execute(stmt)).all())
+
+
 # ---------------------------------------------------------------------------
 # Create
 # ---------------------------------------------------------------------------

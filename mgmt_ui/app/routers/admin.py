@@ -46,6 +46,7 @@ from app.schemas.settings_page import SettingsUpdate
 from app.security.deps import require_admin
 from app.services import agents as services_agents
 from app.services import audit as services_audit
+from app.services import auto_sell_view as services_auto_sell_view
 from app.services import autobalance as services_autobalance
 from app.services import broker_client
 from app.services import broker_orders as services_broker_orders
@@ -1890,6 +1891,37 @@ async def admin_stacks(
     )
     ctx["selected_agent_id"] = agent_uuid
     return templates.TemplateResponse("admin/stacks.html", ctx)
+
+
+@router.get("/auto-sell")
+async def admin_auto_sell(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Active auto-sell: every armed position + its LIVE buy-queue + fired-today.
+
+    The table body auto-refreshes every 3s (HTMX) against the rows partial below,
+    so the buy-queue column tracks the market without a page reload.
+    """
+    rows = await services_auto_sell_view.build_auto_sell_rows(db, agent_id=None)
+    ctx = _ctx(request, user, current_tab="/admin/auto-sell")
+    ctx["rows"] = rows
+    ctx["rows_url"] = "/admin/auto-sell/rows"
+    return templates.TemplateResponse("admin/auto_sell.html", ctx)
+
+
+@router.get("/auto-sell/rows")
+async def admin_auto_sell_rows(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """HTMX-polled table body for the Active auto-sell page (live queue refresh)."""
+    rows = await services_auto_sell_view.build_auto_sell_rows(db, agent_id=None)
+    ctx = _ctx(request, user, current_tab="/admin/auto-sell")
+    ctx["rows"] = rows
+    return templates.TemplateResponse("partials/auto_sell_rows.html", ctx)
 
 
 @router.get("/stacks/new")

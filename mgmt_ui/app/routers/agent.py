@@ -50,6 +50,7 @@ from app.schemas.locust import LocustUpsert
 from app.schemas.scheduler import SchedulerJobUpsert
 from app.security.deps import get_current_user
 from app.services import agents as services_agents
+from app.services import auto_sell_view as services_auto_sell_view
 from app.services import brokers_admin
 from app.services import customers as services_customers
 from app.services import health_signals as services_health
@@ -306,6 +307,40 @@ async def agent_stacks(
     ctx["stacks"] = stacks
     ctx["servers_by_id"] = servers_by_id
     return templates.TemplateResponse("agent/stacks.html", ctx)
+
+
+@router.get("/auto-sell")
+async def agent_auto_sell(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Active auto-sell for the agent's own armed positions (admin sees all).
+
+    Live buy-queue refreshes every 3s via the rows partial (HTMX poll).
+    """
+    _require_agent_or_admin(user)
+    own_agent_id = None if user.role == "admin" else user.id
+    rows = await services_auto_sell_view.build_auto_sell_rows(db, agent_id=own_agent_id)
+    ctx = _ctx(request, user, current_tab="/agent/auto-sell")
+    ctx["rows"] = rows
+    ctx["rows_url"] = "/agent/auto-sell/rows"
+    return templates.TemplateResponse("agent/auto_sell.html", ctx)
+
+
+@router.get("/auto-sell/rows")
+async def agent_auto_sell_rows(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """HTMX-polled table body for the agent Active auto-sell page."""
+    _require_agent_or_admin(user)
+    own_agent_id = None if user.role == "admin" else user.id
+    rows = await services_auto_sell_view.build_auto_sell_rows(db, agent_id=own_agent_id)
+    ctx = _ctx(request, user, current_tab="/agent/auto-sell")
+    ctx["rows"] = rows
+    return templates.TemplateResponse("partials/auto_sell_rows.html", ctx)
 
 
 @router.get("/history")

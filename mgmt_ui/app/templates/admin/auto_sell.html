@@ -1,0 +1,37 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Active auto-sell{% endblock %}
+
+{% block page_body %}
+<h1 class="h1">Active auto-sell</h1>
+<p class="text-muted text-small">
+  Positions armed to auto-sell when their best-buy queue drops to/below the
+  threshold. The bot sells the whole holding at the day's floor price, split into
+  max-volume chunks. The <strong>buy queue</strong> column is live (refreshes every 3s).
+</p>
+
+{% if not rows %}
+<div class="card">
+  <p class="text-muted">No instruments are armed for auto-sell.</p>
+  <p class="text-small text-muted">
+    Add an <em>“Auto-sell when buy-queue ≤ (shares)”</em> value on a customer's
+    <strong>Buy</strong> trade instruction to arm it.
+  </p>
+</div>
+{% else %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>Customer</th>
+      <th>Broker</th>
+      <th>ISIN</th>
+      <th>Threshold</th>
+      <th>Buy queue (live)</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody hx-get="{{ rows_url }}" hx-trigger="every 3s" hx-swap="innerHTML">
+    {% include "partials/auto_sell_rows.html" %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}
