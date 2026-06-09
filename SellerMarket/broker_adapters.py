@@ -49,6 +49,25 @@ class PreparedOrder:
     volume: int
 
 
+@dataclass
+class SellContext:
+    """Everything ``auto_sell_engine.sell_entire_position`` needs for one (account,
+    isin), built once per auto-sell trigger by ``BrokerAdapter.open_sell_context``.
+
+    Holds the day's FLOOR price + the per-order max volume, plus two ready-bound
+    callables that hide all family specifics:
+
+    * ``fetch_holdings()`` → the customer's CURRENT whole-share holding (LIVE).
+    * ``prepare_chunk(volume)`` → a :class:`PreparedOrder` to SELL ``volume`` at
+      the floor (auth already resolved; exir signer fresh per call).
+    """
+
+    floor_price: int
+    max_order_volume: int                     # per-order cap; 0 = unknown / no cap
+    fetch_holdings: Callable[[], int]
+    prepare_chunk: Callable[[int], "PreparedOrder"]
+
+
 class BrokerAdapter(ABC):
     """Common contract for a broker family.
 
@@ -65,6 +84,19 @@ class BrokerAdapter(ABC):
     @abstractmethod
     def prepare_order(self, *, isin: str, side: int, config_section: dict) -> PreparedOrder:
         ...
+
+    def open_sell_context(self, *, isin: str, config_section: dict) -> "SellContext":
+        """Build a :class:`SellContext` for auto-sell (#110).
+
+        Authenticates once, reads the floor price + per-order max volume, and
+        returns the bound ``fetch_holdings`` / ``prepare_chunk`` callables. May
+        raise on any auth / price / config failure (the monitor logs + holds).
+        Non-abstract so existing/3rd-party adapters keep instantiating; a family
+        without an override simply can't auto-sell.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support auto-sell"
+        )
 
 
 def resolve_family(broker_code: str, config_section: dict) -> str:

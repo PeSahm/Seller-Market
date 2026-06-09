@@ -25,7 +25,7 @@ import json
 import logging
 from typing import Any, Callable, Optional
 
-from broker_adapters import BrokerAdapter, PreparedOrder
+from broker_adapters import BrokerAdapter, PreparedOrder, SellContext
 from broker_enum import BrokerCode, get_endpoints_for
 from api_client import EphoenixAPIClient
 
@@ -176,4 +176,60 @@ class EphoenixAdapter(BrokerAdapter):
             cookies=None,
             price=price,
             volume=volume,
+        )
+
+    def open_sell_context(self, *, isin: str, config_section: dict) -> SellContext:
+        """Auto-sell context (#110): floor = ``min_price``, cap = ``max_volume``.
+
+        Reproduces the SELL branch of :meth:`prepare_order` for an EXPLICIT
+        per-chunk volume. Authenticates ONCE (token reused from ``self.cache``)
+        and reads the instrument band; ``fetch_holdings`` re-reads LIVE each call
+        so a partial fill re-sizes; ``prepare_chunk(volume)`` builds the
+        byte-identical NewOrder payload (side=2, price=min_price) per chunk.
+        """
+        endpoints = get_endpoints_for(self.broker_code)
+        api_client = EphoenixAPIClient(
+            broker_code=self.broker_code,
+            username=self.username,
+            password=self.password,
+            captcha_decoder=self.captcha_decoder,
+            endpoints=endpoints,
+            cache=self.cache,
+        )
+        token = api_client.authenticate()
+        info = api_client.get_instrument_info(isin)
+        floor = int(info['min_price'])
+        cap = int(info['max_volume'])
+        if floor <= 0:
+            raise ValueError(f"no min_price (floor) for {isin} ({self.username}@{self.broker_code})")
+
+        def fetch_holdings() -> int:
+            return int(api_client.get_holdings(isin, use_cache=False) or 0)
+
+        def prepare_chunk(volume: int) -> PreparedOrder:
+            body = json.dumps({
+                'isin': isin,
+                'side': 2,
+                'validity': 1,
+                'accountType': 1,
+                'price': floor,
+                'volume': int(volume),
+                'validityDate': None,
+                'serialNumber': 0,
+            })
+            return PreparedOrder(
+                order_url=endpoints['order'],
+                body=body,
+                bearer_token=token,
+                signer=None,
+                cookies=None,
+                price=floor,
+                volume=int(volume),
+            )
+
+        return SellContext(
+            floor_price=floor,
+            max_order_volume=cap,
+            fetch_holdings=fetch_holdings,
+            prepare_chunk=prepare_chunk,
         )
