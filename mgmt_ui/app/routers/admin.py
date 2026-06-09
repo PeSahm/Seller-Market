@@ -80,6 +80,35 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin-ui"], include_in_schema=False)
 
 
+def _parse_optional_uuid(value: Optional[str]) -> Optional[UUID]:
+    """Lenient UUID parse for an optional query/form field.
+
+    The stacks agent-filter ``<select>`` submits ``agent_id=`` (empty string)
+    for its "All agents" option, and a typed ``Optional[UUID]`` param would
+    422 on that. Empty / malformed → ``None`` (treated as "no filter").
+    """
+    if not value:
+        return None
+    try:
+        return UUID(value)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _stacks_bulk_location(base: str, *, agent_id=None, **params) -> str:
+    """Build a stacks-list redirect URL carrying a bulk-action result summary.
+
+    Every value is an int or a short known token (``fk`` / ``run`` /
+    ``cache_warmup`` / ``run_trading`` / a UUID), so no percent-encoding is
+    needed — and the list template re-escapes everything via Jinja autoescape
+    when it renders the result banner. ``None`` params are dropped.
+    """
+    parts = [f"{k}={v}" for k, v in params.items() if v is not None]
+    if agent_id is not None:
+        parts.append(f"agent_id={agent_id}")
+    return base + ("?" + "&".join(parts) if parts else "")
+
+
 def _render(request: Request, user: User, template_name: str, current_tab: str):
     return templates.TemplateResponse(
         template_name, _ctx(request, user, current_tab=current_tab)
@@ -1793,6 +1822,7 @@ async def admin_stacks(
     request: Request,
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
+    agent_id: Optional[str] = None,
 ):
     """List all agent stacks across all servers.
 
@@ -1800,14 +1830,33 @@ async def admin_stacks(
     human labels without lazy-loading per row. Soft-deleted agents are
     included on purpose: a stack outlives its owner until Phase 9 cleanup, and
     we still want to show *which* (now-deleted) agent it belongs to.
+
+    ``agent_id`` (optional query param) filters the list to one agent. The
+    bulk "Run all" / "Force kill all" actions then operate on exactly the
+    filtered set — so an admin can, e.g., force-kill every stack belonging to
+    one agent without touching anyone else's. Parsed leniently because the
+    filter dropdown submits ``agent_id=`` (empty) for "All agents".
     """
-    stacks = await services_stacks.list_stacks(db)
+    agent_uuid = _parse_optional_uuid(agent_id)
+    all_stacks = await services_stacks.list_stacks(db)
+    stacks = (
+        [s for s in all_stacks if s.agent_id == agent_uuid]
+        if agent_uuid is not None
+        else all_stacks
+    )
     servers = {s.id: s for s in await services_servers.list_servers(db)}
-    agents = {a.id: a for a in await services_agents.list_agents(db, include_deleted=True)}
+    agent_rows = await services_agents.list_agents(db, include_deleted=True)
+    agents = {a.id: a for a in agent_rows}
     ctx = _ctx(request, user, current_tab="/admin/stacks")
     ctx["stacks"] = stacks
     ctx["servers_by_id"] = servers
     ctx["agents_by_id"] = agents
+    # Sorted agent list for the filter dropdown (live agents first, then
+    # soft-deleted) and the currently-selected filter.
+    ctx["agents"] = sorted(
+        agent_rows, key=lambda a: (a.deleted_at is not None, a.username.lower())
+    )
+    ctx["selected_agent_id"] = agent_uuid
     return templates.TemplateResponse("admin/stacks.html", ctx)
 
 
@@ -1949,6 +1998,122 @@ async def admin_stack_redeploy(
     ctx["result"] = result
     return templates.TemplateResponse(
         "admin/partials/stack_action_result.html", ctx
+    )
+
+
+@router.post("/stacks/{stack_id}/force-kill")
+async def admin_stack_force_kill(
+    stack_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Force-stop a stack's container (``docker compose stop -t 0``).
+
+    Immediate SIGKILL, scoped to this stack's compose project only — other
+    agents' bots on the same host are untouched. The row is flipped to
+    ``down``. Reversible via Redeploy. Returns the action partial so HTMX can
+    swap it into ``#stack-action-result`` (same UX as Redeploy).
+    """
+    try:
+        result = await services_stacks.force_stop_stack(
+            db, stack_id, actor_id=user.id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="stack not found") from exc
+    except RuntimeError as exc:
+        # Per-server compose lock busy — a deploy is in flight on this host.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SSHError as exc:
+        # Host unreachable: the service left the row unchanged. Surface why.
+        from app.schemas.stack import StackActionResult
+        result = StackActionResult(
+            ok=False,
+            stack_id=stack_id,
+            status="down",
+            message=f"force-kill failed: {exc}",
+            log_tail=str(exc),
+        )
+    ctx = _ctx(request, user, current_tab="/admin/stacks")
+    ctx["result"] = result
+    return templates.TemplateResponse(
+        "admin/partials/stack_action_result.html", ctx
+    )
+
+
+@router.post("/stacks/force-kill-all")
+async def admin_stacks_force_kill_all(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    agent_id: Optional[str] = Form(None),
+):
+    """Force-stop every stack (optionally scoped to one agent).
+
+    With ``agent_id`` set, only that agent's stacks are killed — this is how
+    an admin force-kills, e.g., every stack belonging to one agent. Best-effort
+    per stack (one unreachable host can't block the rest); redirects back to
+    the (filtered) list with a result summary.
+    """
+    agent_uuid = _parse_optional_uuid(agent_id)
+    all_stacks = await services_stacks.list_stacks(db)
+    targets = (
+        [s for s in all_stacks if s.agent_id == agent_uuid]
+        if agent_uuid is not None
+        else all_stacks
+    )
+    results = await services_stacks.force_stop_stacks(
+        db, [s.id for s in targets], actor_id=user.id
+    )
+    ok = sum(1 for r in results if r.ok)
+    fail = len(results) - ok
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER,
+        headers={
+            "Location": _stacks_bulk_location(
+                "/admin/stacks", agent_id=agent_uuid, bulk="fk", ok=ok, fail=fail
+            )
+        },
+    )
+
+
+@router.post("/stacks/run-all")
+async def admin_stacks_run_all(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    job_name: str = Form(...),
+    agent_id: Optional[str] = Form(None),
+):
+    """Fire a manual run (``cache_warmup`` | ``run_trading``) on every stack.
+
+    Optionally scoped to one agent via ``agent_id``. A stack that already has
+    a run in flight is skipped (its per-stack lock is busy), not failed.
+    Redirects back to the (filtered) list with a started/skipped/failed
+    summary. The admin runs ON BEHALF OF each stack's owning agent.
+    """
+    if job_name not in ("cache_warmup", "run_trading"):
+        raise HTTPException(
+            status_code=400, detail=f"unknown job_name: {job_name}"
+        )
+    agent_uuid = _parse_optional_uuid(agent_id)
+    all_stacks = await services_stacks.list_stacks(db)
+    targets = (
+        [s for s in all_stacks if s.agent_id == agent_uuid]
+        if agent_uuid is not None
+        else all_stacks
+    )
+    started, skipped, failed = await run_executor.run_all_stacks(
+        targets, job_name=job_name, actor_id=user.id
+    )
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER,
+        headers={
+            "Location": _stacks_bulk_location(
+                "/admin/stacks", agent_id=agent_uuid, bulk="run",
+                job=job_name, ok=started, skip=skipped, fail=failed,
+            )
+        },
     )
 
 

@@ -1,0 +1,29 @@
+{#
+  Bulk-action result banner for the stacks list (admin + agent).
+
+  Rendered from the ``?bulk=...&ok=..&skip=..&fail=..&job=..`` query params set
+  by the "Run all" / "Force kill all" redirects (see ``_stacks_bulk_location``
+  in the routers). Pure read of ``request.query_params``; every value is
+  Jinja-autoescaped, and the numeric comparisons use ``|int`` (non-numeric →
+  0) so a hand-edited URL can't break the page or inject markup.
+
+  Requires ``request`` in the template context (always present via ``_ctx``).
+#}
+{% set _bulk = request.query_params.get('bulk') %}
+{% if _bulk == 'fk' %}
+  {% set _ok = request.query_params.get('ok', '0') %}
+  {% set _fail = request.query_params.get('fail', '0') %}
+  <div class="flash {% if _fail|int > 0 %}flash--error{% else %}flash--success{% endif %}">
+    <strong>Force kill all:</strong>
+    {{ _ok }} stack(s) force-stopped{% if _fail|int > 0 %}, {{ _fail }} failed (see the stack's page for the error){% endif %}.
+  </div>
+{% elif _bulk == 'run' %}
+  {% set _ok = request.query_params.get('ok', '0') %}
+  {% set _skip = request.query_params.get('skip', '0') %}
+  {% set _fail = request.query_params.get('fail', '0') %}
+  {% set _job = request.query_params.get('job', '') %}
+  <div class="flash {% if _fail|int > 0 %}flash--error{% else %}flash--success{% endif %}">
+    <strong>Run all{% if _job %} ({{ _job }}){% endif %}:</strong>
+    {{ _ok }} started{% if _skip|int > 0 %}, {{ _skip }} skipped (a run was already in flight){% endif %}{% if _fail|int > 0 %}, {{ _fail }} failed{% endif %}.
+  </div>
+{% endif %}

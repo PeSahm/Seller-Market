@@ -89,6 +89,30 @@ def _require_agent_or_admin(user: User) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
 
 
+def _stacks_bulk_location(base: str, **params) -> str:
+    """Build a stacks-list redirect URL carrying a bulk-action result summary.
+
+    Mirrors the admin helper: every value is an int or a short known token
+    (``fk`` / ``run`` / ``cache_warmup`` / ``run_trading``), so no
+    percent-encoding is needed; the list template re-escapes via Jinja
+    autoescape. ``None`` params are dropped.
+    """
+    parts = [f"{k}={v}" for k, v in params.items() if v is not None]
+    return base + ("?" + "&".join(parts) if parts else "")
+
+
+async def _stacks_visible_to(db: AsyncSession, user: User) -> list:
+    """The stacks the caller may act on in bulk: an agent's own, or all (admin).
+
+    Matches exactly what :func:`agent_stacks` renders, so "Run all" /
+    "Force kill all" operate on the set the user sees — never more.
+    """
+    all_stacks = await services_stacks.list_stacks(db)
+    if user.role == "agent":
+        return [s for s in all_stacks if s.agent_id == user.id]
+    return all_stacks
+
+
 def _can_access_customer(user: User, customer: Customer) -> bool:
     """Admin can act as any agent; an agent may only see/edit their own row.
 
@@ -1608,6 +1632,110 @@ async def agent_stack_redeploy(
     # bits leaked into it.
     return templates.TemplateResponse(
         "admin/partials/stack_action_result.html", ctx
+    )
+
+
+@router.post("/stacks/{stack_id}/force-kill")
+async def agent_stack_force_kill(
+    stack_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Force-stop the agent's own stack (``docker compose stop -t 0``).
+
+    Immediate SIGKILL, scoped to this stack's compose project only. The row
+    is flipped to ``down``; reversible via Redeploy. Tenant-guarded: 404 (not
+    403) if this isn't the agent's own stack. Returns the action partial so
+    HTMX can swap it into ``#stack-action-result`` (same UX as Redeploy).
+    """
+    _require_agent_or_admin(user)
+    stack = await _load_stack_for_agent(db, user, stack_id)
+    try:
+        result = await services_stacks.force_stop_stack(
+            db, stack.id, actor_id=user.id
+        )
+    except RuntimeError as exc:
+        from app.schemas.stack import StackActionResult
+        result = StackActionResult(
+            ok=False,
+            stack_id=stack.id,
+            status=stack.status,
+            message=str(exc),
+            log_tail="",
+        )
+    except SSHError as exc:
+        from app.schemas.stack import StackActionResult
+        result = StackActionResult(
+            ok=False,
+            stack_id=stack.id,
+            status="down",
+            message=f"force-kill failed: {exc}",
+            log_tail=str(exc),
+        )
+    ctx = _ctx(request, user, current_tab="/agent/stacks")
+    ctx["result"] = result
+    return templates.TemplateResponse(
+        "admin/partials/stack_action_result.html", ctx
+    )
+
+
+@router.post("/stacks/force-kill-all")
+async def agent_stacks_force_kill_all(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Force-stop all of the caller's stacks (agent: own; admin: all).
+
+    Best-effort per stack; redirects back to the list with a result summary.
+    """
+    _require_agent_or_admin(user)
+    targets = await _stacks_visible_to(db, user)
+    results = await services_stacks.force_stop_stacks(
+        db, [s.id for s in targets], actor_id=user.id
+    )
+    ok = sum(1 for r in results if r.ok)
+    fail = len(results) - ok
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER,
+        headers={
+            "Location": _stacks_bulk_location(
+                "/agent/stacks", bulk="fk", ok=ok, fail=fail
+            )
+        },
+    )
+
+
+@router.post("/stacks/run-all")
+async def agent_stacks_run_all(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    job_name: str = Form(...),
+):
+    """Fire a manual run on all of the caller's stacks (agent: own; admin: all).
+
+    A stack with a run already in flight is skipped (not failed). Redirects
+    back to the list with a started/skipped/failed summary.
+    """
+    _require_agent_or_admin(user)
+    if job_name not in ("cache_warmup", "run_trading"):
+        raise HTTPException(
+            status_code=400, detail=f"unknown job_name: {job_name}"
+        )
+    targets = await _stacks_visible_to(db, user)
+    started, skipped, failed = await run_executor.run_all_stacks(
+        targets, job_name=job_name, actor_id=user.id
+    )
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER,
+        headers={
+            "Location": _stacks_bulk_location(
+                "/agent/stacks", bulk="run",
+                job=job_name, ok=started, skip=skipped, fail=failed,
+            )
+        },
     )
 
 

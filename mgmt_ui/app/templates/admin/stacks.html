@@ -7,11 +7,30 @@
   <a class="btn btn--primary" href="/admin/stacks/new">+ Provision stack</a>
 </div>
 
+{% include "partials/stacks_bulk_banner.html" %}
+
 <p class="text-muted text-small">
   A stack is one agent's Docker deployment on one trading server, isolated under
   <code>&lt;server.base_dir&gt;/&lt;agent_id&gt;/</code>. The existing root-level
   <code>/root/seller-market/</code> is left untouched.
 </p>
+
+{# Filter by agent so the bulk actions below act on exactly one agent's
+   stacks (e.g. "force kill all of hamid's"). Auto-submits on change; the
+   noscript button keeps it usable without JS. #}
+<form method="get" action="/admin/stacks"
+      style="display:flex; gap:8px; align-items:center; margin: 4px 0 10px;">
+  <label class="text-small text-muted" for="agent-filter">Agent</label>
+  <select id="agent-filter" name="agent_id" onchange="this.form.submit()">
+    <option value="">All agents</option>
+    {% for a in agents %}
+    <option value="{{ a.id }}" {% if selected_agent_id and a.id == selected_agent_id %}selected{% endif %}>
+      {{ a.username }}{% if a.deleted_at %} (deleted){% endif %}
+    </option>
+    {% endfor %}
+  </select>
+  <noscript><button class="btn btn--ghost btn--sm" type="submit">Filter</button></noscript>
+</form>
 
 {% if not stacks %}
 <div class="card">
@@ -21,6 +40,41 @@
   </p>
 </div>
 {% else %}
+{# Bulk actions over exactly the rows shown (the current agent filter). Each
+   form re-passes the selected agent_id so the action scopes to the filtered
+   set, and confirm() names the count + that orders are real. #}
+<div class="run-now-strip"
+     style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin: 0 0 12px;">
+  <span class="text-small text-muted">
+    Bulk actions for {{ stacks|length }} stack(s)
+    {%- if selected_agent_id and agents_by_id.get(selected_agent_id) %} of
+      <strong dir="auto">{{ agents_by_id.get(selected_agent_id).username }}</strong>
+    {%- else %} (all agents){% endif -%}:
+  </span>
+  <form method="post" action="/admin/stacks/run-all"
+        onsubmit="return confirm('Run cache_warmup on ALL {{ stacks|length }} listed stack(s)?');"
+        style="display:inline; margin:0;">
+    {% include "partials/csrf.html" %}
+    <input type="hidden" name="job_name" value="cache_warmup">
+    {% if selected_agent_id %}<input type="hidden" name="agent_id" value="{{ selected_agent_id }}">{% endif %}
+    <button type="submit" class="btn btn--primary btn--sm">Run warmup — all</button>
+  </form>
+  <form method="post" action="/admin/stacks/run-all"
+        onsubmit="return confirm('Run TRADING on ALL {{ stacks|length }} listed stack(s)? This places REAL orders.');"
+        style="display:inline; margin:0;">
+    {% include "partials/csrf.html" %}
+    <input type="hidden" name="job_name" value="run_trading">
+    {% if selected_agent_id %}<input type="hidden" name="agent_id" value="{{ selected_agent_id }}">{% endif %}
+    <button type="submit" class="btn btn--danger btn--sm">Run trading — all</button>
+  </form>
+  <form method="post" action="/admin/stacks/force-kill-all"
+        onsubmit="return confirm('FORCE KILL all {{ stacks|length }} listed stack(s)? Bot containers are stopped immediately (SIGKILL). Reversible with Redeploy.');"
+        style="display:inline; margin:0;">
+    {% include "partials/csrf.html" %}
+    {% if selected_agent_id %}<input type="hidden" name="agent_id" value="{{ selected_agent_id }}">{% endif %}
+    <button type="submit" class="btn btn--danger btn--sm">Force kill — all</button>
+  </form>
+</div>
 <table class="table">
   <thead>
     <tr>

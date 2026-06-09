@@ -30,6 +30,15 @@
       {% include "partials/csrf.html" %}
       <button type="submit" class="btn btn--primary btn--sm">Redeploy</button>
     </form>
+    <form method="post" action="/agent/stacks/{{ stack.id }}/force-kill"
+          hx-post="/agent/stacks/{{ stack.id }}/force-kill"
+          hx-target="#stack-action-result"
+          hx-swap="innerHTML"
+          onsubmit="return confirm('Force-kill this stack? The bot container is stopped immediately (SIGKILL). Reversible with Redeploy.');"
+          style="display: inline;">
+      {% include "partials/csrf.html" %}
+      <button type="submit" class="btn btn--danger btn--sm">Force kill</button>
+    </form>
   </div>
 </div>
 
