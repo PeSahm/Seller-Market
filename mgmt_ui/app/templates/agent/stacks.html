@@ -10,6 +10,8 @@
   your admin.
 </p>
 
+{% include "partials/stacks_bulk_banner.html" %}
+
 {% if not stacks %}
 <div class="card">
   <p class="text-muted">No stacks yet.</p>
@@ -19,6 +21,32 @@
   </p>
 </div>
 {% else %}
+{# Bulk actions over all of your stacks. confirm() names the count and warns
+   that trading places real orders. Force-kill is reversible via Redeploy. #}
+<div class="run-now-strip"
+     style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin: 0 0 12px;">
+  <span class="text-small text-muted">Bulk actions for {{ stacks|length }} stack(s):</span>
+  <form method="post" action="/agent/stacks/run-all"
+        onsubmit="return confirm('Run cache_warmup on ALL {{ stacks|length }} of your stacks?');"
+        style="display:inline; margin:0;">
+    {% include "partials/csrf.html" %}
+    <input type="hidden" name="job_name" value="cache_warmup">
+    <button type="submit" class="btn btn--primary btn--sm">Run warmup — all</button>
+  </form>
+  <form method="post" action="/agent/stacks/run-all"
+        onsubmit="return confirm('Run TRADING on ALL {{ stacks|length }} of your stacks? This places REAL orders.');"
+        style="display:inline; margin:0;">
+    {% include "partials/csrf.html" %}
+    <input type="hidden" name="job_name" value="run_trading">
+    <button type="submit" class="btn btn--danger btn--sm">Run trading — all</button>
+  </form>
+  <form method="post" action="/agent/stacks/force-kill-all"
+        onsubmit="return confirm('FORCE KILL all {{ stacks|length }} of your stacks? Bot containers stop immediately (SIGKILL). Reversible with Redeploy.');"
+        style="display:inline; margin:0;">
+    {% include "partials/csrf.html" %}
+    <button type="submit" class="btn btn--danger btn--sm">Force kill — all</button>
+  </form>
+</div>
 <table class="table">
   <thead><tr>
     <th>Server</th>

@@ -271,6 +271,46 @@ async def start_manual_run(
     return run
 
 
+async def run_all_stacks(
+    stacks,
+    *,
+    job_name: str,
+    actor_id: Optional[UUID],
+) -> tuple[int, int, int]:
+    """Fire a manual run on many stacks — backs the "Run all" bulk action.
+
+    Returns ``(started, skipped, failed)``:
+
+    * **started** — a run was created (its executor task is now in flight).
+    * **skipped** — the stack already had a run in flight (its per-stack lock
+      was busy); we leave that run alone rather than failing the bulk action.
+    * **failed** — an unexpected error (logged); doesn't abort the loop, so
+      one bad stack can't block runs on the rest.
+
+    Each :func:`start_manual_run` opens its own sessions and spawns its own
+    fire-and-forget executor task, so we don't thread a shared ``db`` through
+    here — we only need the stack rows for their ``id`` / ``agent_id``.
+    """
+    started = skipped = failed = 0
+    for stack in stacks:
+        try:
+            await start_manual_run(
+                stack_id=stack.id,
+                agent_id=stack.agent_id,
+                job_name=job_name,
+                actor_id=actor_id,
+            )
+            started += 1
+        except run_locks.StackRunLockBusyError:
+            skipped += 1
+        except Exception:  # noqa: BLE001 — one bad stack can't abort the bulk
+            logger.exception(
+                "run_all: start_manual_run failed for stack=%s", stack.id
+            )
+            failed += 1
+    return started, skipped, failed
+
+
 def terminate_run(run_id: UUID) -> bool:
     """Request cancellation of the executor task for a running run.
 

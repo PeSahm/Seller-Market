@@ -793,6 +793,41 @@ async def _compose_down(
     return result.ok, log_tail
 
 
+async def _compose_stop(
+    server: Server, stack: AgentStack
+) -> tuple[bool, str]:
+    """Run ``docker compose stop -t 0`` for the stack — a *force* stop.
+
+    ``-t 0`` gives the container zero grace before SIGKILL, so this is an
+    immediate hard stop (the container exits 137 / SIGKILL), versus the
+    graceful 10-second SIGTERM of a bare ``stop``. Unlike :func:`_compose_down`
+    we keep the container and the stack files in place, so the stack can be
+    brought straight back up with redeploy / run-now.
+
+    A container stopped this way is NOT resurrected by its
+    ``restart: unless-stopped`` policy — Docker treats a manual stop as
+    "leave it down until something explicitly starts it again" (the policy
+    only fires on a crash / daemon restart, not after an operator stop). The
+    stop is scoped to THIS stack's compose project (``-p``), so a sibling
+    stack on the same host — e.g. a different agent's bot — is untouched.
+
+    We pass ``-f <stack_dir>/docker-compose.yml`` for the same CWD-independence
+    reason as :func:`_compose_down`, and ``check=False`` so a non-zero exit
+    (e.g. "no such service" on an already-removed stack) surfaces in the log
+    tail rather than raising an opaque exception.
+    """
+    run_command = _import_ssh_commands()
+    cmd = (
+        f"docker compose -p {_shell_quote(stack.compose_project)} "
+        f"-f {_shell_quote(stack.stack_dir + '/docker-compose.yml')} "
+        f"stop -t 0"
+    )
+    # 60s is plenty: -t 0 SIGKILLs immediately, no graceful drain.
+    result = await run_command(server, cmd, timeout=60.0, check=False)
+    log_tail = _tail_log(result.stdout, result.stderr)
+    return result.ok, log_tail
+
+
 async def _prepare_remote_dirs(
     server: Server, stack: AgentStack
 ) -> None:
@@ -966,6 +1001,127 @@ async def _do_compose_action(
                 logger.exception(
                     "failed to release advisory lock key=%s", lock_key
                 )
+
+
+async def force_stop_stack(
+    db: AsyncSession,
+    stack_id: UUID,
+    *,
+    actor_id: Optional[UUID],
+) -> StackActionResult:
+    """Force-stop a single stack's container(s) and mark the row ``down``.
+
+    Operator-facing "force kill": ``docker compose stop -t 0`` (immediate
+    SIGKILL — see :func:`_compose_stop`), scoped to THIS stack's compose
+    project only, so a different agent's bot on the same host is untouched.
+    The DB row is flipped to ``down`` and a ``stack.force_kill`` audit row is
+    written, so the dashboard reflects reality immediately rather than waiting
+    for the stack-health worker's next poll to discover the container is gone.
+
+    Reversible: a redeploy or run-now brings the stack back up (the container
+    and the on-disk stack files are left in place).
+
+    Serialised on the same per-server advisory lock as provision / redeploy /
+    deprovision, so a force-kill can't race a deploy on the same host. Raises
+    ``RuntimeError`` if that lock is busy (the caller surfaces a "retry"), and
+    propagates ``SSHError`` if the host is unreachable — in which case the row
+    is left unchanged (we never claim "down" when we couldn't reach the host).
+    """
+    stack = await get_stack(db, stack_id)
+    if stack is None:
+        raise LookupError(f"stack {stack_id} not found")
+
+    lock_key = _compose_lock_key(stack.server_id)
+    async with AsyncSessionLocal() as lock_session:
+        if not await try_acquire_session_lock(lock_session, lock_key):
+            raise RuntimeError(
+                "another compose op is in flight for this server, retry"
+            )
+        try:
+            server = await db.get(Server, stack.server_id)
+            if server is None:
+                raise LookupError(
+                    f"server {stack.server_id} for stack "
+                    f"{stack.id} is missing"
+                )
+
+            before = _public_snapshot(stack)
+            # SSHError here propagates out (host unreachable) BEFORE we touch
+            # the row — so a force-kill we couldn't deliver doesn't lie about
+            # the status.
+            ok, log_tail = await _compose_stop(server, stack)
+
+            # The intent is "down" regardless of the compose exit code: if the
+            # container was already gone, ``stop`` is a harmless no-op and we
+            # still want the row to read down.
+            stack.status = "down"
+            await _write_audit(
+                db,
+                actor_id=actor_id,
+                action="stack.force_kill",
+                target_id=stack.id,
+                before=before,
+                after=_public_snapshot(stack),
+            )
+            await db.commit()
+            await db.refresh(stack)
+
+            message = (
+                "stack force-stopped"
+                if ok
+                else "compose stop returned non-zero exit (row marked down)"
+            )
+            return StackActionResult(
+                ok=ok,
+                stack_id=stack.id,
+                status=stack.status,
+                message=message,
+                log_tail=log_tail,
+            )
+        finally:
+            try:
+                await release_session_lock(lock_session, lock_key)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                logger.exception(
+                    "failed to release advisory lock key=%s", lock_key
+                )
+
+
+async def force_stop_stacks(
+    db: AsyncSession,
+    stack_ids: list[UUID],
+    *,
+    actor_id: Optional[UUID],
+) -> list[StackActionResult]:
+    """Force-stop several stacks, best-effort — backs the "force kill all".
+
+    Each stack is stopped independently: a lock-busy / SSH / lookup failure on
+    one stack is captured as a failed :class:`StackActionResult` and the loop
+    continues, so one unreachable host can't block killing the rest. Stacks
+    are handled sequentially — the per-server advisory lock already serialises
+    same-host work and a bulk force-kill is rare + not latency-sensitive.
+    """
+    results: list[StackActionResult] = []
+    for sid in stack_ids:
+        try:
+            results.append(
+                await force_stop_stack(db, sid, actor_id=actor_id)
+            )
+        except (RuntimeError, SSHError, LookupError) as exc:
+            # Reset the shared session so a half-finished attempt can't leave
+            # it in a failed-transaction state and poison the next stack's
+            # commit.
+            await db.rollback()
+            results.append(
+                StackActionResult(
+                    ok=False,
+                    stack_id=sid,
+                    status="down",
+                    message=f"force-kill failed: {exc}",
+                    log_tail=str(exc),
+                )
+            )
+    return results
 
 
 async def _maybe_reconcile_agent(

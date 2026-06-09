@@ -23,6 +23,16 @@
             hx-indicator="#stack-action-spinner">
       Redeploy
     </button>
+    <form method="post" action="/admin/stacks/{{ stack.id }}/force-kill"
+          hx-post="/admin/stacks/{{ stack.id }}/force-kill"
+          hx-target="#stack-action-result"
+          hx-swap="innerHTML"
+          hx-indicator="#stack-action-spinner"
+          onsubmit="return confirm('Force-kill this stack? The bot container is stopped immediately (SIGKILL). Reversible with Redeploy.');"
+          style="display: inline;">
+      {% include "partials/csrf.html" %}
+      <button class="btn btn--danger btn--sm" type="submit">Force kill</button>
+    </form>
     <form method="post" action="/admin/stacks/{{ stack.id }}/deprovision"
           onsubmit="return confirm('Tear down this stack? Container will stop, files removed.');">
       {% include "partials/csrf.html" %}
