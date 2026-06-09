@@ -30,6 +30,11 @@ class SettingsUpdate(BaseModel):
     # cap (default 4) is whatever the admin sets; the service layer
     # rejects per-stack values exceeding it.
     agent_locust_processes_cap: int = Field(default=4, ge=1, le=32)
+    # Auto-sell (#110): URL the BOT stacks use to reach the shared market-data WS
+    # service (e.g. "http://5.10.248.55:8077"). EMPTY = auto-sell OFF fleet-wide
+    # (stacks keep the scheduler-only command). Setting it flips each stack to
+    # bot_entrypoint.py + MARKET_DATA_URL on the next Redeploy.
+    bot_market_data_url: str = Field(default="", max_length=512)
 
     @field_validator("ocr_service_url")
     @classmethod
@@ -40,6 +45,20 @@ class SettingsUpdate(BaseModel):
             raise ValueError("ocr_service_url must be http:// or https://")
         if not parsed.netloc:
             raise ValueError("ocr_service_url is missing host")
+        return v
+
+    @field_validator("bot_market_data_url")
+    @classmethod
+    def _check_bot_market_data_url(cls, v: str) -> str:
+        # Empty is valid and means "auto-sell off fleet-wide".
+        v = v.strip()
+        if not v:
+            return ""
+        parsed = urlparse(v)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("bot_market_data_url must be http:// or https:// (or empty)")
+        if not parsed.netloc:
+            raise ValueError("bot_market_data_url is missing host")
         return v
 
     @field_validator("agent_image_tag")
