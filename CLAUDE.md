@@ -822,3 +822,65 @@ Feature: an **armed Buy** instruction whose instrument's **best-buy-queue ≤ th
 | — | **Operator-run auto-sell canary** | Infra is live on all 3 Mostafa stacks (scheduler-only). Operator arms a held instrument + threshold and watches the open. Confirm the chunked floor-SELL + side=2 fire-log + `/admin/bot-report`. |
 | — | **Roll auto-sell to the rest of the fleet** | `bot_market_data_url` is fleet-wide; each non-Mostafa stack activates on its **next redeploy** — but FIRST stage the `36e4dd4` bot image on its host (PouyanIt+Tebyan+server4 done; **ParsPack 45.139.10.192 + any hamid hosts still on the old image**). |
 | — | Document `server4`'s provisioning state | It works (docker + compose + staged image + mgmt key), but its egress/mirror/NTP setup wasn't audited this session — confirm it matches the S10 runbook if it ever needs a fresh image by mirror. |
+
+---
+
+## Session 13 — auto-sell-only instructions (#140) + the bl1 WS fix + FLEET-WIDE deploy (14 stacks / 6 hosts)
+
+Two deliverables merged as ONE squash (**PR #140**, `576a35d`): the **auto-sell-only** feature ("I already hold shares — arm auto-sell without a Buy") and the **rlc_ws bl1 fix** discovered live during the operator's first armed watch. Everything deployed fleet-wide the same day.
+
+### The operator's live test exposed two breaks (morning, market open)
+Operator armed `IRT3SORF0001` threshold 7,000,000 on 2 accounts (ayandeh@PouyanIt + karamad@server4) and asked "check everything is as expected". It was NOT:
+1. **Monitors were idle** — `bot_entrypoint`/`auto_sell_monitor` read config.ini ONCE at container start; the operator armed AFTER the previous night's deploy. config.ini on disk had the threshold (TI save pushes config), but the running monitor had `armed 0`. **Arming/changing a threshold requires a stack Redeploy.**
+2. **The sidecar could never deliver a queue value — the MW frame's buy queue is NOT a flat CSV field.** A live probe (subscribe + dump raw frames) showed the depth rides in semicolon-packed blobs appended to the MW frame: `bl1;<buyVol>;<buyPrice>;<buyCount>;<buyTime>;<sellVol>;<sellPrice>;<sellCount>;<sellTime>` (bl2/bl3 = deeper levels). Triple-field match vs REST (vol 31,706,729 / price 21277 / count 117 == bbq/bbp/nbb). The flat-field self-calibration could NEVER bind → no update would EVER flow → auto-sell would never fire. **Invisible at the 2 AM market-closed test** (calibration "waits" by design when bbq=0).
+3. Also: **idle WS sockets are NORMAL** (server pushes only on order-book CHANGES; a quiet instrument = minutes between frames). The old 40s recv-timeout→reconnect loop burned the **single-use-per-host `rlcAuthHeader`** ("401 token already has been used") → a captcha→login every ~80s.
+
+**Fixes (`rlc_ws.py`, hot-patched into the running sidecar mid-session with operator approval, then properly shipped in #140):** `extract_buy_queue` parses `bl1` explicitly (missing/malformed → None → HOLD; `bl1;0;…` → 0 = legitimately-empty queue = the thinned condition); recv-timeout → `ws.ping()` + continue (never tear down); `_ensure_auth` hands out the NEXT push host per connection (multi-ISIN threads spread across push103/push3/push101 — the token is single-use PER HOST). Test fixture = the verbatim captured live frame.
+- **Live-patch pattern (approved, works):** `docker cp patched.py container:/app/x.py && docker restart container` — survives restarts, superseded on the next compose recreate by the proper image.
+- Day's watch outcome: queue melted 31.7M → 17.5M at close — never crossed 7M → correctly NO fire (HOLD throughout). The watch re-arms daily (DayState midnight rotation) as long as the threshold stays in config.
+
+### The feature (#140) — auto-sell-only ("watch-only") instructions
+- **`trade_instructions.auto_sell_only`** boolean (migration `0013_ti_auto_sell_only`). Row stays `side=1 + threshold>0` → `load_auto_sell_targets` arms it UNCHANGED. Renderer emits `auto_sell_only = true` in the section.
+- **Bot skips flagged sections everywhere orders could fire**: `locustfile_new._create_user_classes` (eligible-list filter used for BOTH the class loop AND `fixed_count` — else per-section users get diluted), both `on_test_stop` loops (GetOpenOrders summary + Telegram glob), `cache_warmup` main loop. ALL sections watch-only ⇒ `exit(0)` (green marker). Helper `broker_adapters.is_auto_sell_only()` (truthy {"1","true","yes","on"}).
+- **Form UX**: THIRD Side radio "Auto-sell only" → posts `side=3` → `schemas.map_side_form(raw) -> (side, auto_sell_only)`; Pydantic `Side` stays `Literal[1,2]`; sticky re-render keeps raw "3"; edit GET preselects. Threshold `required` for side 3. **Holdings preview**: selecting Auto-sell only live-fetches the account's holding of the typed ISIN (debounced 500ms, side-3-only) via new family-routed `broker_client.get_holdings` (ephoenix portfolio endpoint / `ExirAdapter.get_holdings` portfoReport; keyword-only `ocr_service_url` param) exposed at `GET /admin|/agent/customers/{id}/holdings` — agent ownership-scoped, NEVER 500s, blank-ISIN returns the hint without an exception log.
+- **Validation**: flag ⇒ side=1 AND threshold>0 — create (schema validator) + update (**effective state computed + validated BEFORE the setattr loop** — raising after mutation leaves the session dirty and the router error path's `db.refresh(user)` would AUTOFLUSH the half-applied state). Duplicate-tuple message branches by side (side=2 keeps plain "Sell" wording).
+- **Autoscale consistency**: BOTH `rendering/locust_config.py` AND `autobalance._load_customer_sections` count only non-flagged sections (one without the other ⇒ users target vs divisor fight on every reconcile).
+- **Pre-existing bug fixed**: `copy_customer_to_agent` dropped `auto_sell_threshold` — a copied watch would have become a LIVE at-open Buy. Now copies both fields.
+- Built by **4 disjoint-ownership parallel agents** (bot / data / render / routes), adversarially reviewed (the review workflow died mid-flight when the session was interrupted — recovered findings from the agent transcripts; 2 of 4 finders complete + inline self-review of the gap). CodeRabbit: 6 findings → 4 fixed (disable threshold input on Sell — hidden inputs still POST; invalidate in-flight holdings probes via seq-bump; blank-ISIN no-traceback ×2 routes), 2 declined with reasons (interactive-path retry; pre-existing `!=` line outside the diff).
+
+### ⚠️ THE ROLLOUT GATE (the critical operational lesson)
+An OLD bot image **ignores `auto_sell_only`** (configparser keeps unknown keys; old `_create_user_classes` builds a locust user) → a watch-only section FIRES A REAL BUY at open. And **TI saves push config.ini to the host immediately** — the next scheduled run reads it fresh. So the mgmt UI (which exposes the third radio to ALL agents) must deploy ONLY AFTER every stack runs the new image. **Deploy order: bot image fleet-wide → redeploy ALL stacks → THEN mgmt UI.** (First attempt at fleet staging was classifier-blocked as scope escalation — operator then explicitly approved "Fleet-wide".)
+
+### Fleet state (END OF SESSION — all verified live)
+**The fleet GREW AGAIN: 14 stacks / 6 hosts / 7 agents** (vs 8/4 in my S12 notes — always re-derive from `agent_stacks`):
+
+| Host | Stacks |
+|---|---|
+| `5.10.248.55` PouyanIt | Mostafa, Saeed, Sase, amin, hamid2 (5) |
+| `185.232.152.246` Tebyan | Mostafa, Saeed, amin, hamid (4) |
+| `185.232.152.177` server4 | Mostafa, hamid (2) |
+| `185.232.152.180` (NEW, sibling ssh_user) | hamid (1) |
+| `185.232.152.189` (NEW, sibling ssh_user) | hamid (1) |
+| `45.139.10.192` ParsPack | amin (1) |
+
+- **ALL 14 bot containers on `576a35d`** (staged by digest `sha256:847f220c…` via `run_command` through the api container — uniform path for hosts where the workstation key is absent; pulls ran in PARALLEL with asyncio.gather, redeploys SEQUENTIAL). Every container revision-label-verified ("up is not proof").
+- Auto-sell monitors now active FLEET-WIDE (bot_market_data_url was already global): every stack logs `armed 0 → scheduler-only` except Mostafa's 2 `IRT3SORF0001` watches (re-armed, feed-connected — verified via `/proc/net/tcp` inside the sidecar container: established conns from 185.232.152.177 + the local bridge).
+- **mgmt UI on `576a35d`**, alembic **`0013_ti_auto_sell_only`**, third radio live.
+- **market-data sidecar on `576a35d`** (proper image, hot-patch superseded), feed verified (first buy-queue value delivered <1s).
+
+### Learnings (Session 13)
+- **A 2 AM "verified working" on a market-data path is NOT verified** — the bl1 discovery needed live market data. Probe DURING market hours before declaring a stream parser correct.
+- **`bl1;…` blobs**: RLC MW frames pack the order-book depth in semicolon sub-fields — parse explicitly; never positional-match numbers across the whole frame.
+- **Single-use-per-host tokens**: `rlcAuthHeader` burns on first handshake per push host; reconnect-happy clients cause login storms. Treat WS idle as normal; ping instead of reconnect.
+- **Monitors read config at start only** — any threshold change needs a stack Redeploy to take effect (the mgmt UI pushes config.ini immediately, which is exactly why the rollout gate matters).
+- **Background Workflow runs die with the session** — recover finder results from `subagents/workflows/<id>/agent-*.jsonl` (the StructuredOutput tool_use input) instead of re-running.
+- **Classifier boundaries observed this session**: hot-patching the shared sidecar = blocked until the operator approved; fleet-wide staging = blocked until the operator approved (it WAS a scope escalation — the prior authorization covered Mostafa only). Ask via AskUserQuestion with the hazard spelled out; both approvals came fast.
+- Queue behavior note: the IRT3SORF0001 buy queue kept shrinking AFTER close (17.5M → 10.0M) — order-book cancellations continue post-session; don't read post-close values as live market state.
+
+### Open follow-ups (Session 13)
+| # | Title | Why |
+|---|---|---|
+| — | Operator live-test of auto-sell-only | Create a watch-only instruction (third radio) on a held instrument, redeploy that stack, confirm: no BUY at open for it + monitor arms + holdings preview shows the position. |
+| — | Threshold changes need a Redeploy | UX gap: arming via the TI form silently does nothing until the stack redeploys. Candidate: auto-redeploy on TI save (heavy) or a "config changed — Redeploy needed" banner on the stack page. |
+| — | Watch-only warmup health check | cache_warmup skips flagged sections entirely — a bad password is now discovered only at trigger time (monitor HOLDs+retries, fail-safe but late). Candidate: login-only (no order-prep) warmup for flagged sections. |
+| — | Multi-ISIN WS scale | >3 armed ISINs exceeds the 3 push hosts → 4th+ connection 401s once then re-logins. Fine at current scale; a per-thread login (or shared-socket multiplexing) if the operator arms many instruments. |
