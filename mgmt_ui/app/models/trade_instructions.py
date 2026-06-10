@@ -6,6 +6,7 @@ from typing import Optional
 
 import sqlalchemy as sa
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     ForeignKey,
     Integer,
@@ -62,6 +63,12 @@ class TradeInstruction(Base):
     # held position (chunked, at the floor). NULL = no auto-sell. Set on BUY
     # instructions via the form; the bot reads it from config.ini.
     auto_sell_threshold: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Auto-sell-only: watch an EXISTING holding without buying. The row keeps
+    # side = 1 so the bot's monitor arms it, but locust + cache warmup skip the
+    # rendered section — nothing fires at market open.
+    auto_sell_only: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa.false(), default=False
+    )
     section_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))

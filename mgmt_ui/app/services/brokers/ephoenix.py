@@ -69,3 +69,10 @@ class EphoenixAdapter:
             page_size=page_size,
             max_pages=max_pages,
         )
+
+    async def get_holdings(
+        self, username: str, password: str, isin: str, *, ocr_service_url: str
+    ) -> int:
+        return await broker_client._ephoenix_get_holdings(
+            self.code, username, password, isin, ocr_service_url=ocr_service_url
+        )

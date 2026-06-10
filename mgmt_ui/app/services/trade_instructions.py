@@ -106,6 +106,7 @@ def _public_snapshot(ti: TradeInstruction) -> dict:
         "isin": ti.isin,
         "side": ti.side,
         "auto_sell_threshold": ti.auto_sell_threshold,
+        "auto_sell_only": ti.auto_sell_only,
         "section_name": ti.section_name,
         "comment": ti.comment,
         "version": ti.version,
@@ -218,6 +219,9 @@ async def create_trade_instruction(
         # Auto-sell only makes sense for a BUY. Normalize 0 → None so "disabled"
         # has ONE representation in the DB (the bot also treats <= 0 as disabled).
         auto_sell_threshold=(data.auto_sell_threshold if (data.side == 1 and data.auto_sell_threshold) else None),
+        # Watch-only flag — the Create validator guarantees a flagged row has
+        # side == 1 AND a threshold > 0, so it survives the normalization above.
+        auto_sell_only=data.auto_sell_only,
         # Placeholder until the flush gives us the id.
         section_name="",
         comment=data.comment,
@@ -241,12 +245,29 @@ async def create_trade_instruction(
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
-        raise ValueError(
-            "trade already exists for this customer / symbol / side"
-        ) from exc
+        raise ValueError(_duplicate_tuple_message(data.side)) from exc
 
     await db.refresh(ti)
     return ti
+
+
+def _duplicate_tuple_message(side: int) -> str:
+    """Friendly text for the UNIQUE (customer, isin, side) collision.
+
+    side=1 names BOTH row kinds that occupy the slot (a Buy and an
+    Auto-sell-only watch are stored identically as side=1); side=2 keeps the
+    plain Sell wording — mentioning watch-only rows there would send the
+    operator hunting for a row that can't exist.
+    """
+    if side == 2:
+        return (
+            "a Sell instruction already exists for this "
+            "customer / symbol / side — edit it instead"
+        )
+    return (
+        "a Buy or Auto-sell-only instruction already exists for this "
+        "customer / symbol / side — edit it instead"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -277,13 +298,32 @@ async def update_trade_instruction(
     before = _public_snapshot(ti)
 
     changes = data.model_dump(exclude={"version"}, exclude_unset=True)
+
+    # Validate the EFFECTIVE post-update state BEFORE mutating the ORM row —
+    # raising after setattr would leave the session dirty, and the routers'
+    # ValueError path calls db.refresh(user) whose autoflush would write the
+    # half-applied state to the DB.
+    eff_side = changes.get("side", ti.side)
+    eff_threshold = changes.get("auto_sell_threshold", ti.auto_sell_threshold)
+    if eff_side != 1 or not eff_threshold:
+        # Auto-sell is BUY-only and "disabled" is a single representation:
+        # clear the threshold on a SELL row (incl. a side 1->2 flip) and
+        # normalize 0 -> None.
+        eff_threshold = None
+    # The flag is applied only when the payload explicitly carries it
+    # (exclude_unset — the form posts side 1/2 with auto_sell_only=False, so
+    # the flag never sticks across a side change); a flagged row that ends up
+    # without side=1 + a threshold is meaningless.
+    eff_auto_only = changes.get("auto_sell_only", ti.auto_sell_only)
+    if eff_auto_only and (eff_side != 1 or not eff_threshold):
+        raise ValueError(
+            "auto-sell-only instruction needs a buy-queue threshold — "
+            "delete the instruction instead of clearing it"
+        )
+
     for field, value in changes.items():
         setattr(ti, field, value)
-
-    # Auto-sell is BUY-only and "disabled" is a single representation: clear the
-    # threshold on a SELL row (incl. a side 1->2 flip), and normalize 0 -> None.
-    if ti.side != 1 or not ti.auto_sell_threshold:
-        ti.auto_sell_threshold = None
+    ti.auto_sell_threshold = eff_threshold
 
     # Section name embeds isin+side — regenerate when either changed.
     if "isin" in data.model_fields_set or "side" in data.model_fields_set:
@@ -309,9 +349,9 @@ async def update_trade_instruction(
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
-        raise ValueError(
-            "trade already exists for this customer / symbol / side"
-        ) from exc
+        # eff_side is a plain int captured pre-mutation — never touch ORM
+        # attrs after a rollback (PR #73 MissingGreenlet lesson).
+        raise ValueError(_duplicate_tuple_message(eff_side)) from exc
 
     await db.refresh(ti)
     return ti

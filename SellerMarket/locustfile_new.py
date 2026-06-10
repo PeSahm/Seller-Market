@@ -604,11 +604,16 @@ def on_test_stop(environment, **kwargs):
         username = section['username']
         broker_code = section['broker']
 
+        # Auto-sell-only sections never fire at open — nothing to summarize.
+        from broker_adapters import is_auto_sell_only, resolve_family
+        if is_auto_sell_only(section):
+            logger.info(f"Skipping order-summary for auto-sell-only {username}@{broker_code}")
+            continue
+
         # Exir order status arrives over WebSocket, not the ephoenix
         # GetOpenOrders feed, so this ephoenix-only post-run summary skips
         # non-ephoenix sections. The old enum path skipped them implicitly via a
         # BrokerCode ValueError; the data-driven path must skip them explicitly.
-        from broker_adapters import resolve_family
         if resolve_family(broker_code, section) != "ephoenix":
             logger.info(f"Skipping order-summary for non-ephoenix {username}@{broker_code}")
             continue
@@ -691,7 +696,13 @@ def on_test_stop(environment, **kwargs):
                 section = dict(config[section_name])
                 username = section['username']
                 broker_code = section['broker']
-                
+
+                # Auto-sell-only sections placed nothing this run — the mtime
+                # glob below would surface a STALE result file as phantom orders.
+                from broker_adapters import is_auto_sell_only
+                if is_auto_sell_only(section):
+                    continue
+
                 try:
                     # Get the result file for this account
                     result_files = [f for f in Path('order_results').glob(f'*{username}_{broker_code}_*.json')]
@@ -758,22 +769,42 @@ def _read_locust_users(path: str = "locust_config.json", default: int = 10) -> i
 def _create_user_classes():
     """Create user classes in a function scope to avoid variable leakage to globals."""
     import sys
+    from broker_adapters import is_auto_sell_only
     current_module = sys.modules[__name__]
     user_classes = []
+
+    # Auto-sell-only sections arm the auto-sell monitor for an EXISTING holding
+    # — they must NEVER fire an order at open, so they get no locust user. They
+    # are also excluded from the fixed_count math below: counting watch-only
+    # sections would dilute every tradeable section's share (e.g. 3 tradeable +
+    # 2 watch-only at users=9 → 9//5=1 instead of 9//3=3).
+    eligible = [s for s in config.sections() if not is_auto_sell_only(dict(config[s]))]
+    for section_name in config.sections():
+        if section_name not in eligible:
+            logger.info(
+                f"section {section_name}: auto_sell_only — no locust user (won't fire at open)"
+            )
+    if not eligible and config.sections():
+        # Clean exit → green scheduled-run marker (mirrors the no-config exit(1)
+        # precedent above): nothing here is supposed to fire at open.
+        logger.info(
+            f"all {len(config.sections())} sections are auto-sell-only — nothing to fire at open"
+        )
+        exit(0)
 
     # Pin an EQUAL number of locust users to every section via ``fixed_count``.
     # locust's default weight distribution starves some sections to 0 users when
     # the total user count is near the section count (live: a 14-section stack at
     # users=42 left one account's classes at 0 → never fired). fixed_count =
     # users // sections guarantees each section its share — no starvation.
-    num_sections = len(config.sections())
+    num_sections = len(eligible)
     _fixed_count = per_section_user_count(_read_locust_users(), num_sections)
     logger.info(
         f"locust fixed_count per section = {_fixed_count} "
         f"(configured users={_read_locust_users()}, sections={num_sections})"
     )
 
-    for idx, section_name in enumerate(config.sections(), start=1):
+    for idx, section_name in enumerate(eligible, start=1):
         try:
             section = dict(config[section_name])
             

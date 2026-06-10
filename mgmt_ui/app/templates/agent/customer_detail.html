@@ -90,7 +90,8 @@
       <tr>
         <td><code>{{ ti.isin }}</code></td>
         <td>
-          {% if ti.side == 1 %}<span class="badge badge--up">Buy</span>
+          {% if ti.side == 1 and ti.auto_sell_only %}<span class="badge badge--pending" title="watch-only — no order at market open">Auto-sell only</span>
+          {% elif ti.side == 1 %}<span class="badge badge--up">Buy</span>
           {% else %}<span class="badge badge--down">Sell</span>{% endif %}
         </td>
         <td dir="auto" class="text-small">{{ ti.comment or '—' }}</td>

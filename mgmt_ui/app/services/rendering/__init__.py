@@ -41,6 +41,11 @@ class CustomerRow:
     # #110 auto-sell: best-buy-queue share count below which the bot sells. None
     # = no auto-sell for this section (the renderer omits the key entirely).
     auto_sell_threshold: Optional[int] = None
+    # Auto-sell ONLY: watch an EXISTING holding without buying. The section keeps
+    # side=1 (monitor arming is untouched) but the bot skips it in locust + cache
+    # warmup so nothing fires at open. MUST stay the LAST field — existing tests
+    # construct CustomerRow positionally.
+    auto_sell_only: bool = False
 
 
 @dataclass

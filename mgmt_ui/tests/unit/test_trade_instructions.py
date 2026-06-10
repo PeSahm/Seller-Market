@@ -17,6 +17,7 @@ from app.schemas.trade_instruction import (
     TradeInstructionCreate,
     TradeInstructionOut,
     TradeInstructionUpdate,
+    map_side_form,
 )
 from app.services import trade_instructions as ti_svc
 from app.services.trade_instructions import (
@@ -85,7 +86,8 @@ def test_side_enum_rejects_three() -> None:
 def test_trade_instruction_out_has_required_fields() -> None:
     fields = set(TradeInstructionOut.model_fields.keys())
     assert {"id", "customer_id", "isin", "side", "section_name",
-            "comment", "version"} <= fields
+            "comment", "version", "auto_sell_threshold",
+            "auto_sell_only"} <= fields
 
 
 def test_trade_instruction_schemas_drop_enabled() -> None:
@@ -95,6 +97,59 @@ def test_trade_instruction_schemas_drop_enabled() -> None:
     assert "enabled" not in TradeInstructionOut.model_fields
     assert "enabled" not in TradeInstructionUpdate.model_fields
     assert "enabled" not in TradeInstructionCreate.model_fields
+
+
+# ---------------------------------------------------------------------------
+# map_side_form (the form-layer side=3 "Auto-sell only" alias)
+# ---------------------------------------------------------------------------
+
+
+def test_map_side_form_matrix() -> None:
+    """1 -> (1, False), 2 -> (2, False), 3 -> (1, True) — 3 is never stored."""
+    assert map_side_form(1) == (1, False)
+    assert map_side_form(2) == (2, False)
+    assert map_side_form(3) == (1, True)
+
+
+@pytest.mark.parametrize("raw", [0, 4])
+def test_map_side_form_rejects_out_of_range(raw: int) -> None:
+    with pytest.raises(ValueError, match="side must be 1"):
+        map_side_form(raw)
+
+
+# ---------------------------------------------------------------------------
+# auto_sell_only Create validator
+# ---------------------------------------------------------------------------
+
+
+def test_create_auto_sell_only_without_threshold_rejected() -> None:
+    """A watch-only instruction is meaningless without a trigger threshold."""
+    with pytest.raises(ValidationError, match="buy-queue threshold"):
+        TradeInstructionCreate(isin="IRO3AYHZ0001", side=1, auto_sell_only=True)
+
+
+def test_create_auto_sell_only_on_sell_rejected() -> None:
+    """The flag is BUY-only — a side=2 row can't be watch-only."""
+    with pytest.raises(ValidationError):
+        TradeInstructionCreate(
+            isin="IRO3AYHZ0001", side=2, auto_sell_only=True,
+            auto_sell_threshold=100,
+        )
+
+
+def test_create_auto_sell_only_valid_passes() -> None:
+    m = TradeInstructionCreate(
+        isin="IRO3AYHZ0001", side=1, auto_sell_only=True,
+        auto_sell_threshold=100,
+    )
+    assert m.auto_sell_only is True
+    assert m.auto_sell_threshold == 100
+    assert m.side == 1
+
+
+def test_create_defaults_auto_sell_only_false() -> None:
+    """Plain Buys/Sells are untouched — the flag defaults to False."""
+    assert TradeInstructionCreate(isin="IRO3AYHZ0001", side=1).auto_sell_only is False
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +189,69 @@ async def test_update_optimistic_lock_mismatch_raises(
 
     db.flush.assert_not_awaited()
     db.commit.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# auto_sell_only effective-state guard on update
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_clearing_threshold_on_auto_sell_only_row_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clearing the threshold on a watch-only row leaves it meaningless —
+    the service rejects the EFFECTIVE state (delete the row instead)."""
+    db = MagicMock()
+    db.flush = AsyncMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    db.refresh = AsyncMock()
+
+    fake_ti = SimpleNamespace(
+        id=uuid.uuid4(),
+        customer_id=uuid.uuid4(),
+        version=1,
+        isin="IRO3AYHZ0001",
+        side=1,
+        auto_sell_threshold=500,
+        auto_sell_only=True,
+        section_name="a_c_t_bbi_IRO3AYHZ0001_s1",
+        comment=None,
+    )
+
+    async def _fake_get(_db, _id):
+        return fake_ti
+
+    monkeypatch.setattr(ti_svc, "get_trade_instruction", _fake_get)
+
+    # 0 normalizes to None → the flagged row would have no trigger left.
+    update = TradeInstructionUpdate(version=1, auto_sell_threshold=0)
+
+    with pytest.raises(ValueError, match="buy-queue threshold"):
+        await update_trade_instruction(db, fake_ti.id, update, actor_id=uuid.uuid4())
+
+    db.flush.assert_not_awaited()
+    db.commit.assert_not_awaited()
+
+
+def test_public_snapshot_includes_auto_sell_only() -> None:
+    """Audit visibility — the watch-only flag must land in before/after."""
+    snap = ti_svc._public_snapshot(
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            customer_id=uuid.uuid4(),
+            isin="IRO3AYHZ0001",
+            side=1,
+            auto_sell_threshold=500,
+            auto_sell_only=True,
+            section_name="a_c_t_bbi_IRO3AYHZ0001_s1",
+            comment=None,
+            version=1,
+        )
+    )
+    assert snap["auto_sell_only"] is True
+    assert snap["auto_sell_threshold"] == 500
 
 
 # ---------------------------------------------------------------------------

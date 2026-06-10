@@ -112,6 +112,21 @@ def resolve_family(broker_code: str, config_section: dict) -> str:
     return BrokerCode.family(broker_code)
 
 
+def is_auto_sell_only(section) -> bool:
+    """True when the config section is flagged ``auto_sell_only = true``.
+
+    Such sections exist purely to arm the auto-sell monitor for an EXISTING
+    holding (no buy) — they must never fire an order at market open, so the
+    locust user-class builder and cache_warmup skip them. Sections arrive as
+    plain dicts (not ConfigParser proxies, so no ``getboolean``); the truthy
+    strings are matched manually. Missing key / empty / anything else → False.
+    """
+    raw = (section or {}).get("auto_sell_only")
+    if raw is None:
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def get_adapter(
     broker_code: str,
     *,

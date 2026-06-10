@@ -21,7 +21,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import ValidationError
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +38,7 @@ from app.schemas.customer import CustomerCreate, CustomerUpdate
 from app.schemas.trade_instruction import (
     TradeInstructionCreate,
     TradeInstructionUpdate,
+    map_side_form,
 )
 from app.schemas.locust import LocustUpsert
 from app.schemas.scheduler import SchedulerJobUpsert
@@ -1289,17 +1290,24 @@ async def admin_trade_instruction_create(
     }
 
     try:
+        # Form-layer alias: side=3 ("Auto-sell only") maps to a side=1 row
+        # flagged watch-only. ``sticky`` above keeps the RAW posted value so
+        # the third radio stays selected on a validation re-render.
+        mapped_side, auto_sell_only = map_side_form(side)
         payload = TradeInstructionCreate(
             isin=isin,
-            side=side,  # type: ignore[arg-type]
+            side=mapped_side,  # type: ignore[arg-type]
             comment=comment if comment else None,
             auto_sell_threshold=_parse_optional_int(auto_sell_threshold),
+            auto_sell_only=auto_sell_only,
         )
-    except ValidationError:
+    except (ValidationError, ValueError) as exc:
         ctx = _ctx(request, user, current_tab="/admin/customers")
         ctx["customer"] = _customer_snap
         ctx["form_error"] = (
             "Invalid input. Please review the form fields and try again."
+            if isinstance(exc, ValidationError)
+            else str(exc)
         )
         ctx["form_values"] = sticky
         ctx["mode"] = "create"
@@ -1354,7 +1362,9 @@ async def admin_trade_instruction_edit_form(
 
     form_values = {
         "isin": ti.isin,
-        "side": str(ti.side),
+        # A watch-only row is stored side=1 + auto_sell_only; the form's
+        # third radio is its alias, so pre-select "3" for it.
+        "side": "3" if ti.auto_sell_only else str(ti.side),
         "comment": ti.comment or "",
         "auto_sell_threshold": ti.auto_sell_threshold if ti.auto_sell_threshold is not None else "",
         "version": ti.version,
@@ -1392,8 +1402,9 @@ async def admin_trade_instruction_update(
     fields: dict = {"version": version}
     if isin is not None and isin != "":
         fields["isin"] = isin
-    if side is not None:
-        fields["side"] = side
+    # ``side`` is mapped (form alias 3 → side=1 + auto_sell_only) inside the
+    # payload try below so an invalid value lands in the same error re-render
+    # path as a ValidationError.
     if comment is not None:
         fields["comment"] = comment if comment != "" else None
     # The form always submits this (empty when unset / on a Sell), so include it
@@ -1413,6 +1424,7 @@ async def admin_trade_instruction_update(
         "side": ti.side,
         "comment": ti.comment,
         "auto_sell_threshold": ti.auto_sell_threshold,
+        "auto_sell_only": ti.auto_sell_only,
         "version": ti.version,
     }
     _customer_snap = SimpleNamespace(
@@ -1424,9 +1436,15 @@ async def admin_trade_instruction_update(
 
     def _render_with_error(message: str, code: int):
         _ast = auto_sell_threshold if auto_sell_threshold is not None else _ti_snap["auto_sell_threshold"]
+        # Sticky side prefers the RAW posted value (so the "3" alias radio
+        # stays selected); the stored-row fallback re-derives the alias.
+        if side is not None:
+            _side = str(side)
+        else:
+            _side = "3" if _ti_snap["auto_sell_only"] else str(_ti_snap["side"])
         form_values = {
             "isin": isin if isin is not None and isin != "" else _ti_snap["isin"],
-            "side": str(side if side is not None else _ti_snap["side"]),
+            "side": _side,
             "comment": comment if comment is not None else (_ti_snap["comment"] or ""),
             "auto_sell_threshold": _ast if _ast is not None else "",
             "version": _ti_snap["version"],
@@ -1442,10 +1460,16 @@ async def admin_trade_instruction_update(
         )
 
     try:
+        if side is not None:
+            # Form-layer alias: 3 → (1, True). The raw ``side`` stays
+            # untouched for the sticky re-render above.
+            fields["side"], fields["auto_sell_only"] = map_side_form(side)
         payload = TradeInstructionUpdate(**fields)
-    except ValidationError:
+    except (ValidationError, ValueError) as exc:
         return _render_with_error(
-            "Invalid input. Please review the form fields and try again.",
+            "Invalid input. Please review the form fields and try again."
+            if isinstance(exc, ValidationError)
+            else str(exc),
             status.HTTP_400_BAD_REQUEST,
         )
 
@@ -1495,6 +1519,53 @@ async def admin_trade_instruction_delete(
     )
     await _push_customer_stack_config(db, customer_id, actor_id=user.id)
     return _flash_redirect(request, f"/admin/customers/{customer_id}")
+
+
+@router.get("/customers/{customer_id}/holdings")
+async def admin_customer_holdings(
+    customer_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    isin: str = "",
+):
+    """Live holdings probe for the trade-instruction form's "Auto-sell only"
+    preview: how many shares of ``isin`` does this account currently hold?
+
+    Decrypts the stored password (same helper the config renderer uses) and
+    asks the broker's portfolio endpoint via the family-routed
+    ``broker_client.get_holdings``. This is a live captcha→OCR→login call —
+    it can take seconds and can fail; ANY failure returns a 200 with an
+    ``error`` field (the form renders a muted hint, never a 500) and the
+    real exception goes to the server log.
+    """
+    customer = await services_customers.get_customer(db, customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="customer not found")
+    effective_isin = (isin or "").strip().upper()
+    if not effective_isin:
+        # A cleared/partially-typed ISIN field is normal form interaction,
+        # not a broker failure — no exception log.
+        return JSONResponse({"isin": "", "error": "no isin to probe"})
+    try:
+        password = await services_customers.decrypt_password(customer)
+        ocr_service_url = await settings_store.get_setting(db, "ocr_service_url")
+        holdings = await broker_client.get_holdings(
+            customer.broker,
+            customer.username,
+            password,
+            effective_isin,
+            ocr_service_url=ocr_service_url,
+        )
+    except Exception:  # noqa: BLE001 — degrade to a muted hint, log the cause
+        logger.exception(
+            "holdings probe failed for customer %s isin %s",
+            customer_id, effective_isin,
+        )
+        return JSONResponse(
+            {"isin": effective_isin, "error": "could not fetch holding"}
+        )
+    return JSONResponse({"isin": effective_isin, "holdings": holdings})
 
 
 def _redact_config_secrets(text: str) -> str:

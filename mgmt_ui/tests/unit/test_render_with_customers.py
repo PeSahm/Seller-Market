@@ -455,7 +455,9 @@ def test_render_emits_auto_sell_threshold_only_when_set() -> None:
 
     Pure-renderer test (no DB): the bot reads this key from config.ini and
     arms the auto-sell monitor. Additive — sections without a threshold must
-    render byte-identically to before.
+    render byte-identically to before. An ``auto_sell_only`` (watch-only) row
+    additionally emits ``auto_sell_only = true`` while keeping ``side = 1``
+    (monitor arming is untouched; the bot skips it in locust + cache warmup).
     """
     from app.services.rendering import CustomerRow
 
@@ -471,8 +473,25 @@ def test_render_emits_auto_sell_threshold_only_when_set() -> None:
     assert "auto_sell_threshold = 500" in out
     # Exactly one threshold line — only the armed buy section gets it.
     assert out.count("auto_sell_threshold") == 1
+    # Unflagged rows emit NO auto_sell_only key (existing goldens stay green).
+    assert "auto_sell_only" not in out
     # A 0 is falsy → treated as "no auto-sell" (omitted).
     ctx0 = SimpleNamespace(
         customers=[CustomerRow("z", "u", "p", "ayandeh", "IRO1Z", 1, auto_sell_threshold=0)]
     )
     assert "auto_sell_threshold" not in render_config_ini(ctx0)
+
+    # A flagged (auto-sell ONLY) row emits BOTH the threshold and the flag,
+    # and the section keeps side = 1.
+    ctx_flagged = SimpleNamespace(
+        customers=[
+            CustomerRow(
+                "watch_only", "u4", "p4", "ayandeh", "IRO1D", 1,
+                auto_sell_threshold=750, auto_sell_only=True,
+            ),
+        ]
+    )
+    out_flagged = render_config_ini(ctx_flagged)
+    assert "auto_sell_threshold = 750" in out_flagged
+    assert "auto_sell_only = true" in out_flagged
+    assert "side = 1" in out_flagged

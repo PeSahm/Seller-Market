@@ -4,11 +4,13 @@
   column refreshes every 3s without a page reload.
 
   Context: rows = [{customer, broker, isin, threshold, buy_volume, triggered,
-                    fired_today}, ...]
+                    fired_today, sell_only}, ...]
 #}
 {% for r in rows %}
 <tr>
-  <td dir="auto">{{ r.customer }}</td>
+  <td dir="auto">{{ r.customer }}
+    {% if r.sell_only %}<span class="badge badge--pending" title="Auto-sell only — no order at market open">watch-only</span>{% endif %}
+  </td>
   <td><code class="text-small">{{ r.broker }}</code></td>
   <td><code class="text-small">{{ r.isin }}</code></td>
   <td>{{ "{:,}".format(r.threshold) }}</td>

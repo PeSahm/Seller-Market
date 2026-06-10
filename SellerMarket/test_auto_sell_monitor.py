@@ -53,14 +53,21 @@ def test_load_targets_keeps_only_armed(tmp_path):
         "[buy_armed]\nusername=u1\npassword=p1\nbroker=ayandeh\nbroker_family=ephoenix\n"
         "isin=IRO1A\nside=1\nauto_sell_threshold=500\n\n"
         "[buy_unarmed]\nusername=u2\npassword=p2\nbroker=ayandeh\nisin=IRO1B\nside=1\n\n"
-        "[sell]\nusername=u3\npassword=p3\nbroker=ayandeh\nisin=IRO1C\nside=2\n",
+        "[sell]\nusername=u3\npassword=p3\nbroker=ayandeh\nisin=IRO1C\nside=2\n\n"
+        "[watch_only]\nusername=u4\npassword=p4\nbroker=ayandeh\nbroker_family=ephoenix\n"
+        "isin=IRO1D\nside=1\nauto_sell_threshold=750\nauto_sell_only=true\n",
         encoding="utf-8",
     )
     targets = load_auto_sell_targets(str(cfg))
-    assert len(targets) == 1
-    t = targets[0]
-    assert t.isin == "IRO1A" and t.threshold == 500 and t.account == "u1"
+    assert len(targets) == 2
+    by_isin = {t.isin: t for t in targets}
+    t = by_isin["IRO1A"]
+    assert t.threshold == 500 and t.account == "u1"
     assert t.family == "ephoenix"
+    # auto_sell_only=true sections (existing holding, no buy) must STILL arm —
+    # the flag only suppresses the locust user / warmup, not the monitor.
+    t2 = by_isin["IRO1D"]
+    assert t2.threshold == 750 and t2.account == "u4"
 
 
 # ---------------------------------------------------------------------------

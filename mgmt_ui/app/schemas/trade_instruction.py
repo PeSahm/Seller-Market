@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # Trade direction. The downstream bot encodes Buy=1 / Sell=2; the DB has a
@@ -20,6 +20,22 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # the schema so pydantic refuses anything out of range at the HTTP boundary
 # (before it can hit the DB and become an opaque IntegrityError).
 Side = Literal[1, 2]
+
+
+def map_side_form(raw: int) -> tuple[int, bool]:
+    """Translate the form's side radio into ``(side, auto_sell_only)``.
+
+    Form-layer alias: the UI's third radio "Auto-sell only" posts side=3,
+    which is never stored — it maps to a side=1 row flagged watch-only.
+    1 -> (1, False), 2 -> (2, False), 3 -> (1, True); anything else raises.
+    """
+    if raw == 1:
+        return 1, False
+    if raw == 2:
+        return 2, False
+    if raw == 3:
+        return 1, True
+    raise ValueError("side must be 1 (Buy), 2 (Sell), or 3 (Auto-sell only)")
 
 
 def _validate_isin(value: str) -> str:
@@ -54,11 +70,23 @@ class TradeInstructionCreate(BaseModel):
     # #110 auto-sell: best-buy-queue SHARE COUNT below which the bot sells the
     # held position. Only meaningful on a BUY; the form surfaces it for Buy only.
     auto_sell_threshold: Optional[int] = Field(default=None, ge=0)
+    # Watch-only: arm auto-sell for an existing holding without buying. Stored
+    # as side=1 (see map_side_form); locust + cache warmup skip the section.
+    auto_sell_only: bool = False
 
     @field_validator("isin")
     @classmethod
     def _check_isin(cls, v: str) -> str:
         return _validate_isin(v)
+
+    @model_validator(mode="after")
+    def _check_auto_sell_only(self) -> "TradeInstructionCreate":
+        # Create carries the full state, so it's safe to validate here: a
+        # watch-only instruction is meaningless without a Buy side + a
+        # threshold to trigger the sell.
+        if self.auto_sell_only and (self.side != 1 or not self.auto_sell_threshold):
+            raise ValueError("Auto-sell only requires a buy-queue threshold")
+        return self
 
 
 class TradeInstructionUpdate(BaseModel):
@@ -73,6 +101,9 @@ class TradeInstructionUpdate(BaseModel):
     side: Optional[Side] = None
     comment: Optional[str] = Field(default=None, max_length=1024)
     auto_sell_threshold: Optional[int] = Field(default=None, ge=0)
+    # Partial update — effective-state validation (flag needs side=1 + a
+    # threshold) lives in the service, where the merged row is visible.
+    auto_sell_only: Optional[bool] = None
     version: int = Field(..., ge=1)
 
     @field_validator("isin")
@@ -94,6 +125,7 @@ class TradeInstructionOut(BaseModel):
     isin: str
     side: int
     auto_sell_threshold: Optional[int]
+    auto_sell_only: bool
     section_name: str
     comment: Optional[str]
     version: int

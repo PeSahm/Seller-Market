@@ -1,16 +1,25 @@
-"""Hermetic tests for rlc_ws pure helpers (#110, Phase 1).
+"""Hermetic tests for rlc_ws pure helpers (#110).
 
 The WebSocket I/O (websocket-client) is lazily imported inside RlcQueueClient, so
-these tests run without the dependency. The MW wire is comma-separated text
-(confirmed live). Run: ``python -m pytest test_rlc_ws.py -q``.
+these tests run without the dependency. The MW wire is comma-separated text with
+the order-book depth in semicolon-packed ``bl1``/``bl2``/``bl3`` blobs — the
+fixture below is a REAL frame captured live (2026-06-10, IRT3SORF0001; the bl1
+volume 31,706,729 matched the REST ``bbq`` exactly).
+Run: ``python -m pytest test_rlc_ws.py -q``.
 """
 from __future__ import annotations
 
 import rlc_ws
 
-# A real-shaped MW frame (trimmed): MW,<insCode>,<ISIN>,<name>,...
-_MW = ("MW,11686,IRO1SROD0001,name,11150,10820,11480,N1,P,11150,"
-       "x,y,z,w,IS,sym,1,1,100000,20260608090248").split(",")
+# Verbatim live frame (only the Persian company/symbol names matter as opaque text).
+_LIVE_MW = (
+    "MW,3867,IRT3SORF0001,صندوق س.بخشي صنايع سورنا2,21277,20039,21277,T1,N,"
+    "21277,13934005,21277,21277,20658,,سورنافود1,1,1,1000000,20260610102559,"
+    "bl1;31706729;21277;117;11:30:36;0;0;0;11:30:36,"
+    "bl2;139338;20658;2;10:49:48;0;0;0;10:49:48,"
+    "bl3;1453;20600;1;10:38:38;0;0;0;10:38:38,"
+    "Sorena Ind.2 ETF,SORF1,21277"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -18,43 +27,45 @@ _MW = ("MW,11686,IRO1SROD0001,name,11150,10820,11480,N1,P,11150,"
 # ---------------------------------------------------------------------------
 
 def test_parse_mw_only_market_watch_frames():
-    assert rlc_ws.parse_mw("V,,,20260609,136") is None      # server-time frame
+    assert rlc_ws.parse_mw("V,,,20260610,136") is None       # server-time frame
+    assert rlc_ws.parse_mw("N2,IRT3SORF0001,21012,20260610113413,354665311") is None
     assert rlc_ws.parse_mw("not a frame") is None
-    assert rlc_ws.parse_mw(123) is None                      # non-str
-    parts = rlc_ws.parse_mw("MW,11686,IRO1SROD0001,name,1")
-    assert parts[0] == "MW" and parts[2] == "IRO1SROD0001"
+    assert rlc_ws.parse_mw(123) is None                       # non-str
+    parts = rlc_ws.parse_mw(_LIVE_MW)
+    assert parts[0] == "MW" and parts[2] == "IRT3SORF0001"
 
 
 # ---------------------------------------------------------------------------
-# self-calibration: find the buy-queue INDEX by matching the REST bbq
+# extract_buy_queue — the bl1 depth blob
 # ---------------------------------------------------------------------------
 
-def test_find_buy_queue_index_unique_match():
+def test_extract_buy_queue_from_live_frame():
+    parts = rlc_ws.parse_mw(_LIVE_MW)
+    assert rlc_ws.extract_buy_queue(parts) == 31706729
+
+
+def test_extract_buy_queue_zero_is_zero_not_hold():
+    # An emptied buy queue IS the thinned-queue condition — must return 0.
+    parts = "MW,1,IRO1X,name,bl1;0;0;0;09:00:00;0;0;0;09:00:00".split(",")
+    assert rlc_ws.extract_buy_queue(parts) == 0
+
+
+def test_extract_buy_queue_missing_bl1_holds():
+    # No depth level at all → None (fail-safe HOLD, never a sell signal).
     parts = "MW,1,IRO1X,name,9930,9370,7922712,55".split(",")
-    # 7922712 is the only field equal to the REST bbq.
-    assert rlc_ws.find_buy_queue_index(parts, 7922712) == 6
+    assert rlc_ws.extract_buy_queue(parts) is None
 
 
-def test_find_buy_queue_index_ambiguous_returns_none():
-    parts = "MW,1,IRO1X,name,100,100".split(",")     # two fields == 100
-    assert rlc_ws.find_buy_queue_index(parts, 100) is None
+def test_extract_buy_queue_malformed_bl1_holds():
+    assert rlc_ws.extract_buy_queue(["MW", "1", "IRO1X", "bl1;"]) is None
+    assert rlc_ws.extract_buy_queue(["MW", "1", "IRO1X", "bl1;abc;1"]) is None
+    assert rlc_ws.extract_buy_queue(["MW", "1", "IRO1X", "bl1"]) is None
 
 
-def test_find_buy_queue_index_zero_or_none_never_calibrates():
-    # At market close bbq is 0 and many fields are 0 → never bind on it.
-    assert rlc_ws.find_buy_queue_index("MW,1,X,n,0,0,0".split(","), 0) is None
-    assert rlc_ws.find_buy_queue_index(_MW, None) is None
-
-
-# ---------------------------------------------------------------------------
-# extract_index
-# ---------------------------------------------------------------------------
-
-def test_extract_index():
-    parts = "MW,1,IRO1X,name,9930,7922712".split(",")
-    assert rlc_ws.extract_index(parts, 5) == 7922712
-    assert rlc_ws.extract_index(parts, 3) is None     # 'name' is non-numeric
-    assert rlc_ws.extract_index(parts, 99) is None    # out of range
+def test_extract_buy_queue_ignores_deeper_levels():
+    # bl2/bl3 alone (no bl1) must not be mistaken for the best level.
+    parts = ["MW", "1", "IRO1X", "bl2;139338;20658;2;t;0;0;0;t"]
+    assert rlc_ws.extract_buy_queue(parts) is None
 
 
 if __name__ == "__main__":

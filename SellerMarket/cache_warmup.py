@@ -281,9 +281,18 @@ def main():
     # Warm up cache for each account
     success_count = 0
     failed_count = 0
-    
+
+    from broker_adapters import is_auto_sell_only
+
     for section_name in sections:
         section = dict(config[section_name])
+        # Auto-sell-only sections arm the monitor for an EXISTING holding — no
+        # order fires at open, so there is nothing to warm up (the buy-shaped
+        # warmup would fail noisily on a ~0-cash account and pollute the
+        # success/fail counts). Skipped sections count as neither.
+        if is_auto_sell_only(section):
+            logger.info(f"skipping warmup for auto-sell-only section {section_name}")
+            continue
         if warmup_account(section, cache):
             success_count += 1
         else:

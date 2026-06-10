@@ -359,3 +359,52 @@ class ExirAdapter:
         except Exception as exc:  # noqa: BLE001
             logger.warning("exir get_orders failed: %s", exc)
             return [], f"exir error: {exc}"
+
+    async def get_holdings(
+        self, username: str, password: str, isin: str, *, ocr_service_url: str
+    ) -> int:
+        """Whole-share holding for ``isin`` via ``GET /api/v1/user/portfoReport``.
+
+        Reads the SAME quantity fields the bot adapter does
+        (``SellerMarket/exir_adapter.py::_holdings``): ``asset`` first,
+        ``remainQty`` as the fallback; the instrument key is ``insMaxLcode``
+        (== ISIN, with the capitalised ``insMaxLCode`` variant accepted
+        defensively). The ISIN being absent from the portfolio is a VALID
+        answer (the account holds nothing) → ``0``, NOT an error.
+
+        On a non-200 the cached session is dropped and the login+fetch is
+        retried once (same recovery as :meth:`get_orders`); a second failure
+        RAISES — the ``get_holdings`` dispatcher contract is raise-on-failure,
+        unlike the result-shaped reads above.
+        """
+        path = "/api/v1/user/portfoReport"
+        last_err: Optional[str] = None
+        for _attempt in range(2):  # one retry with a fresh login on failure
+            session = await self._session(username, password, ocr_service_url)
+            nt = session["nt"]
+            async with httpx.AsyncClient(
+                follow_redirects=True, timeout=_HTTP_TIMEOUT_S
+            ) as client:
+                for name, value in session["cookies"].items():
+                    client.cookies.set(name, value)
+                resp = await self._signed_get(client, nt, path)
+
+            if resp.status_code == 200:
+                rows = (resp.json() or {}).get("result") or []
+                for row in rows:
+                    code = row.get("insMaxLcode") or row.get("insMaxLCode")
+                    if code == isin:
+                        qty = row.get("asset")
+                        if qty is None:
+                            qty = row.get("remainQty")
+                        return int(qty or 0)
+                return 0
+
+            # Non-200: the cached session may be dead (server-side logout /
+            # rotation). Drop it so the retry re-logs in.
+            last_err = (
+                f"exir portfoReport HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+            self._invalidate_session(username, password)
+
+        raise RuntimeError(last_err or "exir portfoReport failed")

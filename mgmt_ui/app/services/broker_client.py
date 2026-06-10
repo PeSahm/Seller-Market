@@ -118,6 +118,11 @@ def _endpoints_for(broker_code: str) -> dict[str, str]:
             # NOT the api8 customer-info shard — same host the bot fires
             # NewOrder/GetOpenOrders against.
             "orders": "https://api.ibtrader.ir/api/v2/orders/GetOrders",
+            # Portfolio lives on the api8 shard (same shard as customer_info)
+            # — mirrors ``SellerMarket/broker_enum.py::get_endpoints_for``.
+            "portfolio": (
+                "https://api8.ibtrader.ir/api/portfolio/getrealsecuritypositionbydate"
+            ),
         }
     # ephoenix family — same prefix shape as the bot. Note that
     # ``market_data`` is a SHARED host across the whole ephoenix family
@@ -136,6 +141,12 @@ def _endpoints_for(broker_code: str) -> dict[str, str]:
         # ``api-{code}.ephoenix.ir`` host. Confirmed to accept the same
         # ``Authorization: Bearer`` token as the bot's order calls.
         "orders": f"https://api{prefix}{domain}/api/v2/orders/GetOrders",
+        # Portfolio is a sibling of customer_info on the backoffice host —
+        # mirrors ``SellerMarket/broker_enum.py::get_endpoints_for``.
+        "portfolio": (
+            f"https://backofficeexternal{prefix}{domain}"
+            "/api/portfolio/getrealsecuritypositionbydate"
+        ),
     }
 
 
@@ -693,6 +704,92 @@ async def _ephoenix_get_orders(
     return rows, None
 
 
+async def _ephoenix_get_holdings(
+    broker_code: str,
+    username: str,
+    password: str,
+    isin: str,
+    *,
+    ocr_service_url: str,
+) -> int:
+    """Fetch the account's whole-share holding for one ISIN from the broker's
+    portfolio endpoint.
+
+    Mirrors the bot's ``SellerMarket/api_client.py::get_holdings`` wire shape:
+    ``POST {portfolio}`` with ``{"entity": true}`` and the same Bearer token
+    flow as :func:`_ephoenix_get_orders` (in-process token cache + the
+    401→drop-and-refresh-once path). The response's ``result`` list carries one
+    item per position; ``remainVolume`` is a float like ``445608.000`` —
+    truncate to whole shares (the exchange only fills integer volumes).
+
+    The ISIN being absent from the portfolio is a VALID answer (the account
+    holds nothing) → ``0``, NOT an error. Raises on auth/transport failures
+    and on a broker-side ``isError`` response — the latter with the
+    operator-readable Persian ``message`` surfaced verbatim.
+    """
+    endpoints = _endpoints_for(broker_code)
+    url = endpoints["portfolio"]
+
+    async def _post(client, token):
+        return await client.post(
+            url,
+            headers={
+                "authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                ),
+            },
+            # The broker requires {"entity": true} as the request body.
+            json={"entity": True},
+            timeout=_HTTP_TIMEOUT_S,
+        )
+
+    async with httpx.AsyncClient() as client:
+        token, last_error = await _get_token(
+            client, broker_code, endpoints, username, password, ocr_service_url
+        )
+        if not token:
+            raise RuntimeError(
+                last_error
+                or "Authentication failed — check username/password "
+                f"(captcha solve gave up after {_MAX_LOGIN_RETRIES} attempts)"
+            )
+
+        resp = await _post(client, token)
+        if resp.status_code == 401:
+            # Cached token rejected — drop it, re-login once, retry. Mirrors
+            # the GetOrders 401 path.
+            logger.info(
+                "cached token for %s@%s returned 401 on portfolio — refreshing",
+                username, broker_code,
+            )
+            _token_cache_drop(broker_code, username, password)
+            token, last_error = await _get_token(
+                client, broker_code, endpoints, username, password,
+                ocr_service_url, force_refresh=True,
+            )
+            if not token:
+                raise RuntimeError(
+                    last_error or "Authentication failed after token refresh"
+                )
+            resp = await _post(client, token)
+        resp.raise_for_status()
+
+        payload = resp.json() or {}
+        if payload.get("isError"):
+            # Persian message — operator-readable. Surface verbatim.
+            raise RuntimeError(
+                payload.get("message") or "portfolio endpoint returned isError=true"
+            )
+        for item in payload.get("result") or []:
+            if item.get("isin") == isin:
+                return int(item.get("remainVolume", 0) or 0)
+        # ISIN not in the portfolio → the account holds 0 shares.
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Family routing dispatchers
 # ---------------------------------------------------------------------------
@@ -850,4 +947,33 @@ async def get_orders(
         include_status=include_status,
         page_size=page_size,
         max_pages=max_pages,
+    )
+
+
+async def get_holdings(
+    broker_code: str,
+    username: str,
+    password: str,
+    isin: str,
+    *,
+    ocr_service_url: str,
+) -> int:
+    """Whole-share holding for one ISIN, routing by broker family.
+
+    Powers the trade-instruction form's "Auto-sell only" holdings preview.
+    Unlike the result-shaped dispatchers above this one RAISES on any failure
+    (family resolution, auth, transport, broker-side error) — the route wraps
+    it and degrades to a friendly "could not fetch holding". ``ocr_service_url``
+    is keyword-only: it's plumbing for the captcha→OCR login both families
+    need, not part of the holdings question itself.
+    """
+    family = await _family(broker_code)
+    if family == "exir":
+        from app.services.brokers.exir import ExirAdapter
+
+        return await ExirAdapter(broker_code).get_holdings(
+            username, password, isin, ocr_service_url=ocr_service_url
+        )
+    return await _ephoenix_get_holdings(
+        broker_code, username, password, isin, ocr_service_url=ocr_service_url
     )

@@ -205,8 +205,10 @@ async def test_copy_customer_to_agent_duplicates_account_and_instructions(
     monkeypatch.setattr(customers_svc, "get_customer", _fake_get)
 
     src_tis = [
-        SimpleNamespace(isin="IRO1AAA0001", side=1, comment="buy a"),
-        SimpleNamespace(isin="IRO1BBB0001", side=2, comment=None),
+        SimpleNamespace(isin="IRO1AAA0001", side=1, comment="buy a",
+                        auto_sell_threshold=None, auto_sell_only=False),
+        SimpleNamespace(isin="IRO1BBB0001", side=2, comment=None,
+                        auto_sell_threshold=None, auto_sell_only=False),
     ]
 
     added: list = []
@@ -254,6 +256,71 @@ async def test_copy_customer_to_agent_duplicates_account_and_instructions(
         assert nti.section_name.startswith(f"a{target_agent.hex[:8]}_")
         assert nti.section_name != ""
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_copy_customer_preserves_auto_sell_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the copy used to drop ``auto_sell_threshold`` (and would
+    have dropped ``auto_sell_only``) — turning a copied watch-only instruction
+    into a plain Buy that FIRES at open. Both must carry over verbatim."""
+    from app.models.trade_instructions import TradeInstruction
+
+    source_id = uuid.uuid4()
+    target_agent = uuid.uuid4()
+
+    source = SimpleNamespace(
+        id=source_id,
+        agent_id=uuid.uuid4(),
+        broker="bbi",
+        username="acct1",
+        password_enc=b"cipher",
+        display_name="Acme",
+    )
+
+    async def _fake_get(_db, _cid):
+        return source
+
+    monkeypatch.setattr(customers_svc, "get_customer", _fake_get)
+
+    src_tis = [
+        SimpleNamespace(isin="IRO1AAA0001", side=1, comment="armed",
+                        auto_sell_threshold=750, auto_sell_only=True),
+    ]
+
+    added: list = []
+
+    def _add(obj):
+        added.append(obj)
+
+    async def _flush():
+        for obj in added:
+            if getattr(obj, "id", None) is None:
+                obj.id = uuid.uuid4()
+
+    ti_result = MagicMock()
+    ti_result.scalars.return_value.all.return_value = src_tis
+
+    db = MagicMock()
+    db.add = MagicMock(side_effect=_add)
+    db.flush = AsyncMock(side_effect=_flush)
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    db.refresh = AsyncMock()
+    db.execute = AsyncMock(return_value=ti_result)
+    db.get = AsyncMock(
+        return_value=SimpleNamespace(id=target_agent, deleted_at=None)
+    )
+
+    await customers_svc.copy_customer_to_agent(
+        db, source_id, target_agent_id=target_agent, actor_id=uuid.uuid4()
+    )
+
+    new_tis = [o for o in added if isinstance(o, TradeInstruction)]
+    assert len(new_tis) == 1
+    assert new_tis[0].auto_sell_threshold == 750
+    assert new_tis[0].auto_sell_only is True
 
 
 @pytest.mark.asyncio

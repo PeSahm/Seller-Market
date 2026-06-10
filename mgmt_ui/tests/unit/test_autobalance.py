@@ -6,10 +6,12 @@ auto-scale are pure functions — exercised directly with no DB.
 from __future__ import annotations
 
 import uuid
+from unittest.mock import AsyncMock, MagicMock
 
 from app.services.autobalance import (
     PlannedMove,
     _hysteresis_threshold,
+    _load_customer_sections,
     compute_locust_targets,
     plan_moves,
 )
@@ -115,7 +117,7 @@ def test_hysteresis_threshold_scales_with_size():
 # ---------------------------------------------------------------------------
 
 
-def _ctx(num_customers, *, autoscale, locust=None, multiplier=3):
+def _ctx(num_customers, *, autoscale, locust=None, multiplier=3, num_watch_only=0):
     rows = tuple(
         CustomerRow(
             section_name=f"s{i}",
@@ -126,6 +128,18 @@ def _ctx(num_customers, *, autoscale, locust=None, multiplier=3):
             side=1,
         )
         for i in range(num_customers)
+    ) + tuple(
+        CustomerRow(
+            section_name=f"w{i}",
+            username=f"w{i}",
+            password_plain="x",
+            broker="ayandeh",
+            isin=f"IRW{i:011d}",
+            side=1,
+            auto_sell_threshold=500,
+            auto_sell_only=True,
+        )
+        for i in range(num_watch_only)
     )
     return StackRenderContext(
         agent_id=uuid.uuid4(),
@@ -165,3 +179,48 @@ def test_render_autoscale_floor_from_manual_users():
         "locust"
     ]
     assert out["users"] == 200 and out["spawn_rate"] == 5
+
+
+def test_render_autoscale_excludes_auto_sell_only_sections():
+    import json
+
+    # Watch-only (auto_sell_only) sections get no locust user on the bot, so
+    # the targets come from the 5 firing sections only: 15/5 (NOT 21/7).
+    out = json.loads(
+        render_locust_config(_ctx(5, autoscale=True, num_watch_only=2))
+    )["locust"]
+    assert out["users"] == 15 and out["spawn_rate"] == 5
+
+
+# ---------------------------------------------------------------------------
+# _load_customer_sections — the DB-side section count
+# ---------------------------------------------------------------------------
+
+
+async def test_load_customer_sections_excludes_auto_sell_only():
+    """The count query must filter ``auto_sell_only`` rows out of the JOIN.
+
+    If only the renderer excluded them, autobalance and render_locust_config
+    would compute different users targets and fight on every reconcile — so
+    this pins the SQL itself. The filter lives in the (outer) join condition,
+    not the WHERE, so a customer whose only instructions are watch-only still
+    appears with section count 0 (assigned, just weightless).
+    """
+    captured: dict[str, object] = {}
+
+    result = MagicMock()
+    result.all = MagicMock(return_value=[])
+
+    async def _exec(stmt):
+        captured["stmt"] = stmt
+        return result
+
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=_exec)
+
+    assert await _load_customer_sections(db, uuid.uuid4()) == []
+
+    sql = str(captured["stmt"])
+    assert "auto_sell_only" in sql
+    # Still an OUTER join — zero-section customers must not vanish.
+    assert "LEFT OUTER JOIN" in sql
