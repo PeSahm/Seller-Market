@@ -192,7 +192,10 @@ def _compute_job_timeout(parsed_command: List[str],
             if run_time:
                 return max(default, run_time + grace)
     except Exception:
-        pass
+        logger.debug(
+            "_compute_job_timeout: failed to parse --run-time from %s",
+            parsed_command, exc_info=True,
+        )
     return default
 
 

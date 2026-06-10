@@ -222,7 +222,9 @@ if __name__ == '__main__':
         test_scheduler_integration()
         test_non_locust_commands()
         test_distributed_processes_config()
-        
+        test_parse_locust_duration()
+        test_compute_job_timeout_follows_run_time()
+
         print("\n" + "="*80)
         print("✅ ALL TESTS PASSED")
         print("="*80)
@@ -233,6 +235,8 @@ if __name__ == '__main__':
         print("- All Locust parameters centralized in locust_config.json")
         print("- Non-locust commands remain unchanged")
         print("- Distributed load generation via --processes supported")
+        print("- Locust --run-time duration parsing works correctly")
+        print("- Job timeout computation follows configured run-time + grace")
         
     except AssertionError as e:
         print(f"\n❌ TEST FAILED: {e}")
