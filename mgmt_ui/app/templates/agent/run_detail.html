@@ -67,6 +67,15 @@
       <span id="ws-status" class="badge badge--pending text-small">connecting…</span>
     {% endif %}
   </h2>
+  {% if run.status != 'running' and archived_log_total %}
+  <p class="text-small text-muted" style="margin: 4px 0 8px;">
+    {% if archived_log_truncated %}
+      Showing the last {{ '{:,}'.format(archived_log | length) }} characters of
+      {{ '{:,}'.format(archived_log_total) }} bytes.
+    {% endif %}
+    <a href="/agent/runs/{{ run.id }}/log.txt">Download full log</a>
+  </p>
+  {% endif %}
   <pre id="log-pane"
        class="text-small log-pane"
        style="max-height: 60vh; overflow: auto; background: #111; color: #eee; padding: 12px; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word;"

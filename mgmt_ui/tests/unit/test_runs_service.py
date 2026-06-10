@@ -375,3 +375,99 @@ async def test_force_kill_run_stale_running_row_transitions_to_killed() -> None:
     # 4. Exactly one commit happened — multiple commits would mean we
     #    accidentally interleaved the lock DELETE with the row UPDATE.
     assert db.committed == 1
+
+
+# ---------------------------------------------------------------------------
+# read_run_log — gz transparency (full logs are stored gzip-compressed)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_run_log_decompresses_gz_blob(tmp_path: Path) -> None:
+    """A ``.log.gz`` blob is returned decompressed (callers see plain text)."""
+    import gzip
+
+    payload = b"line one\nline two\n" * 100
+    log_path = tmp_path / "run.log.gz"
+    log_path.write_bytes(gzip.compress(payload))
+
+    run = _fake_run(log_blob_ref=str(log_path))
+    assert await read_run_log(run) == payload
+
+
+@pytest.mark.asyncio
+async def test_read_run_log_corrupt_gz_returns_empty(tmp_path: Path) -> None:
+    """Corrupt gzip degrades to b'' — same contract as a missing file."""
+    log_path = tmp_path / "run.log.gz"
+    log_path.write_bytes(b"definitely not gzip")
+
+    run = _fake_run(log_blob_ref=str(log_path))
+    assert await read_run_log(run) == b""
+
+
+# ---------------------------------------------------------------------------
+# read_run_log_tail — bounded inline render for the run-detail page
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_run_log_tail_small_plain_file(tmp_path: Path) -> None:
+    from app.services.runs import read_run_log_tail
+
+    log_path = tmp_path / "run.log"
+    log_path.write_bytes(b"short log")
+    run = _fake_run(log_blob_ref=str(log_path))
+
+    tail, total = await read_run_log_tail(run, max_bytes=1024)
+    assert tail == b"short log"
+    assert total == len(b"short log")
+
+
+@pytest.mark.asyncio
+async def test_read_run_log_tail_large_plain_file_seeks(tmp_path: Path) -> None:
+    """Only the LAST max_bytes come back; total reports the real size."""
+    from app.services.runs import read_run_log_tail
+
+    payload = b"A" * 5000 + b"THE-END"
+    log_path = tmp_path / "run.log"
+    log_path.write_bytes(payload)
+    run = _fake_run(log_blob_ref=str(log_path))
+
+    tail, total = await read_run_log_tail(run, max_bytes=100)
+    assert len(tail) == 100
+    assert tail.endswith(b"THE-END")
+    assert total == len(payload)
+
+
+@pytest.mark.asyncio
+async def test_read_run_log_tail_gz_streams_and_counts(tmp_path: Path) -> None:
+    """Gz blobs: tail of the DECOMPRESSED text + exact decompressed total."""
+    import gzip
+
+    from app.services.runs import read_run_log_tail
+
+    payload = b"B" * 300_000 + b"FINAL-LINE"
+    log_path = tmp_path / "run.log.gz"
+    log_path.write_bytes(gzip.compress(payload))
+    run = _fake_run(log_blob_ref=str(log_path))
+
+    tail, total = await read_run_log_tail(run, max_bytes=64)
+    assert len(tail) == 64
+    assert tail.endswith(b"FINAL-LINE")
+    assert total == len(payload)
+
+
+@pytest.mark.asyncio
+async def test_read_run_log_tail_missing_and_corrupt(tmp_path: Path) -> None:
+    from app.services.runs import read_run_log_tail
+
+    missing = _fake_run(log_blob_ref=str(tmp_path / "nope.log"))
+    assert await read_run_log_tail(missing) == (b"", 0)
+
+    corrupt_path = tmp_path / "bad.log.gz"
+    corrupt_path.write_bytes(b"not gzip at all")
+    corrupt = _fake_run(log_blob_ref=str(corrupt_path))
+    assert await read_run_log_tail(corrupt) == (b"", 0)
+
+    no_ref = _fake_run(log_blob_ref=None)
+    assert await read_run_log_tail(no_ref) == (b"", 0)

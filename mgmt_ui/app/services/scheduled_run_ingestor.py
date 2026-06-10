@@ -23,19 +23,28 @@ Marker shape (matches what
   ``"failed"`` for the final marker.
 * ``exit_code``: int on the final marker only.
 * ``stdout_tail`` / ``stderr_tail``: each capped at 4 KB by the bot.
+* ``log_file`` (optional, final markers): filename of the FULL combined
+  output, gzip-compressed, written by the bot next to the marker
+  (``scheduled_run_<uuid>.log.gz``). When present we fetch it and archive
+  the gz verbatim so the operator can download the complete log from the
+  Runs page; the 4 KB tails remain the fallback for old bots / fetch
+  failures.
 
 Idempotency: every marker is processed at-least-once. We delete the
-remote file after a successful UPSERT so it can't be re-read on the
-next tick. A failed UPSERT leaves the file in place; the next tick
-tries again.
+remote file (and its consumed ``.log.gz``) after a successful UPSERT so
+it can't be re-read on the next tick. A failed UPSERT leaves the file in
+place; the next tick tries again.
 """
 
 from __future__ import annotations
 
+import gzip
 import hashlib
+import io
 import json
 import logging
 import shlex
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,6 +75,32 @@ _RUNNING_SUFFIX = ".running.json"
 _FINAL_SUFFIX = ".json"
 _SUPPORTED_SCHEMA = 1
 _ALLOWED_JOB_NAMES = {"cache_warmup", "run_trading"}
+
+# Full-log fetch guards: the on-the-wire gz is rejected above 16 MiB and the
+# gz must verifiably decompress to <= 256 MiB (gzip-bomb guard) before we
+# archive it. Run logs compress ~10-20x, so 16 MiB gz covers any real run.
+_MAX_GZ_BYTES = 16 * 1024 * 1024
+_MAX_LOG_BYTES = 256 * 1024 * 1024
+
+
+def _gzip_decompresses_within(data: bytes, max_decompressed: int) -> bool:
+    """Stream-verify ``data`` is valid gzip whose payload fits the cap.
+
+    Decompresses in 1 MiB chunks that are immediately discarded — bounded
+    memory regardless of payload size.
+    """
+    try:
+        total = 0
+        with gzip.GzipFile(fileobj=io.BytesIO(data)) as gz:
+            while True:
+                chunk = gz.read(1 << 20)
+                if not chunk:
+                    return True
+                total += len(chunk)
+                if total > max_decompressed:
+                    return False
+    except (OSError, EOFError, zlib.error):
+        return False
 
 
 @dataclass
@@ -170,31 +205,34 @@ async def _upsert_run_from_marker(
     *,
     stack: AgentStack,
     payload: dict,
-) -> tuple[str, str]:
+    server: Optional[Server] = None,
+) -> tuple[str, str, Optional[str]]:
     """Insert a new ``runs`` row from the marker, or update the existing.
 
-    Returns a tuple ``(action, reason)`` where ``action`` is one of
-    ``inserted`` / ``updated`` / ``skipped`` for the caller's counters.
+    Returns ``(action, reason, consumed_log_path)`` where ``action`` is one
+    of ``inserted`` / ``updated`` / ``skipped`` for the caller's counters and
+    ``consumed_log_path`` is the remote ``.log.gz`` the archive step consumed
+    (delete after commit), or ``None``.
 
     Idempotency: dedup on ``runs.id == scheduled_run_id``. If a row
     already exists in a terminal state and the marker is a "running"
     one, we skip (running marker arrived late / after the final).
     """
     if payload.get("schema_version") != _SUPPORTED_SCHEMA:
-        return "skipped", f"schema {payload.get('schema_version')!r} unsupported"
+        return "skipped", f"schema {payload.get('schema_version')!r} unsupported", None
     job_name = payload.get("job_name")
     if job_name not in _ALLOWED_JOB_NAMES:
-        return "skipped", f"job_name {job_name!r} not in enum"
+        return "skipped", f"job_name {job_name!r} not in enum", None
     try:
         run_uuid = UUID(payload["scheduled_run_id"])
     except (KeyError, ValueError, TypeError):
-        return "skipped", "missing or malformed scheduled_run_id"
+        return "skipped", "missing or malformed scheduled_run_id", None
 
     started_at = _parse_iso(payload.get("started_at")) or datetime.now(timezone.utc)
     finished_at = _parse_iso(payload.get("finished_at"))
     raw_status = payload.get("status") or "running"
     if raw_status not in ("running", "success", "failed", "killed"):
-        return "skipped", f"status {raw_status!r} not in enum"
+        return "skipped", f"status {raw_status!r} not in enum", None
     exit_code = payload.get("exit_code")
     if exit_code is not None:
         try:
@@ -222,7 +260,9 @@ async def _upsert_run_from_marker(
         )
         db.add(run)
         await db.flush()
-        await _archive_log_if_final(run, payload)
+        consumed_log = await _archive_log_if_final(
+            run, payload, server=server, stack=stack
+        )
         run_snapshot = {
             "id": str(run.id), "stack_id": str(run.stack_id),
             "agent_id": str(run.agent_id), "job_name": run.job_name,
@@ -262,13 +302,13 @@ async def _upsert_run_from_marker(
                 after_json=run_snapshot,
                 ts=datetime.now(timezone.utc),
             ))
-        return "inserted", raw_status
+        return "inserted", raw_status, consumed_log
 
     # Existing row — only meaningful transition is running → terminal.
     if existing.status != "running":
-        return "skipped", f"row already terminal ({existing.status})"
+        return "skipped", f"row already terminal ({existing.status})", None
     if raw_status == "running":
-        return "skipped", "running marker for a row already at running"
+        return "skipped", "running marker for a row already at running", None
 
     before = {
         "id": str(existing.id), "status": existing.status,
@@ -278,7 +318,9 @@ async def _upsert_run_from_marker(
     existing.status = raw_status
     existing.exit_code = exit_code
     existing.finished_at = finished_at or datetime.now(timezone.utc)
-    await _archive_log_if_final(existing, payload)
+    consumed_log = await _archive_log_if_final(
+        existing, payload, server=server, stack=stack
+    )
     db.add(AuditLog(
         actor_user_id=None,
         action="run.complete" if raw_status == "success" else "run.fail",
@@ -292,27 +334,76 @@ async def _upsert_run_from_marker(
         },
         ts=datetime.now(timezone.utc),
     ))
-    return "updated", raw_status
+    return "updated", raw_status, consumed_log
 
 
-async def _archive_log_if_final(run: Run, payload: dict) -> None:
-    """If the marker is a final one, write its tails into the log archive.
+async def _archive_log_if_final(
+    run: Run,
+    payload: dict,
+    *,
+    server: Optional[Server] = None,
+    stack: Optional[AgentStack] = None,
+) -> Optional[str]:
+    """If the marker is final, archive the run's log.
 
-    The bot already trimmed both streams to 4 KB so the on-disk file
-    is small. Format mirrors what ``finalize_run`` writes for manual
-    runs: combined stdout+stderr bytes at ``RUN_LOGS_DIR/<run_id>.log``
-    with the SHA-256 stored on the row, so the run-detail page's
-    archived-log <pre> renders the same as for manual runs.
+    Preferred path: the marker names a ``log_file`` (the FULL combined
+    output, gzip-compressed, written by the bot next to the marker). We
+    fetch it over SFTP and store the gz bytes AS-FETCHED at
+    ``RUN_LOGS_DIR/<run_id>.log.gz`` — complete log, ~10-20x less disk,
+    zero re-compression. Returns the consumed remote path so the caller
+    can delete it after commit.
+
+    Fallback (old bot images, fetch/validation failure): the marker's 4 KB
+    stdout/stderr tails are written to ``RUN_LOGS_DIR/<run_id>.log`` exactly
+    as before; returns ``None`` so the remote ``.log.gz`` (if any) is left
+    in place for a retry on the next tick.
     """
     status = payload.get("status")
     if status not in ("success", "failed", "killed"):
-        return  # Not a final marker; nothing to archive yet.
+        return None  # Not a final marker; nothing to archive yet.
+
+    log_dir = Path(get_settings().run_logs_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file = payload.get("log_file")
+    if log_file and server is not None and stack is not None:
+        # The filename comes from a remote-writable JSON — accept ONLY the
+        # exact name the bot would emit for THIS run (no path traversal).
+        expected = f"scheduled_run_{payload.get('scheduled_run_id')}.log.gz"
+        if log_file != expected:
+            logger.warning(
+                "scheduled_run %s: marker log_file %r != expected %r — ignoring",
+                run.id, log_file, expected,
+            )
+        else:
+            from app.services.ssh.sftp import sftp_read_bytes
+
+            remote_path = f"{stack.stack_dir}/run_results/{expected}"
+            try:
+                data = await sftp_read_bytes(
+                    server, remote_path, max_bytes=_MAX_GZ_BYTES
+                )
+                if not _gzip_decompresses_within(data, _MAX_LOG_BYTES):
+                    raise ValueError("gz payload invalid or exceeds size cap")
+                log_path = log_dir / f"{run.id}.log.gz"
+                log_path.write_bytes(data)
+                try:
+                    log_path.chmod(0o600)
+                except OSError:
+                    pass
+                run.log_blob_ref = str(log_path)
+                run.log_blob_sha256 = hashlib.sha256(data).hexdigest()
+                return remote_path
+            except (SSHError, ValueError, OSError) as exc:
+                logger.warning(
+                    "scheduled_run %s: full-log fetch failed (%s) — "
+                    "falling back to marker tails", run.id, exc,
+                )
+
     stdout = (payload.get("stdout_tail") or "").encode("utf-8", errors="replace")
     stderr = (payload.get("stderr_tail") or "").encode("utf-8", errors="replace")
     sep = b"\n--- stderr ---\n" if stderr else b""
     blob = stdout + sep + stderr
-    log_dir = Path(get_settings().run_logs_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{run.id}.log"
     log_path.write_bytes(blob)
     try:
@@ -321,6 +412,7 @@ async def _archive_log_if_final(run: Run, payload: dict) -> None:
         pass
     run.log_blob_ref = str(log_path)
     run.log_blob_sha256 = hashlib.sha256(blob).hexdigest()
+    return None
 
 
 async def ingest_stack_once(
@@ -390,10 +482,11 @@ async def ingest_stack_once(
             # Run row without its log archive / matching audit, leaving
             # an inconsistent partial in the database.
             action: str = "skipped"
+            consumed_log: Optional[str] = None
             try:
                 async with db.begin_nested():
-                    action, _ = await _upsert_run_from_marker(
-                        db, stack=stack, payload=payload
+                    action, _, consumed_log = await _upsert_run_from_marker(
+                        db, stack=stack, payload=payload, server=server
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("upsert failed for %s", m.name)
@@ -414,6 +507,11 @@ async def ingest_stack_once(
             # version skew into permanent data loss.
             if action in ("inserted", "updated"):
                 deletes.append(m.full_path)
+                # The consumed full-log gz is deleted alongside its marker
+                # (only set when the archive actually stored it — a tails
+                # fallback leaves the gz remote for a retry next tick).
+                if consumed_log:
+                    deletes.append(consumed_log)
 
         await db.commit()
         for path in deletes:
