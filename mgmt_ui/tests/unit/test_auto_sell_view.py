@@ -76,8 +76,10 @@ async def test_build_rows_applied_flag(monkeypatch):
     monkeypatch.setattr(market_data_client, "get_queue", _queue)
 
     applied_at = datetime(2026, 6, 10, 11, 42, tzinfo=timezone.utc)
-    fired_res = MagicMock(); fired_res.all = MagicMock(return_value=[])
-    status_res = MagicMock(); status_res.all = MagicMock(return_value=[
+    fired_res = MagicMock()
+    fired_res.all = MagicMock(return_value=[])
+    status_res = MagicMock()
+    status_res.all = MagicMock(return_value=[
         (stack, "acc1", "IRO1A", 500, applied_at),
         (stack, "acc2", "IRO1B", 999, applied_at),   # != live 300 → pending
     ])

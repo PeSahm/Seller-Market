@@ -491,6 +491,13 @@ class AutoSellMonitor:
             except Exception:  # noqa: BLE001 — a bad tick must never exit the loop
                 logger.exception("auto-sell: supervisor tick failed")
 
+        # Shutdown: invalidate the generation FIRST (any in-flight delivery is
+        # dropped), then stop the feed threads.
+        self._current_gen += 1
+        if self._feed is not None:
+            self._feed.stop()
+            self._feed = None
+
     # Back-compat shim: the old blocking entry. Delegates to the supervisor so
     # it gains hot-reload (and loses the old idle-forever-on-empty trap).
     def run(self) -> None:
