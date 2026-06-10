@@ -178,6 +178,17 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
                 price=price,
             )
             volume = min(calculated_volume, max_volume)
+            if volume <= 0:
+                # Quiet skip (operator decision): a non-positive volume (e.g.
+                # negative buying power on a debt account) means the section
+                # cannot fire — don't cache order params, but don't fail the
+                # account either; the run-time prepare skips it with one line.
+                logger.warning(
+                    f"  ⚠ BUY volume {volume:,} ≤ 0 (buying power {buying_power:,.0f}) — "
+                    "not caching order params; this section will be skipped at run time"
+                )
+                logger.info(f"\n✓✓✓ Cache warmup successful for {username}@{broker_code} ✓✓✓\n")
+                return True
             if volume != calculated_volume:
                 logger.warning(f"  ⚠ BUY volume constrained from {calculated_volume:,} to {volume:,} (max allowed)")
             else:

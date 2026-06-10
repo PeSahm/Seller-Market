@@ -128,6 +128,16 @@ class EphoenixAdapter(BrokerAdapter):
                 price=price
             )
             volume = min(calculated_volume, max_volume)
+            if volume <= 0:
+                # A non-positive volume (e.g. negative buying power on a debt
+                # account → broker's CalculateOrderParam returns a negative
+                # volume) would be rejected by the broker with code 1001
+                # "wrong order volume" on every POST. Fail once, quietly,
+                # instead of letting the caller spam doomed orders.
+                raise ValueError(
+                    f"skipping {isin} ({username}@{broker_code}): computed BUY volume "
+                    f"{volume:,} invalid (buying_power={buying_power:,.0f})"
+                )
             if volume != calculated_volume:
                 logger.warning(f"⚠ BUY volume constrained from {calculated_volume:,} to {volume:,} (max allowed per order)")
             else:
