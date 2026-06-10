@@ -884,3 +884,46 @@ An OLD bot image **ignores `auto_sell_only`** (configparser keeps unknown keys; 
 | — | Threshold changes need a Redeploy | UX gap: arming via the TI form silently does nothing until the stack redeploys. Candidate: auto-redeploy on TI save (heavy) or a "config changed — Redeploy needed" banner on the stack page. |
 | — | Watch-only warmup health check | cache_warmup skips flagged sections entirely — a bad password is now discovered only at trigger time (monitor HOLDs+retries, fail-safe but late). Candidate: login-only (no order-prep) warmup for flagged sections. |
 | — | Multi-ISIN WS scale | >3 armed ISINs exceeds the 3 push hosts → 4th+ connection 401s once then re-logins. Fine at current scale; a per-thread login (or shared-socket multiplexing) if the operator arms many instruments. |
+
+---
+
+## Session 14 — REAL-TIME auto-sell threshold editing (#141): bot hot-reload + "Bot applied" UI confirmation, fleet-deployed
+
+Operator: *"changing the threshold must be real time — we may change it many times during the market."* Previously a threshold edit needed a stack **Redeploy** (the monitor read config.ini once at boot; a bot booted with 0 armed idled forever in `_idle()` and could never arm later — the S13 "Threshold changes need a Redeploy" follow-up). **PR #141** (`aaa527a`) merged + fleet-deployed same day. Threshold edits are now live on the bot in **~3 s** with on-page confirmation; the S13 follow-up is RETIRED.
+
+### Key insight that shaped the design
+**The mgmt side already pushed config.ini on every TI save** — `_push_customer_stack_config → stacks.push_config_ini_for_stack → sftp_atomic_write` (an IN-PLACE truncate+rewrite chosen to preserve the single-file bind-mount inode; `app/services/ssh/sftp.py` docstring). So the in-container file updates seconds after Save; the whole gap was bot-side (read-once + the 0-armed idle trap). The fix is a **supervisor in `AutoSellMonitor`**, not new mgmt push plumbing.
+
+### Bot — `AutoSellMonitor.run_supervised(config_path, poll_interval=3.0, feed_factory)`
+- **Content-bytes polling** (not mtime — no stat/TOCTOU/granularity issues; prior art: scheduler re-reads its config every tick). Threshold-only change → **atomic dict swap** (`self._by_isin`/`self.targets` reference-replaced; feed UNTOUCHED — new threshold consulted on the next push). ISIN-set change → feed rebuild (`QueueFeed` gained a `start()`/`run_forever()` split; late `subscribe()` still doesn't spawn threads — rebuild is the model).
+- **STRICT SENTINEL GATE (the money guard, forced by adversarial review):** a reload applies ONLY from a config ending with `# auto-sell-config-end` (now appended LAST by `rendering/config_ini.py`, zero-customer renders included). A torn in-place write is a front-to-back PREFIX → never has the sentinel. The original design's "1s settle + byte-identical re-read" was PROVEN insufficient: an SSH-retry write can stay torn for SECONDS, and a torn prefix can parse CLEANLY with a WRONG (raised ⇒ fires-too-eagerly) threshold — the review reproduced a spurious-SELL end-to-end. No sentinel ⇒ HOLD + WARNING (deduped per content), retry next poll. Boot still parses sentinel-less files (file at rest), but records `_applied_content` only when trusted.
+- **Double-ladder guards:** feed-**generation** closure (stale feed's in-flight delivery — one `recv` survives `stop()` — is dropped; gen bumped BEFORE starting the new feed and on supervisor shutdown) + per-`(account,isin)` **in-flight lock** in `_trigger` (check+add under one lock; released in `finally`). Either alone kills the double-sell race on rebuild-during-trigger.
+- **Asymmetric disarm:** a reload REMOVING an armed position needs an identical confirming tick (~3 s later); additions/threshold changes apply immediately. Cosmetic pushes (identical armed signature incl. creds/family) are no-ops — important because mgmt pushes config on EVERY customer mutation. **DayState latch survives reloads** (same instance; raising a threshold after a same-day fire does NOT re-fire until midnight).
+- `parse_auto_sell_targets(content)` = new RAISING parser (read_string); `load_auto_sell_targets` stays the swallow-to-[] boot wrapper — the supervisor must distinguish torn/garbage from a legit disarm-all.
+- `bot_entrypoint`: `MARKET_DATA_URL` unset ⇒ `_idle()`; otherwise ALWAYS `run_supervised` (0→armed works without restart). On every APPLIED reload the bot overwrites `run_results/auto_sell_status.json` `{schema:1, applied_at, armed:[{account,isin,threshold}]}` (tmp+os.replace — fine in a DIR mount; NEVER do that for the single-file-mounted config.ini).
+
+### mgmt — "Bot applied" confirmation loop
+- Migration **`0014_as_reload_status`**: `auto_sell_reload_status` PK **(stack_id, account, isin)** — per ACCOUNT: two customers on one stack arming the same ISIN is real fleet state (review caught the (stack,isin) PK as a txn-poisoning collision). `fire_log_ingestor` pulls the marker per tick **inside `db.begin_nested()`** (a status failure must never roll back the order-fire rows staged in the same txn — without the savepoint the poisoned session loses them at commit) + last-wins dedup on the PK before insert; replace-then-insert per stack.
+- `auto_sell_view.build_auto_sell_rows` adds `applied`/`applied_at` (applied ⇔ bot's last-applied threshold == live DB threshold, keyed (stack_id, c.username, isin)); `partials/auto_sell_rows.html` shows **"✓ applied HH:MM"** vs **"⏳ pending reload"** (rides the existing 3s HTMX poll); new "Bot applied" `<th>` on both pages.
+
+### Adversarial review (4 lenses → 3-vote verify, 58 agents) — 6 confirmed, 12 refuted
+Confirmed + fixed: the torn-prefix spurious-SELL (⇒ strict sentinel gate), duplicate-ISIN marker → PK collision → poisoned txn → **order-fire rows silently lost every tick** (⇒ per-account PK + dedup + savepoint), swallow-then-commit breaking the staged-rows guarantee (⇒ savepoint), per-account "applied" ambiguity (⇒ keying). CodeRabbit added 2 (feed not stopped on supervisor shutdown — fixed with gen-bump-then-stop; lint nit).
+
+### Deploy (fleet-wide, NO rollout gate — backward-compatible BOTH directions)
+Old bot + sentinel config: sentinel is a comment, ignored. New bot + old (sentinel-less) config: boots fine, holds reloads with one deduped WARNING until mgmt re-renders — **observed live exactly as designed** on the first stack before the mgmt deploy landed. Sequence: bot `aaa527a` staged by digest (`sha256:749adada…`) on all 6 hosts → **14/14 stacks redeployed + revision-verified** → mgmt UI `aaa527a` (alembic `0014_as_reload_status`; table columns verified) → end-to-end: both armed stacks' boot markers ingested into `auto_sell_reload_status` within one tick (operator had meanwhile changed the threshold 7M→1M; the table shows 1,000,000 for both accounts — "✓ applied").
+- **mgmt-UI Docker build FAILED once on the merge commit**: the self-hosted runner couldn't pull `postgres:16-alpine` from docker.io (Iranian-egress timeout) for the workflow's test-service container. `gh run rerun <id> --failed` succeeded. **Check the runner's docker.io egress when a mgmt build fails at "Initialize containers".**
+
+### Learnings (Session 14)
+- **In-place SFTP writes can stay torn for SECONDS** (pool `run_with_retry` re-handshakes mid-write) — a settle/double-read is NOT proof of completeness. A renderer-appended trailing sentinel converts torn-detection into proof: in-place rewrites are front-to-back, so a prefix can never carry the last line.
+- **Torn-config failure direction matters:** most torn outcomes bias to NOT-firing (dropped section, threshold→0) — but a prefix that cuts AFTER a RAISED threshold line fires too eagerly. That asymmetry is why apply must be gated, not just disarms.
+- **`gh pr merge --delete-branch` + a FAILED `git fetch` + `reset --hard origin/main` = silently resetting to a STALE ref.** The merge had landed remotely but the local tree went back to pre-merge. Always verify `git log -1` shows the merge commit after resync; refetch until it does.
+- **Substring traps in CI polls:** `grep "test=pass"` matches `mgmt-ui-test=pass` — use exact-field awk (`$1=="test"`). And `gh run list --commit <short-sha>` can return nothing — use the full SHA.
+- Workflow scripts: inner backticks inside template literals break the parser (plain JS only); build prompts with string concat / join.
+- The reload's "applies in seconds" claim still has ONE redeploy-shaped exception: `MARKET_DATA_URL` (env) changes need a stack redeploy — by design.
+
+### Open follow-ups (Session 14)
+| # | Title | Why |
+|---|---|---|
+| — | **Operator live-test of real-time editing** | During market hours: edit a threshold on the form → within ~3-6 s the bot logs `auto-sell reload: … changed ISIN old→new` and `/admin/auto-sell` flips to "✓ applied HH:MM". Rapid consecutive edits each land; no duplicate side=2 fires near the threshold. |
+| — | Sentinel-less HOLD is silent in the UI | If a stack's config predates the sentinel (no re-push since the mgmt upgrade), reloads hold with only a bot-log WARNING; the page shows "pending" indefinitely. Any TI save / redeploy re-renders with the sentinel and clears it. Candidate: surface a "config needs re-push" hint. |
+| — | S13 "Threshold changes need a Redeploy" | RETIRED by this session (hot-reload). |
