@@ -176,7 +176,11 @@
   function fetchHoldings() {
     if (!box || !isinInput) return;
     var isin = (isinInput.value || '').trim().toUpperCase();
-    if (side() !== '3' || !isin) { box.textContent = ''; return; }
+    if (side() !== '3' || !isin) {
+      seq++;  /* invalidate any in-flight probe — a late response must not paint */
+      box.textContent = '';
+      return;
+    }
     var mySeq = ++seq;
     box.textContent = 'fetching holding…';
     fetch(holdingsUrl + '?isin=' + encodeURIComponent(isin), { credentials: 'same-origin' })
@@ -202,9 +206,14 @@
     var s = side();
     field.style.display = (s === '1' || s === '3') ? '' : 'none';
     if (threshold) {
-      /* Watch-only is meaningless without a threshold — make it required. */
+      /* Watch-only is meaningless without a threshold — make it required.
+         On Sell, DISABLE the input too: a hidden field still posts, and a
+         stale typed value would silently ride along on side=2 (the server
+         clears it, but don't send it at all). The value is kept client-side
+         so flipping back to Buy restores it. */
       if (s === '3') { threshold.setAttribute('required', 'required'); }
       else { threshold.removeAttribute('required'); }
+      threshold.disabled = (s === '2');
     }
     scheduleFetch();
   }

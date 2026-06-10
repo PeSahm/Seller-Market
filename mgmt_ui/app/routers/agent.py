@@ -1091,9 +1091,11 @@ async def agent_customer_holdings(
     if customer is None or not _can_access_customer(user, customer):
         raise HTTPException(status_code=404, detail="customer not found")
     effective_isin = (isin or "").strip().upper()
+    if not effective_isin:
+        # A cleared/partially-typed ISIN field is normal form interaction,
+        # not a broker failure — no exception log.
+        return JSONResponse({"isin": "", "error": "no isin to probe"})
     try:
-        if not effective_isin:
-            raise ValueError("no isin to probe")
         password = await services_customers.decrypt_password(customer)
         ocr_service_url = await settings_store.get_setting(db, "ocr_service_url")
         holdings = await broker_client.get_holdings(
