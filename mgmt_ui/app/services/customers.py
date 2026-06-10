@@ -369,6 +369,11 @@ async def copy_customer_to_agent(
                 customer_id=new_customer.id,
                 isin=ti.isin,
                 side=ti.side,
+                # Carry the auto-sell config too — dropping it would turn a
+                # copied watch-only instruction into a plain Buy that FIRES
+                # at open (and silently lose the threshold on a normal Buy).
+                auto_sell_threshold=ti.auto_sell_threshold,
+                auto_sell_only=ti.auto_sell_only,
                 section_name="",  # placeholder until the flush mints the id
                 comment=ti.comment,
                 version=1,

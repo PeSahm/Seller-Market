@@ -55,8 +55,16 @@ def render_config_ini(ctx: StackRenderContext) -> str:
         # #110 auto-sell: emit only when armed. None AND 0 both mean "disabled"
         # (the service normalizes 0 -> None at storage, and the bot likewise
         # treats threshold <= 0 as disabled), so the truthy guard is the single
-        # consistent representation. Additive — the bot ignores unknown keys.
+        # consistent representation. Additive — the bot ignores unknown keys,
+        # so emitting auto_sell_threshold / auto_sell_only can't break older
+        # bot images.
         if c.auto_sell_threshold:
             lines.append(f"auto_sell_threshold = {c.auto_sell_threshold}")
+        # Auto-sell ONLY (existing holding, no buy): the section keeps side=1
+        # so the monitor arms it, but the bot skips it in locust + cache
+        # warmup. Emitted ONLY when flagged so unflagged sections render
+        # byte-identically to before.
+        if c.auto_sell_only:
+            lines.append("auto_sell_only = true")
     lines.append("")  # trailing newline
     return "\n".join(lines)

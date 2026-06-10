@@ -14,7 +14,7 @@ import json
 import broker_adapters
 import ephoenix_adapter
 import exir_adapter
-from broker_adapters import PreparedOrder, resolve_family, get_adapter
+from broker_adapters import PreparedOrder, resolve_family, get_adapter, is_auto_sell_only
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +33,22 @@ def test_resolve_family_falls_back_to_ephoenix():
     assert resolve_family("ayandeh", None) == "ephoenix"
     # empty/blank broker_family is treated as absent (factory still defaults)
     assert resolve_family("gs", {"broker_family": ""}) == "ephoenix"
+
+
+# ---------------------------------------------------------------------------
+# is_auto_sell_only
+# ---------------------------------------------------------------------------
+
+def test_is_auto_sell_only_truthy_falsy_matrix():
+    # truthy strings — case-insensitive after strip
+    for v in ("true", "TRUE", "1", "yes", "on", " true "):
+        assert is_auto_sell_only({"auto_sell_only": v}) is True, v
+    # falsy / missing / None-ish → False
+    for v in ("", "false", "0", "no"):
+        assert is_auto_sell_only({"auto_sell_only": v}) is False, v
+    assert is_auto_sell_only({}) is False                          # missing key
+    assert is_auto_sell_only({"auto_sell_only": None}) is False    # None value
+    assert is_auto_sell_only(None) is False                        # no section at all
 
 
 # ---------------------------------------------------------------------------

@@ -26,7 +26,8 @@ async def build_auto_sell_rows(
     """Return one row per armed (customer, isin), newest-armed first.
 
     Each row: ``customer_id, customer, agent_id, broker, isin, threshold,
-    buy_volume (live or None), triggered (buy_volume<=threshold), fired_today``.
+    buy_volume (live or None), triggered (buy_volume<=threshold), fired_today,
+    sell_only (auto-sell-only watch row — no buy fires at open)``.
     """
     armed = await services_ti.list_armed_auto_sell(db, agent_id)
     if not armed:
@@ -65,6 +66,8 @@ async def build_auto_sell_rows(
             "buy_volume": bv,
             "triggered": bv is not None and bv <= ti.auto_sell_threshold,
             "fired_today": (c.id, ti.isin) in fired,
+            # getattr keeps older test fakes (built before the column) working.
+            "sell_only": bool(getattr(ti, "auto_sell_only", False)),
         })
     return rows
 

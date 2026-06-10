@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditLog
@@ -134,7 +134,11 @@ async def _load_customer_sections(
     db: AsyncSession, agent_id: UUID
 ) -> list[tuple[UUID, UUID, int]]:
     """``[(customer_id, stack_id, section_count)]`` for the agent's *assigned*
-    customers. Section count = number of trade-instruction rows on the customer.
+    customers. Section count = number of trade-instruction rows on the customer,
+    EXCLUDING auto-sell-only rows — those are watch-only (no locust user fires at
+    open), so they must not weigh the balancer nor inflate the locust targets.
+    Keeping this in lock-step with the render-time count in
+    ``render_locust_config`` is what stops the two from fighting on reconcile.
     """
     stmt = (
         select(
@@ -142,7 +146,13 @@ async def _load_customer_sections(
             Customer.stack_id,
             func.count(TradeInstruction.id),
         )
-        .outerjoin(TradeInstruction, TradeInstruction.customer_id == Customer.id)
+        .outerjoin(
+            TradeInstruction,
+            and_(
+                TradeInstruction.customer_id == Customer.id,
+                TradeInstruction.auto_sell_only.is_(False),
+            ),
+        )
         .where(
             Customer.agent_id == agent_id,
             Customer.stack_id.is_not(None),

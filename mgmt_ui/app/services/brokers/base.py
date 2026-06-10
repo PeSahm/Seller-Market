@@ -103,3 +103,8 @@ class BrokerAdapter(Protocol):
         max_pages: int = 500,
     ) -> tuple[list[dict], Optional[str]]:
         ...
+
+    async def get_holdings(
+        self, username: str, password: str, isin: str, *, ocr_service_url: str
+    ) -> int:
+        ...

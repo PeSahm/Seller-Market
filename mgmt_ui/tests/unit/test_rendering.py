@@ -293,6 +293,29 @@ def test_locust_config_override() -> None:
     }
 
 
+def test_locust_config_autoscale_excludes_auto_sell_only() -> None:
+    """Auto-sell-ONLY (watch-only) sections must not inflate the autoscale.
+
+    Those sections get no locust user-class on the bot, so the users/spawn
+    targets are computed from the firing sections only: 5 normal + 2 flagged
+    → users = 3×5 = 15, spawn = 5 (NOT 21/7).
+    """
+    customers = tuple(
+        CustomerRow(f"sec_{i}", f"u{i}", "p", "ayandeh", f"IRO1X{i}", 1)
+        for i in range(5)
+    ) + tuple(
+        CustomerRow(
+            f"watch_{i}", f"w{i}", "p", "ayandeh", f"IRO1Y{i}", 1,
+            auto_sell_threshold=500, auto_sell_only=True,
+        )
+        for i in range(2)
+    )
+    out = render_locust_config(_ctx(customers=customers, autoscale_locust=True))
+    parsed = json.loads(out)
+    assert parsed["locust"]["users"] == 15
+    assert parsed["locust"]["spawn_rate"] == 5
+
+
 # ---------------------------------------------------------------------------
 # Smoke: re-exports are wired correctly.
 # ---------------------------------------------------------------------------

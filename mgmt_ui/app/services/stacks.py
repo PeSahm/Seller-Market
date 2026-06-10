@@ -480,6 +480,7 @@ async def _load_stack_customers(
                     # getattr keeps older test fakes (built before this column)
                     # working; real ORM rows always carry the attribute.
                     auto_sell_threshold=getattr(ti, "auto_sell_threshold", None),
+                    auto_sell_only=getattr(ti, "auto_sell_only", False),
                 )
             )
     return tuple(rendered)

@@ -26,7 +26,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,12 +45,14 @@ from app.schemas.customer import (
 from app.schemas.trade_instruction import (
     TradeInstructionCreate,
     TradeInstructionUpdate,
+    map_side_form,
 )
 from app.schemas.locust import LocustUpsert
 from app.schemas.scheduler import SchedulerJobUpsert
 from app.security.deps import get_current_user
 from app.services import agents as services_agents
 from app.services import auto_sell_view as services_auto_sell_view
+from app.services import broker_client
 from app.services import brokers_admin
 from app.services import customers as services_customers
 from app.services import health_signals as services_health
@@ -764,11 +766,16 @@ async def agent_trade_instruction_create(
     }
 
     try:
+        # Form-layer alias: side=3 ("Auto-sell only") maps to a side=1 row
+        # flagged watch-only. ``sticky`` above keeps the RAW posted value so
+        # the third radio stays selected on a validation re-render.
+        mapped_side, auto_sell_only = map_side_form(side)
         payload = TradeInstructionCreate(
             isin=isin,
-            side=side,  # type: ignore[arg-type]
+            side=mapped_side,  # type: ignore[arg-type]
             comment=comment if comment else None,
             auto_sell_threshold=_parse_optional_int(auto_sell_threshold),
+            auto_sell_only=auto_sell_only,
         )
     except (ValidationError, ValueError) as exc:
         ctx = _ctx(request, user, current_tab="/agent/customers")
@@ -840,7 +847,9 @@ async def agent_trade_instruction_edit_form(
     ctx["form_error"] = None
     ctx["form_values"] = {
         "isin": ti.isin,
-        "side": str(ti.side),
+        # A watch-only row is stored side=1 + auto_sell_only; the form's
+        # third radio is its alias, so pre-select "3" for it.
+        "side": "3" if ti.auto_sell_only else str(ti.side),
         "comment": ti.comment or "",
         "auto_sell_threshold": ti.auto_sell_threshold if ti.auto_sell_threshold is not None else "",
         "version": ti.version,
@@ -873,8 +882,9 @@ async def agent_trade_instruction_update(
     fields: dict = {"version": version}
     if isin is not None and isin != "":
         fields["isin"] = isin
-    if side is not None:
-        fields["side"] = side
+    # ``side`` is mapped (form alias 3 → side=1 + auto_sell_only) inside the
+    # payload try below so an invalid value lands in the same error re-render
+    # path as a ValidationError.
     if comment is not None:
         fields["comment"] = comment if comment != "" else None
     # Always include it (form submits empty when unset / on a Sell) so the
@@ -893,6 +903,7 @@ async def agent_trade_instruction_update(
         side=ti.side,
         comment=ti.comment,
         auto_sell_threshold=ti.auto_sell_threshold,
+        auto_sell_only=ti.auto_sell_only,
         version=ti.version,
     )
     _customer_snap = SimpleNamespace(
@@ -904,7 +915,13 @@ async def agent_trade_instruction_update(
 
     sticky = {
         "isin": isin if isin is not None and isin != "" else ti.isin,
-        "side": str(side if side is not None else ti.side),
+        # Sticky side prefers the RAW posted value (so the "3" alias radio
+        # stays selected); the stored-row fallback re-derives the alias.
+        "side": (
+            str(side)
+            if side is not None
+            else ("3" if ti.auto_sell_only else str(ti.side))
+        ),
         "comment": comment if comment is not None else (ti.comment or ""),
         "auto_sell_threshold": (
             auto_sell_threshold if auto_sell_threshold is not None
@@ -914,6 +931,10 @@ async def agent_trade_instruction_update(
     }
 
     try:
+        if side is not None:
+            # Form-layer alias: 3 → (1, True). The raw ``side`` stays
+            # untouched for the sticky re-render above.
+            fields["side"], fields["auto_sell_only"] = map_side_form(side)
         payload = TradeInstructionUpdate(**fields)
     except (ValidationError, ValueError) as exc:
         ctx = _ctx(request, user, current_tab="/agent/customers")
@@ -1046,6 +1067,51 @@ async def agent_trade_instructions_delete_all(
         status_code=status.HTTP_303_SEE_OTHER,
         headers={"Location": redirect_to},
     )
+
+
+@router.get("/customers/{customer_id}/holdings")
+async def agent_customer_holdings(
+    customer_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    isin: str = "",
+):
+    """Live holdings probe for the trade-instruction form's "Auto-sell only"
+    preview — the agent-scoped twin of ``admin_customer_holdings``.
+
+    Ownership-scoped like every other ``/agent/customers/{cid}`` route (an
+    agent probing another agent's customer UUID gets 404, not data). This is
+    a live captcha→OCR→login call — it can take seconds and can fail; ANY
+    failure returns a 200 with an ``error`` field (the form renders a muted
+    hint, never a 500) and the real exception goes to the server log.
+    """
+    _require_agent_or_admin(user)
+    customer = await services_customers.get_customer(db, customer_id)
+    if customer is None or not _can_access_customer(user, customer):
+        raise HTTPException(status_code=404, detail="customer not found")
+    effective_isin = (isin or "").strip().upper()
+    try:
+        if not effective_isin:
+            raise ValueError("no isin to probe")
+        password = await services_customers.decrypt_password(customer)
+        ocr_service_url = await settings_store.get_setting(db, "ocr_service_url")
+        holdings = await broker_client.get_holdings(
+            customer.broker,
+            customer.username,
+            password,
+            effective_isin,
+            ocr_service_url=ocr_service_url,
+        )
+    except Exception:  # noqa: BLE001 — degrade to a muted hint, log the cause
+        logger.exception(
+            "holdings probe failed for customer %s isin %s",
+            customer_id, effective_isin,
+        )
+        return JSONResponse(
+            {"isin": effective_isin, "error": "could not fetch holding"}
+        )
+    return JSONResponse({"isin": effective_isin, "holdings": holdings})
 
 
 @router.get("/instruments/search")

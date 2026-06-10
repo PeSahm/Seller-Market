@@ -65,10 +65,19 @@
                {% if fv.side|string == '2' %}checked{% endif %}>
         Sell (2)
       </label>
+      <label class="radio-row">
+        <input type="radio" name="side" value="3"
+               {% if fv.side|string == '3' %}checked{% endif %}>
+        Auto-sell only
+      </label>
+      <p class="text-small text-muted">
+        Auto-sell only: no order at market open — sells the existing holding
+        when the buy-queue thins to the threshold.
+      </p>
     </div>
   </div>
 
-  {# --- Auto-sell (Buy only, #110) — shown only when Side = Buy --- #}
+  {# --- Auto-sell (#110) — shown for Buy + Auto-sell only --- #}
   <div class="field" id="auto-sell-field"{% if fv.side|string == '2' %} style="display:none;"{% endif %}>
     <label class="label" for="auto_sell_threshold">Auto-sell when buy-queue &le; (shares)</label>
     <input class="input" id="auto_sell_threshold" name="auto_sell_threshold"
@@ -76,10 +85,11 @@
            value="{{ fv.auto_sell_threshold|default('') }}"
            placeholder="leave empty to disable auto-sell">
     <p class="text-small text-muted">
-      Optional. When this stock's best-buy-queue share count drops to/below this
+      When this stock's best-buy-queue share count drops to/below this
       number, the bot sells the held position at the day's floor price (split into
-      max-volume chunks). Applies to Buy instructions only.
+      max-volume chunks). Optional on a Buy; required for Auto-sell only.
     </p>
+    <div id="holdings-preview" class="text-small text-muted"></div>
   </div>
 
   <div class="field">
@@ -99,22 +109,66 @@
   </div>
 </form>
 
-{# Show the auto-sell field only when Side = Buy (#110). #}
+{# Show the auto-sell field for Buy + Auto-sell only (sides 1/3), require the
+   threshold for watch-only (side 3), and live-preview the holding an
+   Auto-sell-only instruction would liquidate. The preview fetch is debounced
+   and fires ONLY while side=3 — sides 1/2 never pay the captcha→login cost. #}
 <script>
 (function () {
   var field = document.getElementById('auto-sell-field');
   if (!field) return;
   var radios = document.querySelectorAll('input[name="side"]');
-  function sync() {
-    var buy = false;
+  var threshold = document.getElementById('auto_sell_threshold');
+  var box = document.getElementById('holdings-preview');
+  var isinInput = document.getElementById('isin');
+  var holdingsUrl = '/agent/customers/{{ customer.id }}/holdings';
+  var timer = null;
+  var seq = 0;
+  function side() {
     for (var i = 0; i < radios.length; i++) {
-      if (radios[i].checked && radios[i].value === '1') { buy = true; break; }
+      if (radios[i].checked) return radios[i].value;
     }
-    field.style.display = buy ? '' : 'none';
+    return null;
+  }
+  function fetchHoldings() {
+    if (!box || !isinInput) return;
+    var isin = (isinInput.value || '').trim().toUpperCase();
+    if (side() !== '3' || !isin) { box.textContent = ''; return; }
+    var mySeq = ++seq;
+    box.textContent = 'fetching holding…';
+    fetch(holdingsUrl + '?isin=' + encodeURIComponent(isin), { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (mySeq !== seq) return;  /* superseded by a newer fetch */
+        if (data && typeof data.holdings === 'number') {
+          box.textContent = 'Current holding: ' + data.holdings.toLocaleString()
+            + ' shares — auto-sell would liquidate this entire amount';
+        } else {
+          box.textContent = "couldn't fetch holding";
+        }
+      })
+      .catch(function () {
+        if (mySeq === seq) box.textContent = "couldn't fetch holding";
+      });
+  }
+  function scheduleFetch() {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(fetchHoldings, 500);  /* debounce the live broker probe */
+  }
+  function sync() {
+    var s = side();
+    field.style.display = (s === '1' || s === '3') ? '' : 'none';
+    if (threshold) {
+      /* Watch-only is meaningless without a threshold — make it required. */
+      if (s === '3') { threshold.setAttribute('required', 'required'); }
+      else { threshold.removeAttribute('required'); }
+    }
+    scheduleFetch();
   }
   for (var i = 0; i < radios.length; i++) {
     radios[i].addEventListener('change', sync);
   }
+  if (isinInput) { isinInput.addEventListener('input', scheduleFetch); }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', sync);
   } else { sync(); }

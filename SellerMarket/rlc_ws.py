@@ -16,16 +16,28 @@ see ``scratch/RLC_WS_FINDINGS.md``):
   claim), NOT the login ``authToken``.
 * Subscribe with the text frame ``"1,MW.<ISIN>"`` (MW = Market Watch).
 * Inbound frames are **comma-separated text** (NOT JSON):
-  ``MW,<insCode>,<ISIN>,<name>,...`` — the queue numbers are positional. A ``V,...``
-  frame carries the server time. (The SPA's ``parseMessage`` JSON.parse is a
+  ``MW,<insCode>,<ISIN>,<name>,...``. A ``V,...`` frame carries the server time,
+  ``N2,...`` a last-price tick. (The SPA's ``parseMessage`` JSON.parse is a
   different code path; the live wire is CSV.)
+* **The order-book depth is NOT a flat CSV field** — it rides in semicolon-packed
+  level blobs appended to the MW frame (confirmed live 2026-06-10 on
+  IRT3SORF0001; value == the REST ``bbq``)::
 
-The exact MW field INDEX carrying the buy-queue count needs live data to pin
-(at market close every queue field is 0 → ambiguous). So this client
-**self-calibrates**: on a live MW frame it finds the index whose value equals the
-REST best-buy queue (``rlc_market.get_queue(isin)['buy_volume']`` == ``bbq``) and
-locks onto it — but ONLY when that match is unambiguous. One socket PER ISIN, so
-frames need no ISIN-routing field (still verified against ``parts[2]``).
+      bl1;<buyVol>;<buyPrice>;<buyCount>;<buyTime>;<sellVol>;<sellPrice>;<sellCount>;<sellTime>
+
+  ``bl2``/``bl3`` are the deeper levels. The best-buy-queue share count is
+  ``bl1`` element 1 — parsed explicitly by :func:`extract_buy_queue`. (The
+  earlier flat-field self-calibration could NEVER match: the volume only ever
+  appears inside the blob, so the index never bound and no update ever flowed.)
+* **An idle socket is NORMAL**: the server pushes an MW snapshot on subscribe,
+  then only on order-book CHANGES (a quiet instrument can go minutes between
+  frames). A recv timeout is benign — ping + keep reading, never tear down.
+  Reconnecting needlessly also burns the auth: a ``rlcAuthHeader`` is
+  single-use per push host (``401 token already has been used``), forcing a
+  fresh captcha→login each cycle.
+
+One socket PER ISIN, so frames need no ISIN-routing field (still verified
+against ``parts[2]``).
 
 FLAT package layout — top-level module (Dockerfile ``COPY *.py ./``).
 """
@@ -37,8 +49,6 @@ import threading
 from typing import Callable, Optional
 
 import requests
-
-import rlc_market
 
 logger = logging.getLogger(__name__)
 
@@ -107,31 +117,23 @@ def parse_mw(raw) -> Optional[list[str]]:
     return raw.split(",")
 
 
-def find_buy_queue_index(parts: list[str], expected_bbq: int) -> Optional[int]:
-    """Return the field INDEX whose int value == ``expected_bbq``, IFF unambiguous.
+def extract_buy_queue(parts: list[str]) -> Optional[int]:
+    """Best-buy-queue share count from a Market-Watch frame, or None.
 
-    Self-calibrates which positional MW field is the best-buy queue against the
-    REST cross-check. A tie (two fields share the value — common when the queue
-    is 0 at market close) returns None so the caller waits for a clean frame;
-    binding the wrong index would corrupt every later sell decision.
+    The MW frame appends the order-book depth as semicolon-packed levels;
+    level 1 is the ``bl1;…`` field and its element 1 is the buy-side share
+    count (live-verified == the REST ``bbq``). Returns None when no parseable
+    ``bl1`` exists (malformed frame / depth missing) — the consumer treats
+    None as HOLD, never as "sell". A literal ``bl1;0;…`` returns 0: an empty
+    buy queue IS the thinned-queue condition.
     """
-    if expected_bbq is None or expected_bbq <= 0:
-        # 0/None can't disambiguate (many fields are 0) — never calibrate on it.
-        return None
-    candidates = [
-        i for i, p in enumerate(parts)
-        if p and p.lstrip("-").isdigit() and int(p) == int(expected_bbq)
-    ]
-    return candidates[0] if len(candidates) == 1 else None
-
-
-def extract_index(parts: list[str], index: int) -> Optional[int]:
-    """Read a numeric field at ``index`` from the CSV parts, or None."""
-    try:
-        v = parts[index]
-        return int(v) if v and v.lstrip("-").isdigit() else None
-    except (IndexError, TypeError, ValueError):
-        return None
+    for p in parts:
+        if isinstance(p, str) and p.startswith("bl1;"):
+            bits = p.split(";")
+            if len(bits) > 1 and bits[1].isdigit():
+                return int(bits[1])
+            return None  # malformed level blob — fail-safe HOLD
+    return None
 
 
 class RlcQueueClient:
@@ -157,13 +159,22 @@ class RlcQueueClient:
         self._rr = 0  # round-robin index across push servers
 
     def _ensure_auth(self, force: bool = False) -> tuple[str, str]:
-        """Return (push_url, rlc_auth), logging in (and caching) if needed."""
+        """Return (push_url, rlc_auth), logging in (and caching) if needed.
+
+        Each call hands out the NEXT push host: the rlcAuthHeader is
+        single-use PER HOST (a reused token gets ``401 token already has been
+        used``), so concurrent per-ISIN threads sharing one login must spread
+        their handshakes across hosts. With more subscribed ISINs than push
+        hosts the surplus handshake 401s and the existing force-re-login path
+        mints a fresh token.
+        """
         with self._auth_lock:
             if force or not self._rlc_auth or not self._push_urls:
                 self._push_urls, self._rlc_auth, self._cookies = login(
                     self.tenant, self.username, self.password, self.decode_captcha)
                 self._rr = 0
             url = self._push_urls[self._rr % len(self._push_urls)]
+            self._rr += 1
             return url, self._rlc_auth
 
     def _next_push(self) -> None:
@@ -181,7 +192,7 @@ class RlcQueueClient:
     def _run_one(self, isin: str) -> None:
         import websocket  # websocket-client
 
-        index: Optional[int] = None
+        first_value_logged = False
         backoff = self._reconnect_min
         while not self._stop.is_set():
             ws = None
@@ -203,20 +214,27 @@ class RlcQueueClient:
                 backoff = self._reconnect_min
                 ws.settimeout(40)
                 while not self._stop.is_set():
-                    parts = parse_mw(ws.recv())
+                    try:
+                        raw = ws.recv()
+                    except websocket.WebSocketTimeoutException:
+                        # Idle is NORMAL — the server only pushes on order-book
+                        # changes. Ping to keep the socket/NAT alive (a dead
+                        # socket makes ping raise → the outer reconnect path).
+                        ws.ping()
+                        continue
+                    parts = parse_mw(raw)
                     if parts is None:
                         continue
                     # One socket per ISIN, but verify the frame is ours.
                     if len(parts) > 2 and parts[2] and parts[2] != isin:
                         continue
-                    if index is None:
-                        rest = rlc_market.get_queue(isin) or {}
-                        index = find_buy_queue_index(parts, rest.get("buy_volume"))
-                        if index is not None:
-                            logger.info("rlc_ws %s: calibrated buy-queue index=%d", isin, index)
-                        else:
-                            continue  # market closed / ambiguous — wait for a clean frame
-                    self.on_update(isin, extract_index(parts, index))
+                    value = extract_buy_queue(parts)
+                    if value is None:
+                        continue  # frame without a parseable depth level — HOLD
+                    if not first_value_logged:
+                        logger.info("rlc_ws %s: first buy-queue value=%d", isin, value)
+                        first_value_logged = True
+                    self.on_update(isin, value)
             except Exception as exc:  # noqa: BLE001 — disconnect/auth → HOLD + reconnect
                 logger.warning("rlc_ws %s: disconnected: %s", isin, exc)
                 self.on_update(isin, None)         # fail-safe HOLD
@@ -240,5 +258,4 @@ class RlcQueueClient:
         self._stop.set()
 
 
-__all__ = ["RlcQueueClient", "login", "parse_mw",
-           "find_buy_queue_index", "extract_index"]
+__all__ = ["RlcQueueClient", "login", "parse_mw", "extract_buy_queue"]

@@ -63,8 +63,14 @@ def render_locust_config(ctx: StackRenderContext) -> str:
         cfg["host"] = ctx.locust.host
         cfg["processes"] = ctx.locust.processes
     if ctx.autoscale_locust:
+        # Auto-sell-ONLY sections are watch-only — the bot skips them in locust
+        # (no user-class fires at open) so they must not inflate users/spawn.
+        # getattr keeps older test fakes (built before the field) working.
+        num_sections = sum(
+            1 for c in ctx.customers if not getattr(c, "auto_sell_only", False)
+        )
         users, spawn = compute_locust_targets(
-            len(ctx.customers),
+            num_sections,
             multiplier=ctx.locust_users_multiplier or 3,
             floor_users=int(cfg["users"]),
         )
