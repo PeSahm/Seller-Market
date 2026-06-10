@@ -49,6 +49,11 @@ logger = logging.getLogger(__name__)
 CAPTCHA_RETRIES = 6
 TIMEOUT = 20
 _MIN_TTL_SECONDS = 60  # clamp the login `validity` so a tiny/absent value can't churn logins
+# Conservative BUY-fee fallback when the wages endpoint doesn't return a rate
+# for the instrument. Deliberately ABOVE the real ~0.003712 so a fee-miss
+# under-sizes the order slightly instead of over-spending the buying power
+# (an over-spend is a guaranteed broker rejection).
+EXIR_FALLBACK_BUY_FEE = 0.005
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -246,17 +251,28 @@ class ExirAdapter(BrokerAdapter):
         data = self._get("/api/v1/user/stockInfo", descriptor)
         return float(data.get("purchaseUpperBound") or 0)
 
-    def _buy_fee_rate(self, isin: str, descriptor: dict) -> float:
+    def _buy_fee_rate(self, isin: str, descriptor: dict) -> Optional[float]:
         """Per-instrument BUY commission rate via ``GET /api/v2/wages/instrument/{isin}``.
 
         Response shape: ``{"<isin>": {"SIDE_BUY": 0.003712, "SIDE_SALE": 0.0088}}``.
         The bot needs this so the BUY volume is fee-adjusted (the ephoenix family
         gets the same from the broker's ``CalculateOrderParam``); without it, the
         order would over-spend the buying power and the broker would reject it.
+
+        Returns ``None`` when the wages response lacks the instrument or carries
+        no positive ``SIDE_BUY`` — the caller MUST then apply a conservative
+        fallback fee. (Coercing a miss to ``0.0`` silently sized the order with
+        no fee headroom → value + fee exceeded buying power → broker rejection;
+        observed live by the operator.)
         """
         data = self._get(f"/api/v2/wages/instrument/{isin}", descriptor)
         entry = (data or {}).get(isin) or {}
-        return float(entry.get("SIDE_BUY") or 0.0)
+        raw = entry.get("SIDE_BUY")
+        try:
+            fee = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            fee = None
+        return fee if fee is not None and fee > 0 else None
 
     def _holdings(self, isin: str, descriptor: dict) -> int:
         """Whole-share holdings for ``isin`` via ``GET /api/v1/user/portfoReport``."""
@@ -297,6 +313,13 @@ class ExirAdapter(BrokerAdapter):
             if side == 1:  # BUY — size from spendable cash, NET OF the buy fee.
                 bp = self._buying_power(descriptor)
                 fee = self._buy_fee_rate(isin, descriptor)
+                if not fee or fee <= 0:
+                    logger.warning(
+                        f"exir {isin} ({self.username}@{self.broker_code}): buy fee "
+                        f"unavailable from wages endpoint — using conservative "
+                        f"fallback {EXIR_FALLBACK_BUY_FEE}"
+                    )
+                    fee = EXIR_FALLBACK_BUY_FEE
                 # floor(BP / (price * (1 + buyFee))) — mirrors the ephoenix
                 # CalculateOrderParam fee-adjustment so the order can't over-spend
                 # the buying power (which the broker would reject).

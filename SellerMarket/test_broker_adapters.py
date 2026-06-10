@@ -11,7 +11,6 @@ from __future__ import annotations
 import base64
 import json
 
-import broker_adapters
 import ephoenix_adapter
 import exir_adapter
 from broker_adapters import PreparedOrder, resolve_family, get_adapter, is_auto_sell_only
@@ -120,8 +119,14 @@ class _FakeSession:
         })
 
 
-def _install_exir_fakes(monkeypatch, *, asset="1000000", holdings_rows=None, band=(200, 180), buy_fee=0.0, max_qty=0):
-    """Patch ExirAdapter so login + signed reads + the RLC band never hit the network."""
+def _install_exir_fakes(monkeypatch, *, asset="1000000", holdings_rows=None, band=(200, 180), buy_fee=0.0, max_qty=0, wages_missing=False):
+    """Patch ExirAdapter so login + signed reads + the RLC band never hit the network.
+
+    buy_fee=0.0 (the default) now exercises the conservative FALLBACK fee
+    (EXIR_FALLBACK_BUY_FEE) — a zero/missing wages rate must never size the
+    order with no fee headroom. wages_missing=True makes the wages endpoint
+    return a response WITHOUT the instrument entry at all.
+    """
     # Fresh module session cache each test.
     monkeypatch.setattr(exir_adapter, "_SESSION_CACHE", {}, raising=True)
 
@@ -147,6 +152,8 @@ def _install_exir_fakes(monkeypatch, *, asset="1000000", holdings_rows=None, ban
         if url.endswith("/api/v1/user/stockInfo"):
             return _FakeResp(status=200, json_data={"purchaseUpperBound": asset})
         if "/api/v2/wages/instrument/" in url:
+            if wages_missing:
+                return _FakeResp(status=200, json_data={})
             isin = url.rsplit("/", 1)[-1]
             return _FakeResp(status=200, json_data={isin: {"SIDE_BUY": buy_fee, "SIDE_SALE": 0.0088}})
         if url.endswith("/api/v1/user/portfoReport"):
@@ -177,9 +184,10 @@ def test_exir_prepare_buy_body_and_signer(monkeypatch):
     # price/quantity are STRINGS
     assert body["price"] == "200.0" and isinstance(body["price"], str)
     assert isinstance(body["quantity"], str)
-    # volume == asset // price == 1000000 // 200 == 5000
-    assert po.volume == 5000
-    assert body["quantity"] == "5000"
+    # wages fake returns SIDE_BUY=0.0 → fallback fee applies:
+    # volume == int(1000000 / (200 * 1.005)) == 4975
+    assert po.volume == 4975
+    assert body["quantity"] == "4975"
     # exir auth: no bearer, signer + cookies present
     assert po.bearer_token is None
     assert callable(po.signer)
@@ -195,7 +203,7 @@ def test_exir_prepare_buy_body_and_signer(monkeypatch):
 def test_exir_prepare_buy_respects_max_volume(monkeypatch):
     _install_exir_fakes(monkeypatch, asset="1000000")
     a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
-    # asset//price would be 5000, cap to 1234
+    # fee-adjusted volume would be 4975, cap to 1234
     po = a.prepare_order(isin="IRO3SMBZ0001", side=1,
                          config_section={"price": "200", "max_volume": 1234})
     assert po.volume == 1234
@@ -232,14 +240,15 @@ def test_exir_sell_no_holdings_raises(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_exir_buy_uses_rlc_ceiling(monkeypatch):
-    # band ceiling=9930 (BUY price), asset 993000 → volume 993000//9930 == 100.
+    # band ceiling=9930 (BUY price), asset 993000; the zero-fee wages fake
+    # triggers the fallback fee → volume == int(993000/(9930*1.005)) == 99.
     _install_exir_fakes(monkeypatch, asset="993000", band=(9930, 9370))
     a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
     po = a.prepare_order(isin="IRO1SROD0001", side=1, config_section={})  # NO config price
     body = json.loads(po.body)
     assert body["price"] == "9930.0"       # BUY → RLC ceiling
-    assert po.volume == 100
-    assert body["quantity"] == "100"
+    assert po.volume == 99
+    assert body["quantity"] == "99"
 
 
 def test_exir_buy_volume_is_fee_adjusted(monkeypatch):
@@ -251,6 +260,26 @@ def test_exir_buy_volume_is_fee_adjusted(monkeypatch):
     po = a.prepare_order(isin="IRO1SROD0001", side=1, config_section={})
     assert po.volume == int(6000000 / (9930 * 1.003712))   # == 601
     assert po.volume == 601
+
+
+def test_exir_buy_fee_missing_uses_fallback(monkeypatch):
+    # Wages response WITHOUT the instrument entry: the fee must NOT silently
+    # become 0 (that sized the order with no fee headroom → value + fee
+    # exceeded buying power → broker rejection, observed live). The
+    # conservative fallback under-sizes slightly instead.
+    _install_exir_fakes(monkeypatch, asset="1000000", wages_missing=True)
+    a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
+    po = a.prepare_order(isin="IRO3SMBZ0001", side=1, config_section={"price": "200"})
+    assert po.volume == int(1000000 / (200 * (1 + exir_adapter.EXIR_FALLBACK_BUY_FEE)))
+    assert po.volume == 4975
+
+
+def test_exir_buy_fee_zero_uses_fallback(monkeypatch):
+    # An explicit SIDE_BUY of 0 is treated the same as missing — fallback fee.
+    _install_exir_fakes(monkeypatch, asset="1000000", buy_fee=0.0)
+    a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
+    po = a.prepare_order(isin="IRO3SMBZ0001", side=1, config_section={"price": "200"})
+    assert po.volume == 4975
 
 
 def test_exir_sell_uses_rlc_floor(monkeypatch):
@@ -284,7 +313,7 @@ def test_exir_config_price_overrides_rlc(monkeypatch):
     po = a.prepare_order(isin="IRO1SROD0001", side=1, config_section={"price": "200"})
     body = json.loads(po.body)
     assert body["price"] == "200.0"        # override, not the 9930 ceiling
-    assert po.volume == 5000               # 1000000 // 200
+    assert po.volume == 4975               # int(1000000 / (200 * 1.005)) — fallback fee
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +345,7 @@ def test_exir_no_cap_when_max_qty_zero(monkeypatch):
     _install_exir_fakes(monkeypatch, asset="1000000", max_qty=0)
     a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
     po = a.prepare_order(isin="IRO3SMBZ0001", side=1, config_section={"price": "200"})
-    assert po.volume == 5000   # uncapped (1000000 // 200)
+    assert po.volume == 4975   # uncapped — int(1000000 / (200 * 1.005)), fallback fee
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +403,46 @@ def test_ephoenix_prepare_sell_uses_holdings_and_min_price(monkeypatch):
     assert po.price == 900           # min_price on SELL
     assert po.volume == 888          # from holdings
     assert po.bearer_token == "TOKEN123" and po.signer is None
+
+
+class _NegativeVolumeEphoenixClient(_FakeEphoenixClient):
+    """Debt-account scenario: negative buying power makes the broker's
+    CalculateOrderParam return a NEGATIVE volume (seen live: BP -607,897 →
+    volume -30; every POST was rejected with code 1001 'wrong order volume')."""
+
+    def get_buying_power(self):
+        return -607_897.0
+
+    def calculate_order_volume(self, isin, side, buying_power, price):
+        return -30
+
+
+class _ZeroVolumeEphoenixClient(_FakeEphoenixClient):
+    def calculate_order_volume(self, isin, side, buying_power, price):
+        return 0
+
+
+def test_ephoenix_prepare_buy_negative_volume_raises(monkeypatch):
+    monkeypatch.setattr(ephoenix_adapter, "EphoenixAPIClient", _NegativeVolumeEphoenixClient)
+    a = ephoenix_adapter.EphoenixAdapter("karamad", "u", "p", captcha_decoder=lambda b: "x")
+    try:
+        a.prepare_order(isin="IRO1MSMI0001", side=1, config_section={})
+        raise AssertionError("expected ValueError for negative BUY volume")
+    except ValueError as e:
+        msg = str(e)
+        assert "computed BUY volume" in msg
+        assert "-30" in msg
+        assert "-607,897" in msg  # names the buying power for diagnosis
+
+
+def test_ephoenix_prepare_buy_zero_volume_raises(monkeypatch):
+    monkeypatch.setattr(ephoenix_adapter, "EphoenixAPIClient", _ZeroVolumeEphoenixClient)
+    a = ephoenix_adapter.EphoenixAdapter("karamad", "u", "p", captcha_decoder=lambda b: "x")
+    try:
+        a.prepare_order(isin="IRO1MSMI0001", side=1, config_section={})
+        raise AssertionError("expected ValueError for zero BUY volume")
+    except ValueError as e:
+        assert "computed BUY volume" in str(e)
 
 
 # ---------------------------------------------------------------------------

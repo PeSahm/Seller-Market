@@ -5,6 +5,7 @@ Reads scheduler_config.json and executes jobs at scheduled times
 
 import json
 import os
+import re
 import time
 import subprocess
 import logging
@@ -145,6 +146,58 @@ def build_locust_command_from_config(base_command: str) -> List[str]:
     
     logger.info(f"Built Locust command from config: {shlex.join(command_args)}")
     return command_args
+
+
+DEFAULT_JOB_TIMEOUT_SECONDS = 600
+JOB_TIMEOUT_GRACE_SECONDS = 180
+
+
+def _parse_locust_duration(value) -> Optional[int]:
+    """Parse a locust --run-time value to seconds.
+
+    Accepts locust's duration syntax ("599s", "10m", "1h30m") and a bare
+    integer ("90"). Returns None for anything unparseable or zero.
+    """
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    if s.isdigit():
+        return int(s) or None
+    matched = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", s)
+    if not matched or not any(matched.groups()):
+        return None
+    hours, minutes, seconds = (int(g) if g else 0 for g in matched.groups())
+    total = hours * 3600 + minutes * 60 + seconds
+    return total or None
+
+
+def _compute_job_timeout(parsed_command: List[str],
+                         default: int = DEFAULT_JOB_TIMEOUT_SECONDS,
+                         grace: int = JOB_TIMEOUT_GRACE_SECONDS) -> int:
+    """Wall-clock cap for a scheduled job's subprocess.
+
+    At least `default`; for locust commands carrying --run-time, the cap is
+    max(default, run_time + grace) — a hard default of 600s would kill a
+    configured 599s trading run BEFORE locust's on_test_stop runs, losing the
+    fire-log flush and order_results (the mgmt UI pushes operator-tunable
+    run_time via locust_config.json, so the cap must follow it).
+    """
+    try:
+        for i, arg in enumerate(parsed_command):
+            run_time = None
+            if arg == "--run-time" and i + 1 < len(parsed_command):
+                run_time = _parse_locust_duration(parsed_command[i + 1])
+            elif arg.startswith("--run-time="):
+                run_time = _parse_locust_duration(arg.split("=", 1)[1])
+            if run_time:
+                return max(default, run_time + grace)
+    except Exception:
+        logger.debug(
+            "_compute_job_timeout: failed to parse --run-time from %s",
+            parsed_command, exc_info=True,
+        )
+    return default
+
 
 class JobScheduler:
     """Simple job scheduler that runs in a background thread"""
@@ -308,6 +361,7 @@ class JobScheduler:
                 )
 
             # Execute command with current environment variables (shell=False for security)
+            job_timeout_s = _compute_job_timeout(parsed_command)
             start_ts = time.monotonic()
             result = subprocess.run(
                 parsed_command,
@@ -315,7 +369,7 @@ class JobScheduler:
                 cwd=os.path.dirname(__file__),
                 capture_output=True,
                 text=True,
-                timeout=600,  # 10 minutes max
+                timeout=job_timeout_s,  # default 600s; follows locust --run-time + grace
                 env=os.environ.copy()  # Pass environment variables to subprocess
             )
             elapsed_s = time.monotonic() - start_ts
@@ -376,7 +430,9 @@ class JobScheduler:
                     )
 
         except subprocess.TimeoutExpired:
-            logger.error(f"⏱️ Job '{job_name}' timed out after 10 minutes")
+            timeout_desc = (f"{job_timeout_s} seconds" if 'job_timeout_s' in locals()
+                            else "the configured timeout")
+            logger.error(f"⏱️ Job '{job_name}' timed out after {timeout_desc}")
             # If we already wrote a running marker, replace it with a
             # timeout-final marker so the mgmt UI doesn't show this run as
             # stuck-running forever.
@@ -394,7 +450,7 @@ class JobScheduler:
                             "exit_code": -1,
                             "status": "failed",
                             "stdout_tail": "",
-                            "stderr_tail": "subprocess timed out after 10 minutes",
+                            "stderr_tail": f"subprocess timed out after {timeout_desc}",
                             "command": command_for_logging,
                         },
                     )

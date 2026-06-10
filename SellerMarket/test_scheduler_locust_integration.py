@@ -3,7 +3,13 @@
 Test script to verify scheduler correctly loads Locust config
 """
 
-from scheduler import JobScheduler, build_locust_command_from_config, load_locust_config
+from scheduler import (
+    JobScheduler,
+    build_locust_command_from_config,
+    load_locust_config,
+    _compute_job_timeout,
+    _parse_locust_duration,
+)
 import json
 import shlex
 
@@ -96,7 +102,7 @@ def test_scheduler_integration():
     
     assert run_trading_job is not None, "run_trading job not found"
     
-    print(f"\nRun Trading Job:")
+    print("\nRun Trading Job:")
     print(f"  Name: {run_trading_job['name']}")
     print(f"  Time: {run_trading_job['time']}")
     print(f"  Base Command: {run_trading_job['command']}")
@@ -179,6 +185,36 @@ def test_distributed_processes_config():
     
     print("\n✅ Distributed processes configuration working correctly")
 
+def test_parse_locust_duration():
+    """Locust --run-time syntax → seconds; garbage/zero → None."""
+    assert _parse_locust_duration("599s") == 599
+    assert _parse_locust_duration("10m") == 600
+    assert _parse_locust_duration("1h30m") == 5400
+    assert _parse_locust_duration("1h") == 3600
+    assert _parse_locust_duration("90") == 90
+    assert _parse_locust_duration("garbage") is None
+    assert _parse_locust_duration("") is None
+    assert _parse_locust_duration("0") is None
+    assert _parse_locust_duration("0s") is None
+
+
+def test_compute_job_timeout_follows_run_time():
+    """The subprocess cap must follow a configured --run-time + grace.
+
+    A hard 600s cap killed a 599s trading run BEFORE locust's on_test_stop
+    ran, losing the fire-log flush and order_results (2026-06-10 incident).
+    """
+    cmd = ["locust", "-f", "locustfile_new.py", "--headless", "--run-time", "599s"]
+    assert _compute_job_timeout(cmd) == 779            # 599 + 180 grace
+    assert _compute_job_timeout(["locust", "--run-time=10m"]) == 780
+    # short run-times keep the historical 600s floor
+    assert _compute_job_timeout(["locust", "--run-time", "30s"]) == 600
+    # no run-time / unparseable / empty → default
+    assert _compute_job_timeout(["python", "cache_warmup.py"]) == 600
+    assert _compute_job_timeout(["locust", "--run-time", "soon"]) == 600
+    assert _compute_job_timeout([]) == 600
+
+
 if __name__ == '__main__':
     try:
         test_locust_config_loading()
@@ -186,7 +222,9 @@ if __name__ == '__main__':
         test_scheduler_integration()
         test_non_locust_commands()
         test_distributed_processes_config()
-        
+        test_parse_locust_duration()
+        test_compute_job_timeout_follows_run_time()
+
         print("\n" + "="*80)
         print("✅ ALL TESTS PASSED")
         print("="*80)
@@ -197,6 +235,8 @@ if __name__ == '__main__':
         print("- All Locust parameters centralized in locust_config.json")
         print("- Non-locust commands remain unchanged")
         print("- Distributed load generation via --processes supported")
+        print("- Locust --run-time duration parsing works correctly")
+        print("- Job timeout computation follows configured run-time + grace")
         
     except AssertionError as e:
         print(f"\n❌ TEST FAILED: {e}")
