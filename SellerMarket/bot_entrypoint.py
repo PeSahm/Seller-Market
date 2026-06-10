@@ -51,18 +51,18 @@ def main() -> None:
 
     config_ini = os.environ.get("CONFIG_INI", "/app/config.ini")
     market_data_url = os.environ.get("MARKET_DATA_URL", "")
-    targets = load_auto_sell_targets(config_ini)
 
-    if not targets:
-        logger.info("no auto-sell instructions armed — scheduler-only mode")
-        _idle()
     if not market_data_url:
-        logger.warning("MARKET_DATA_URL unset — auto-sell disabled (%d armed, scheduler-only)",
-                       len(targets))
+        # No feed wired (env change needs a redeploy anyway) → scheduler-only.
+        logger.warning("MARKET_DATA_URL unset — auto-sell disabled (scheduler-only)")
         _idle()
 
-    logger.info("starting auto-sell monitor for %d instrument(s)", len(targets))
-    AutoSellMonitor(targets, market_data_url=market_data_url).run()
+    # ALWAYS run the supervisor when a feed is configured — even with zero armed
+    # targets. It reads config.ini live and arms the first watch the operator
+    # adds WITHOUT a container restart (the old code idled forever on 0 targets).
+    targets = load_auto_sell_targets(config_ini)
+    logger.info("starting auto-sell monitor (hot-reload) — %d armed at boot", len(targets))
+    AutoSellMonitor(targets, market_data_url=market_data_url).run_supervised(config_ini)
 
 
 if __name__ == "__main__":

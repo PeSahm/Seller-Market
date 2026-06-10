@@ -4,7 +4,7 @@
   column refreshes every 3s without a page reload.
 
   Context: rows = [{customer, broker, isin, threshold, buy_volume, triggered,
-                    fired_today, sell_only}, ...]
+                    fired_today, sell_only, applied, applied_at}, ...]
 #}
 {% for r in rows %}
 <tr>
@@ -14,6 +14,16 @@
   <td><code class="text-small">{{ r.broker }}</code></td>
   <td><code class="text-small">{{ r.isin }}</code></td>
   <td>{{ "{:,}".format(r.threshold) }}</td>
+  <td>
+    {% if r.applied %}
+      <span class="badge badge--up"
+            title="The live bot has applied this threshold{% if r.applied_at %} at {{ r.applied_at.strftime('%H:%M:%S') }} UTC{% endif %}">
+        ✓ applied{% if r.applied_at %} {{ r.applied_at.strftime('%H:%M') }}{% endif %}
+      </span>
+    {% else %}
+      <span class="badge badge--pending" title="Saved — waiting for the bot to reload config (a few seconds)">⏳ pending reload</span>
+    {% endif %}
+  </td>
   <td>
     {% if r.buy_volume is none %}
       <span class="text-muted" title="market-data sidecar unavailable">—</span>

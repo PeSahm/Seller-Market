@@ -29,11 +29,12 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import hash_lock_key
+from app.models.auto_sell_reload_status import AutoSellReloadStatus
 from app.models.customers import Customer
 from app.models.order_fires import OrderFire
 from app.models.servers import Server
@@ -164,6 +165,80 @@ def _row_values(rec: dict, *, agent_id: UUID, customer_id: Optional[UUID]) -> Op
     }
 
 
+_STATUS_FILE = "auto_sell_status.json"
+
+
+def _status_rows_from_marker(body: str, stack_id: UUID) -> Optional[list[dict]]:
+    """Parse an ``auto_sell_status.json`` body → ``auto_sell_reload_status`` rows.
+
+    Returns ``None`` when the marker is unusable (bad JSON / wrong schema /
+    missing ``applied_at``) so the caller leaves existing rows untouched; an
+    EMPTY list is a valid "the bot has nothing armed" state (disarm-all).
+    """
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict) or data.get("schema") != _SUPPORTED_SCHEMA:
+        return None
+    applied_at = _parse_fired_at(data.get("applied_at"))
+    armed = data.get("armed")
+    if applied_at is None or not isinstance(armed, list):
+        return None
+
+    # Last-wins dedup on the PK (stack_id, account, isin): a well-formed marker
+    # has one entry per target, but a duplicate must NEVER turn into a bulk-
+    # INSERT PK violation (which would poison the surrounding transaction).
+    by_key: dict[tuple, dict] = {}
+    for entry in armed:
+        if not isinstance(entry, dict):
+            continue
+        isin = entry.get("isin")
+        account = entry.get("account")
+        try:
+            threshold = int(entry.get("threshold"))
+        except (TypeError, ValueError):
+            continue
+        if not isin or not account:
+            continue
+        by_key[(str(account), str(isin))] = {
+            "stack_id": stack_id,
+            "account": str(account),
+            "isin": str(isin),
+            "applied_threshold": threshold,
+            "applied_at": applied_at,
+        }
+    return list(by_key.values())
+
+
+async def _ingest_reload_status(db: AsyncSession, server: Server, stack: AgentStack) -> None:
+    """Pull the bot's ``auto_sell_status.json`` marker → ``auto_sell_reload_status``.
+
+    The bot overwrites this single small file each time its hot-reload supervisor
+    APPLIES a config change (#110). We replace this stack's rows with the
+    marker's current armed set so the Active-auto-sell page can show the
+    operator which thresholds the LIVE bot has applied. A missing file (older
+    bot / no reload yet) is a silent no-op — existing rows are left as-is.
+    """
+    from app.services.ssh.sftp import sftp_read_text
+
+    path = f"{stack.stack_dir}/run_results/{_STATUS_FILE}"
+    try:
+        body = await sftp_read_text(server, path)
+    except SSHError:
+        return  # no marker yet / unreadable — normal, stay quiet
+    rows = _status_rows_from_marker(body, stack.id)
+    if rows is None:
+        return
+    # Replace this stack's status with the marker's full armed set (the marker
+    # is authoritative + overwritten, so a disarmed isin should drop out).
+    await db.execute(
+        delete(AutoSellReloadStatus).where(AutoSellReloadStatus.stack_id == stack.id)
+    )
+    if rows:
+        await db.execute(pg_insert(AutoSellReloadStatus).values(rows))
+
+
 async def ingest_stack_once(db: AsyncSession, *, stack_id: UUID) -> IngestResult:
     """Read + upsert every order-fire line for one stack. Never raises."""
     result = IngestResult(stack_id=stack_id)
@@ -232,6 +307,17 @@ async def ingest_stack_once(db: AsyncSession, *, stack_id: UUID) -> IngestResult
                     result.rows_inserted += 1
                 else:
                     result.rows_skipped += 1
+
+        # Best-effort: pull the auto-sell hot-reload status marker too. The
+        # SAVEPOINT is load-bearing: a failure inside (e.g. an unexpected DB
+        # error) rolls back ONLY the status delete+insert — without it the
+        # session would be poisoned and the commit below would raise, losing
+        # every order-fire row staged in this txn.
+        try:
+            async with db.begin_nested():
+                await _ingest_reload_status(db, server, stack)
+        except Exception:  # noqa: BLE001
+            logger.exception("auto_sell reload-status ingest failed for %s", stack_id)
 
         await db.commit()
         return result

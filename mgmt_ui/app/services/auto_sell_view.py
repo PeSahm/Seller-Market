@@ -14,6 +14,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.auto_sell_reload_status import AutoSellReloadStatus
 from app.models.order_fires import OrderFire
 from app.services import market_data_client
 from app.services import trade_instructions as services_ti
@@ -53,9 +54,41 @@ async def build_auto_sell_rows(
         q = await market_data_client.get_queue(db, isin)
         queue_by_isin[isin] = (q or {}).get("buy_volume") if q else None
 
+    # What threshold has the LIVE bot actually applied, per (stack, isin)? The
+    # bot's hot-reload supervisor writes a marker the fire-log ingestor pulls
+    # into auto_sell_reload_status. We compare it to the DB threshold below to
+    # tell the operator their edit landed (#110). Stacks may be None (unassigned).
+    stack_ids = {
+        getattr(c, "stack_id", None)
+        for _ti, c in armed
+        if getattr(c, "stack_id", None) is not None
+    }
+    applied_by_key: dict[tuple, tuple] = {}
+    if stack_ids:
+        status_rows = (
+            await db.execute(
+                select(
+                    AutoSellReloadStatus.stack_id,
+                    AutoSellReloadStatus.account,
+                    AutoSellReloadStatus.isin,
+                    AutoSellReloadStatus.applied_threshold,
+                    AutoSellReloadStatus.applied_at,
+                ).where(AutoSellReloadStatus.stack_id.in_(stack_ids))
+            )
+        ).all()
+        # Keyed per position: (stack, broker account, isin) — two customers on
+        # one stack can arm the same instrument with different thresholds.
+        applied_by_key = {(r[0], r[1], r[2]): (r[3], r[4]) for r in status_rows}
+
     rows: list[dict] = []
     for ti, c in armed:
         bv = queue_by_isin.get(ti.isin)
+        applied = applied_by_key.get(
+            (getattr(c, "stack_id", None), getattr(c, "username", None), ti.isin)
+        )
+        # "applied" only when the bot's last-applied threshold equals the live
+        # DB threshold — otherwise the edit is still propagating ("pending").
+        is_applied = applied is not None and applied[0] == ti.auto_sell_threshold
         rows.append({
             "customer_id": c.id,
             "customer": c.display_name,
@@ -68,6 +101,8 @@ async def build_auto_sell_rows(
             "fired_today": (c.id, ti.isin) in fired,
             # getattr keeps older test fakes (built before the column) working.
             "sell_only": bool(getattr(ti, "auto_sell_only", False)),
+            "applied": is_applied,
+            "applied_at": applied[1] if applied else None,
         })
     return rows
 

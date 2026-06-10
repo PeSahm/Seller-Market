@@ -23,6 +23,14 @@ from __future__ import annotations
 from app.services.brokers.registry import UnknownBrokerError, family_of
 from app.services.rendering import StackRenderContext
 
+# Sentinel marking a COMPLETE config.ini. The bot's auto-sell hot-reload
+# supervisor trusts a freshly-read file immediately when it ends with this line
+# (a torn in-place write is always a prefix, so it won't have it) — see
+# ``SellerMarket/auto_sell_monitor.py::CONFIG_END_SENTINEL``. It's a plain
+# comment, ignored by every other config.ini reader, and the bot tolerates its
+# absence (older renders) by falling back to a stability re-read.
+CONFIG_END_SENTINEL = "# auto-sell-config-end"
+
 
 def render_config_ini(ctx: StackRenderContext) -> str:
     """Render ``config.ini`` from the customer rows on the context."""
@@ -32,7 +40,10 @@ def render_config_ini(ctx: StackRenderContext) -> str:
     if not ctx.customers:
         # Zero-customer stacks get just the header so the file isn't entirely
         # blank (helps diagnostics). The bot's ``config.sections()`` returns
-        # ``[]`` either way.
+        # ``[]`` either way. The sentinel still terminates it so a disarm-all
+        # (config drops to header-only) is trusted + applied fast by the bot.
+        lines.append("")
+        lines.append(CONFIG_END_SENTINEL)
         lines.append("")
         return "\n".join(lines)
     for c in ctx.customers:
@@ -66,5 +77,7 @@ def render_config_ini(ctx: StackRenderContext) -> str:
         # byte-identically to before.
         if c.auto_sell_only:
             lines.append("auto_sell_only = true")
+    lines.append("")
+    lines.append(CONFIG_END_SENTINEL)  # bot trusts a complete file by this
     lines.append("")  # trailing newline
     return "\n".join(lines)

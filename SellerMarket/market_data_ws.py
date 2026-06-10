@@ -107,12 +107,25 @@ class QueueFeed:
                 except Exception:  # noqa: BLE001
                     pass
 
-    def run_forever(self) -> None:
+    def start(self) -> None:
+        """Spawn one daemon reader thread per subscribed ISIN and RETURN.
+
+        Lets a caller (the monitor's supervisor) own the lifecycle — start a
+        feed, keep a handle, and ``stop()`` it on an ISIN-set change without
+        blocking. Idempotent-ish: only spawns threads for not-yet-started ISINs.
+        """
+        started = {t.name for t in self._threads}
         for isin in self._isins:
+            name = f"qfeed-{isin}"
+            if name in started:
+                continue
             t = threading.Thread(target=self._run_one, args=(isin,), daemon=True,
-                                 name=f"qfeed-{isin}")
+                                 name=name)
             t.start()
             self._threads.append(t)
+
+    def run_forever(self) -> None:
+        self.start()
         while not self._stop.is_set():
             time.sleep(1)
 

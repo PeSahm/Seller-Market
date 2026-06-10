@@ -385,3 +385,4 @@ order_results/
 
 # EasyOCR model cache (large ML models downloaded at runtime)
 easyocr_models/
+auto_sell_status.json
