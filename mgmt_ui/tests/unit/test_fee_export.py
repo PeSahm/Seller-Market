@@ -7,7 +7,7 @@ per buy with real numeric money cells and the matched-sell + fee columns.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from io import BytesIO
 
@@ -21,6 +21,7 @@ from app.services.profit_report import (
     BuyFeeRow,
     CustomerFeeTotals,
     FeeReport,
+    VirtualFeeRow,
 )
 
 
@@ -132,3 +133,34 @@ def test_build_fee_workbook_empty_report_is_valid():
     assert "Buys & fees" in wb.sheetnames
     # header only, no data rows
     assert wb["Buys & fees"].max_row == 1
+
+
+def test_build_fee_workbook_mark_to_market_sheet():
+    # A 20d virtual row renders with the Oldest-buy column and the "20d"
+    # trigger label (the sell-trigger label is gone with the FIFO revert).
+    agent_id = uuid.uuid4()
+    customer_id = uuid.uuid4()
+    report = FeeReport(
+        virtual_rows=[VirtualFeeRow(
+            customer_id=customer_id, agent_id=agent_id, broker="ayandeh",
+            isin="IRO1PNES0001", symbol="شپنا", open_qty=40,
+            avg_buy_price=Decimal("6000"), price=7000, trigger="20d",
+            in_loss=False, fee=Decimal("400"),
+            oldest_buy_date=date(2026, 6, 1),
+        )],
+    )
+    data = build_fee_workbook(
+        report, [],
+        agent_names={agent_id: "mostafa"},
+        customer_names={customer_id: "Mostafa main"},
+    )
+    wb = load_workbook(BytesIO(data))
+    assert "Realized remainder" in wb.sheetnames
+    ws = wb["Realized remainder"]
+    header = [c.value for c in ws[1]]
+    assert "Oldest buy" in header
+    row = {header[i]: ws[2][i].value for i in range(len(header))}
+    assert row["Customer"] == "Mostafa main"
+    assert row["Trigger"] == "20d"
+    assert row["Oldest buy"] == "2026-06-01"
+    assert row["Open qty"] == 40 and row["Fee"] == 400
