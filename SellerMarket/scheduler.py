@@ -132,7 +132,10 @@ def _prune_old_run_log_gz(run_results_dir: str, max_age_days: int = _RUN_LOG_GZ_
             except OSError:
                 pass
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug(
+            "failed to prune scheduled_run_*.log.gz under %s",
+            run_results_dir, exc_info=True,
+        )
 
 
 def load_locust_config() -> Dict[str, Any]:

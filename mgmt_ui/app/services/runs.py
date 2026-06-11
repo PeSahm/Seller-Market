@@ -372,7 +372,8 @@ async def read_run_log(run: Run) -> bytes:
     """
     if not run.log_blob_ref:
         return b""
-    try:
+
+    def _read() -> bytes:
         p = Path(run.log_blob_ref)
         if not p.exists():
             return b""
@@ -380,6 +381,11 @@ async def read_run_log(run: Run) -> bytes:
         if p.suffix == ".gz":
             return gzip.decompress(raw)
         return raw
+
+    try:
+        # Off-loop: a large legacy blob (or its decompression) must not
+        # stall the event loop.
+        return await asyncio.to_thread(_read)
     except (OSError, EOFError, zlib.error) as exc:
         logger.warning("read_run_log failed run=%s: %s", run.id, exc)
         return b""
@@ -404,15 +410,22 @@ async def read_run_log_tail(run: Run, max_bytes: int = 262_144) -> tuple[bytes, 
         if p.suffix == ".gz":
             def _tail_gz() -> tuple[bytes, int]:
                 total = 0
-                tail = b""
+                # Keep only enough recent chunks to cover the window — one
+                # join at the end instead of re-concatenating per chunk.
+                chunks: list[bytes] = []
+                kept = 0
                 with gzip.open(p, "rb") as gz:
                     while True:
                         chunk = gz.read(1 << 20)
                         if not chunk:
                             break
                         total += len(chunk)
-                        tail = (tail + chunk)[-max_bytes:]
-                return tail, total
+                        chunks.append(chunk)
+                        kept += len(chunk)
+                        while chunks and kept - len(chunks[0]) >= max_bytes:
+                            kept -= len(chunks[0])
+                            chunks.pop(0)
+                return b"".join(chunks)[-max_bytes:], total
 
             return await asyncio.to_thread(_tail_gz)
         size = p.stat().st_size

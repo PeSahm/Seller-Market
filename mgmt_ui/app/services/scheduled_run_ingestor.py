@@ -33,7 +33,9 @@ Marker shape (matches what
 Idempotency: every marker is processed at-least-once. We delete the
 remote file (and its consumed ``.log.gz``) after a successful UPSERT so
 it can't be re-read on the next tick. A failed UPSERT leaves the file in
-place; the next tick tries again.
+place; the next tick tries again. A failed FULL-LOG fetch archives the
+tails but keeps the marker + gz so later ticks can retry the fetch,
+bounded by a 24h window from the run's ``finished_at``.
 """
 
 from __future__ import annotations
@@ -81,6 +83,22 @@ _ALLOWED_JOB_NAMES = {"cache_warmup", "run_trading"}
 # archive it. Run logs compress ~10-20x, so 16 MiB gz covers any real run.
 _MAX_GZ_BYTES = 16 * 1024 * 1024
 _MAX_LOG_BYTES = 256 * 1024 * 1024
+
+# When the full-log gz fetch fails we archive the marker tails as a fallback
+# but keep the marker + remote gz so later ticks can retry the fetch — bounded
+# by this window (measured from the run's finished_at) so a permanently
+# unfetchable gz can't make a marker retry forever. After expiry the marker is
+# consumed (tails stand) and the orphan gz ages out via the bot's 7-day prune.
+_FULL_LOG_RETRY_WINDOW_SECONDS = 24 * 3600
+
+
+def _full_log_retry_open(payload: dict) -> bool:
+    """Whether a failed full-log fetch is still worth retrying."""
+    finished = _parse_iso(payload.get("finished_at"))
+    if finished is None:
+        return False
+    age = (datetime.now(timezone.utc) - finished).total_seconds()
+    return 0 <= age < _FULL_LOG_RETRY_WINDOW_SECONDS
 
 
 def _gzip_decompresses_within(data: bytes, max_decompressed: int) -> bool:
@@ -306,6 +324,26 @@ async def _upsert_run_from_marker(
 
     # Existing row — only meaningful transition is running → terminal.
     if existing.status != "running":
+        # Full-log retry: an earlier tick flipped the row terminal but the gz
+        # fetch failed (tails were archived) and the marker was kept. Within
+        # the retry window, re-attempt the fetch; on success the caller
+        # deletes marker + gz. After the window, consume the marker (tails
+        # stand; the orphan gz ages out via the bot's 7-day prune).
+        if (
+            raw_status != "running"
+            and payload.get("log_file")
+            and not str(existing.log_blob_ref or "").endswith(".gz")
+        ):
+            if _full_log_retry_open(payload):
+                consumed_log = await _archive_log_if_final(
+                    existing, payload, server=server, stack=stack
+                )
+                if consumed_log:
+                    return "updated", "full-log archived on retry", consumed_log
+                return "skipped", "full-log retry pending", None
+            # "updated" (not "skipped") so the caller consumes the marker —
+            # the row itself is unchanged; only the retry loop ends here.
+            return "updated", "full-log retry window expired — keeping tails", None
         return "skipped", f"row already terminal ({existing.status})", None
     if raw_status == "running":
         return "skipped", "running marker for a row already at running", None
@@ -355,8 +393,8 @@ async def _archive_log_if_final(
 
     Fallback (old bot images, fetch/validation failure): the marker's 4 KB
     stdout/stderr tails are written to ``RUN_LOGS_DIR/<run_id>.log`` exactly
-    as before; returns ``None`` so the remote ``.log.gz`` (if any) is left
-    in place for a retry on the next tick.
+    as before; returns ``None`` so the caller keeps the marker + remote gz
+    for a bounded retry on later ticks (see ``_full_log_retry_open``).
     """
     status = payload.get("status")
     if status not in ("success", "failed", "killed"):
@@ -506,10 +544,21 @@ async def ingest_stack_once(
             # process them. Deleting on skip would turn a temporary
             # version skew into permanent data loss.
             if action in ("inserted", "updated"):
-                deletes.append(m.full_path)
+                is_final = payload.get("status") in ("success", "failed", "killed")
+                if (
+                    is_final
+                    and payload.get("log_file")
+                    and consumed_log is None
+                    and _full_log_retry_open(payload)
+                ):
+                    # Tails fallback with the retry window still open: KEEP
+                    # the marker (and the remote gz) so the next tick can
+                    # retry the full-log fetch against the now-terminal row.
+                    pass
+                else:
+                    deletes.append(m.full_path)
                 # The consumed full-log gz is deleted alongside its marker
-                # (only set when the archive actually stored it — a tails
-                # fallback leaves the gz remote for a retry next tick).
+                # (only set when the archive actually stored it).
                 if consumed_log:
                     deletes.append(consumed_log)
 

@@ -12,17 +12,22 @@ We pin the pure / cheap parts:
 """
 from __future__ import annotations
 
+import gzip
+import hashlib
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.services.scheduled_run_ingestor import (
+    _archive_log_if_final,
     _parse_iso,
     _upsert_run_from_marker,
 )
+from app.services.ssh.exceptions import SSHError
 
 
 # ---------------------------------------------------------------------------
@@ -240,14 +245,6 @@ async def test_upsert_updates_running_row_to_terminal() -> None:
 # _archive_log_if_final — full gzipped log fetch (with tails fallback)
 # ---------------------------------------------------------------------------
 
-import gzip
-import hashlib
-from pathlib import Path
-
-from app.services.scheduled_run_ingestor import _archive_log_if_final
-from app.services.ssh.exceptions import SSHError
-
-
 def _fake_run_row() -> SimpleNamespace:
     return SimpleNamespace(id=uuid.uuid4(), log_blob_ref=None, log_blob_sha256=None)
 
@@ -389,3 +386,98 @@ async def test_archive_without_log_file_keeps_tails_behavior(tmp_path) -> None:
     assert run.log_blob_ref.endswith(f"{run.id}.log")
     blob = Path(run.log_blob_ref).read_bytes()
     assert blob == b"tail-out\n" + b"\n--- stderr ---\n" + b"tail-err\n"
+
+
+# ---------------------------------------------------------------------------
+# Bounded full-log retry (terminal row + surviving marker)
+# ---------------------------------------------------------------------------
+
+
+def _terminal_row(*, blob_ref: str | None) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid.uuid4(), status="failed", exit_code=1,
+        finished_at=datetime.now(timezone.utc),
+        log_blob_ref=blob_ref, log_blob_sha256=None,
+    )
+
+
+def _retry_payload(rid: str, *, finished_at: str) -> dict:
+    return {
+        "schema_version": 1, "job_name": "run_trading",
+        "scheduled_run_id": rid, "status": "failed", "exit_code": 1,
+        "finished_at": finished_at,
+        "log_file": f"scheduled_run_{rid}.log.gz",
+        "stdout_tail": "t\n", "stderr_tail": "",
+    }
+
+
+@pytest.mark.asyncio
+async def test_terminal_row_full_log_retry_success() -> None:
+    """Marker survived a tails fallback; within the window a later tick
+    re-fetches the gz and the caller gets the consumed path to delete."""
+    rid = uuid.uuid4()
+    row = _terminal_row(blob_ref="/var/lib/run_logs/x.log")  # tails, not .gz
+    fresh = datetime.now(timezone.utc).isoformat()
+    with patch(
+        "app.services.scheduled_run_ingestor._archive_log_if_final",
+        new_callable=AsyncMock, return_value="/remote/run_results/got.log.gz",
+    ) as archive:
+        action, reason, consumed = await _upsert_run_from_marker(
+            _FakeAsyncSession(existing_run=row), stack=_fake_stack(),
+            payload=_retry_payload(str(rid), finished_at=fresh),
+            server=_fake_server(),
+        )
+    archive.assert_awaited_once()
+    assert action == "updated" and consumed == "/remote/run_results/got.log.gz"
+
+
+@pytest.mark.asyncio
+async def test_terminal_row_full_log_retry_pending_keeps_marker() -> None:
+    """Fetch fails again within the window → skipped (marker survives)."""
+    rid = uuid.uuid4()
+    row = _terminal_row(blob_ref="/var/lib/run_logs/x.log")
+    fresh = datetime.now(timezone.utc).isoformat()
+    with patch(
+        "app.services.scheduled_run_ingestor._archive_log_if_final",
+        new_callable=AsyncMock, return_value=None,
+    ):
+        action, reason, consumed = await _upsert_run_from_marker(
+            _FakeAsyncSession(existing_run=row), stack=_fake_stack(),
+            payload=_retry_payload(str(rid), finished_at=fresh),
+            server=_fake_server(),
+        )
+    assert action == "skipped" and "retry pending" in reason and consumed is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_row_full_log_retry_window_expired() -> None:
+    """>24h after finished_at → give up: marker consumed, tails stand."""
+    from datetime import timedelta
+
+    rid = uuid.uuid4()
+    row = _terminal_row(blob_ref="/var/lib/run_logs/x.log")
+    stale = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+    with patch(
+        "app.services.scheduled_run_ingestor._archive_log_if_final",
+        new_callable=AsyncMock,
+    ) as archive:
+        action, reason, consumed = await _upsert_run_from_marker(
+            _FakeAsyncSession(existing_run=row), stack=_fake_stack(),
+            payload=_retry_payload(str(rid), finished_at=stale),
+            server=_fake_server(),
+        )
+    archive.assert_not_awaited()
+    assert action == "updated" and "expired" in reason and consumed is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_row_with_gz_blob_already_archived_skips() -> None:
+    """Row already carries the full gz → plain terminal-collision skip."""
+    rid = uuid.uuid4()
+    row = _terminal_row(blob_ref="/var/lib/run_logs/x.log.gz")
+    action, reason, consumed = await _upsert_run_from_marker(
+        _FakeAsyncSession(existing_run=row), stack=_fake_stack(),
+        payload=_retry_payload(str(rid), finished_at=datetime.now(timezone.utc).isoformat()),
+        server=_fake_server(),
+    )
+    assert action == "skipped" and "terminal" in reason and consumed is None

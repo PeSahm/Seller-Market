@@ -214,7 +214,9 @@ async def sftp_read_bytes(
     """Read a remote file as raw bytes (e.g. a gzipped run log).
 
     ``max_bytes`` guards against pulling an unexpectedly huge file over the
-    wire: the remote size is stat'ed first and an oversize raises ``SSHError``
+    wire: the remote size is stat'ed first (cheap fast-fail) AND enforced
+    again during the chunked read — a file that grows/gets replaced between
+    stat and read can't blow past the cap. Oversize raises ``SSHError``
     (callers treat that like any other fetch failure and fall back).
     """
     def _read(client: paramiko.SSHClient) -> bytes:
@@ -228,7 +230,20 @@ async def sftp_read_bytes(
                             f"remote file too large: {size} > {max_bytes} bytes"
                         )
                 with sftp.file(remote_path, "rb") as fh:
-                    return fh.read()
+                    if max_bytes is None:
+                        return fh.read()
+                    data = bytearray()
+                    while True:
+                        chunk = fh.read(1 << 20)
+                        if not chunk:
+                            break
+                        data.extend(chunk)
+                        if len(data) > max_bytes:
+                            raise SSHError(
+                                f"remote file too large while reading: "
+                                f"> {max_bytes} bytes"
+                            )
+                    return bytes(data)
             finally:
                 try:
                     sftp.close()
