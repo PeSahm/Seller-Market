@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
@@ -35,7 +35,15 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_FEE_PERCENT = Decimal("1.0")
 _MARK_TO_MARKET_DAYS = 20
+_MARK_TO_MARKET_DAYS_MAX = 365
 _TOMAN_TO_RIAL = Decimal("10")
+
+# Broker timestamps are stored as Tehran WALL-CLOCK labeled UTC (both
+# families relabel — see the Session-4 basis decision), so ``ts.date()`` IS
+# the Tehran market date already. Only "today" needs the real Tehran clock
+# (fixed +03:30 — Iran abolished DST in 2022), else the aging count runs a
+# day behind between Tehran midnight and UTC midnight.
+_TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 
 # Buy is fully sold / partly sold / not sold yet ("possible sell" still to come).
 STATUS_REALIZED = "realized"
@@ -62,14 +70,14 @@ class BuyFeeRow:
 
 @dataclass
 class VirtualFeeRow:
-    """Realization of the UNSOLD remainder of a bot-bought position.
+    """20-day mark-to-market of the UNSOLD remainder of a bot-bought position.
 
-    Triggered either because the customer SOLD some of the position (``trigger
-    == "sell"`` → the whole remainder is realized at the weighted-avg sell
-    price) or because it's been held >20 days unsold (``trigger == "20d"`` →
-    the aged remainder is marked to today's market price). In profit → fee =
-    X% of the paper gain; in loss → a fixed per-agent fee. This is on TOP of the
-    realized per-buy fee on the actually-sold shares.
+    Any bot-buy quantity still unsold > ``mark_to_market_days`` after its buy
+    date is valued at TODAY's live market price — regardless of whether the
+    position has partial sells (the sold shares already billed via FIFO in the
+    per-buy rows). In profit → fee = X% of the paper gain; in loss → a fixed
+    per-agent fee. Recomputed live each view: a later real sell moves quantity
+    from this virtual row into the FIFO-realized fee.
     """
 
     customer_id: Optional[UUID]
@@ -79,10 +87,11 @@ class VirtualFeeRow:
     symbol: str
     open_qty: int
     avg_buy_price: Decimal
-    price: int          # realization price (avg sell price, or today's price)
-    trigger: str        # "sell" | "20d"
+    price: int          # realization price (today's market price)
+    trigger: str        # "20d"
     in_loss: bool
     fee: Decimal
+    oldest_buy_date: Optional[date] = None  # earliest aged lot — how stale
 
 
 @dataclass
@@ -212,7 +221,7 @@ async def build_fee_report(
     window_end: Optional[time] = None,
     exclude: Optional[set[str]] = None,
     today: Optional[date] = None,
-    mark_to_market_days: int = _MARK_TO_MARKET_DAYS,
+    mark_to_market_days: Optional[int] = None,
     max_rows: int = 20000,
 ) -> FeeReport:
     """Compute per-buy profit + operator fee across the filtered orders.
@@ -223,11 +232,25 @@ async def build_fee_report(
     (owed − paid = remaining) + per agent. Every customer with orders in scope
     appears, even at zero, so each is reachable for fee config + payments.
 
-    20-day mark-to-market: any bot-bought position (customer × stock) still
-    UNSOLD after ``mark_to_market_days`` is valued at today's market price —
-    in profit → fee = X% of the paper gain; in loss → a fixed per-agent fee.
+    Mark-to-market: any bot-buy quantity still UNSOLD ``mark_to_market_days``
+    after its buy date is valued at today's market price — regardless of
+    partial sells — in profit → fee = X% of the paper gain; in loss → a fixed
+    per-agent fee. ``mark_to_market_days=None`` resolves the
+    ``mark_to_market_days`` setting (default 20).
     """
-    today = today or datetime.now(timezone.utc).date()
+    today = today or datetime.now(_TEHRAN_TZ).date()
+    if mark_to_market_days is None:
+        try:
+            mark_to_market_days = int(
+                str(await settings_store.get_setting(db, "mark_to_market_days"))
+            )
+            if not (1 <= mark_to_market_days <= _MARK_TO_MARKET_DAYS_MAX):
+                raise ValueError(mark_to_market_days)
+        except Exception:  # noqa: BLE001 — malformed setting shouldn't 500 the report
+            logger.warning(
+                "mark_to_market_days setting is unparseable/out of range; using default"
+            )
+            mark_to_market_days = _MARK_TO_MARKET_DAYS
     stmt = (
         select(BrokerOrder)
         .where(BrokerOrder.state == 3)
@@ -368,15 +391,14 @@ async def build_fee_report(
             ctot.total_fee += row.fee
             ctot.open_volume += row.open_volume
 
-        # --- Realize the UNSOLD remainder of this position (customer × stock) ---
-        # Trigger + realization price:
-        #   * the customer SOLD some → realize the WHOLE remainder at the
-        #     weighted-avg sell price ("whole position on first sell"), OR
-        #   * no sell, held > mark_to_market_days → realize the AGED remainder at
-        #     today's market price (20-day mark-to-market).
+        # --- 20-day mark-to-market on the UNSOLD remainder (customer × stock) ---
+        # Plain FIFO bills the actually-sold shares (per-buy rows above). Any
+        # lot quantity still unsold > mark_to_market_days after its buy date
+        # realizes at TODAY's live market price — regardless of whether the
+        # position has partial sells (a 1-share sell must not exempt the rest).
         # In profit → fee = X% of the paper gain; in loss → the fixed per-agent
-        # loss fee (per losing position). This is ON TOP of the per-buy realized
-        # fee already billed on the actually-sold shares.
+        # loss fee (per losing position). Recomputed live each view: a later
+        # real sell moves quantity from this virtual row into the FIFO fee.
         open_lots = [
             (o, per_buy[o.tracking_number].open_volume)
             for o in bot_buys
@@ -384,38 +406,24 @@ async def build_fee_report(
         ]
         if open_lots:
             realize_price: Optional[Decimal] = None
-            trigger = ""
             rem_lots: list = []
-            if sells:
-                sq = sum(int(s.executed_volume or 0) for s in sells)
-                sv = sum(
-                    (Decimal(s.price) if s.price is not None else Decimal("0"))
-                    * int(s.executed_volume or 0)
-                    for s in sells
-                )
-                if sq > 0:
-                    realize_price = sv / sq
-                    trigger = "sell"
-                    rem_lots = open_lots  # the WHOLE remainder
-            else:
-                aged = [
-                    (o, q)
-                    for o, q in open_lots
-                    if (ts := (o.execution_date or o.created_at_broker or o.placed_at))
-                    is not None
-                    and (today - ts.date()).days > mark_to_market_days
-                ]
-                if aged:
-                    tp = await _today_price(_isin)
-                    if tp and tp > 0:
-                        realize_price = Decimal(tp)
-                        trigger = "20d"
-                        rem_lots = aged
-                    else:
-                        logger.warning(
-                            "fee: no live price for %s — skipping 20-day mark-to-market",
-                            _isin,
-                        )
+            aged = [
+                (o, q)
+                for o, q in open_lots
+                if (ts := (o.execution_date or o.created_at_broker or o.placed_at))
+                is not None
+                and (today - ts.date()).days > mark_to_market_days
+            ]
+            if aged:
+                tp = await _today_price(_isin)
+                if tp and tp > 0:
+                    realize_price = Decimal(tp)
+                    rem_lots = aged
+                else:
+                    logger.warning(
+                        "fee: no live price for %s — skipping 20-day mark-to-market",
+                        _isin,
+                    )
             if realize_price is not None and realize_price > 0 and rem_lots:
                 rem_qty = sum(q for _, q in rem_lots)
                 weighted_buy = sum(
@@ -437,12 +445,28 @@ async def build_fee_report(
                         (x.symbol or x.symbol_title for x in group if (x.symbol or x.symbol_title)),
                         "",
                     ) or ""
+                    oldest = min(
+                        (
+                            ts.date()
+                            for o, _q in rem_lots
+                            if (
+                                ts := (
+                                    o.execution_date
+                                    or o.created_at_broker
+                                    or o.placed_at
+                                )
+                            )
+                            is not None
+                        ),
+                        default=None,
+                    )
                     report.virtual_rows.append(VirtualFeeRow(
                         customer_id=cust_id, agent_id=agent_id_of_group,
                         broker=group[0].broker, isin=_isin, symbol=sym,
                         open_qty=rem_qty, avg_buy_price=avg_buy,
-                        price=int(realize_price), trigger=trigger,
+                        price=int(realize_price), trigger="20d",
                         in_loss=in_loss, fee=vfee,
+                        oldest_buy_date=oldest,
                     ))
                     ctot.total_fee += vfee
                     ctot.mark_fee += vfee

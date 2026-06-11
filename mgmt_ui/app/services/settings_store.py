@@ -95,6 +95,10 @@ DEFAULTS: dict[str, str] = {
     # GLOBAL default in TOMAN; per-agent override lives in agent_fee_configs.
     # The report converts ×10 to Rial. "0" = no loss fee.
     "mark_to_market_loss_fee_toman": "0",
+    # Days a bot-buy lot may sit UNSOLD before the fee report marks the open
+    # remainder to today's market price (applies regardless of partial sells).
+    # Editable from the Profit & fee tab.
+    "mark_to_market_days": "20",
 }
 
 

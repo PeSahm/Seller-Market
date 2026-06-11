@@ -3816,6 +3816,15 @@ async def admin_bot_report(
     ctx["filter_only_bot"] = bool(only_bot)
     ctx["excluded_instruments_raw"] = exclude_raw
     ctx["excluded_count"] = len(exclude_set)
+    try:
+        mtm_days = int(str(await settings_store.get_setting(db, "mark_to_market_days")))
+        # Same 1..365 rule as build_fee_report, so the page never displays a
+        # window the engine silently replaced with the default.
+        if not (1 <= mtm_days <= 365):
+            raise ValueError(mtm_days)
+        ctx["mtm_days"] = mtm_days
+    except Exception:  # noqa: BLE001 — malformed setting must not 500 the page
+        ctx["mtm_days"] = 20
     return templates.TemplateResponse("admin/bot_report.html", ctx)
 
 
@@ -3970,6 +3979,36 @@ async def admin_bot_report_exclusions(
         db, "excluded_instruments", normalized, updated_by=user.id
     )
     await db.commit()
+
+    target = _bot_report_safe_next(next_url)
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target}
+    )
+
+
+@router.post("/bot-report/mtm-days")
+async def admin_bot_report_mtm_days(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    mtm_days: str = Form(""),
+    next_url: str = Form("", alias="next"),
+):
+    """Save the mark-to-market aging window (days a bot-buy lot may sit unsold
+    before the fee report values the open remainder at today's price). Stored
+    as the ``mark_to_market_days`` setting — ``set_setting`` writes the audit
+    row. Out-of-range/garbage input keeps the stored value (no 422)."""
+    try:
+        days: Optional[int] = int(str(mtm_days).strip())
+    except (TypeError, ValueError):
+        days = None
+    if days is not None and 1 <= days <= 365:
+        await settings_store.set_setting(
+            db, "mark_to_market_days", str(days), updated_by=user.id
+        )
+        await db.commit()
 
     target = _bot_report_safe_next(next_url)
     if request.headers.get("HX-Request"):
