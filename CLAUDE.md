@@ -927,3 +927,46 @@ Old bot + sentinel config: sentinel is a comment, ignored. New bot + old (sentin
 | — | **Operator live-test of real-time editing** | During market hours: edit a threshold on the form → within ~3-6 s the bot logs `auto-sell reload: … changed ISIN old→new` and `/admin/auto-sell` flips to "✓ applied HH:MM". Rapid consecutive edits each land; no duplicate side=2 fires near the threshold. |
 | — | Sentinel-less HOLD is silent in the UI | If a stack's config predates the sentinel (no re-push since the mgmt upgrade), reloads hold with only a bot-log WARNING; the page shows "pending" indefinitely. Any TI save / redeploy re-renders with the sentinel and clears it. Candidate: surface a "config needs re-push" hint. |
 | — | S13 "Threshold changes need a Redeploy" | RETIRED by this session (hot-reload). |
+
+---
+
+## Session 15 — Hamid "orders not fired at 08:44" investigated; PR #142 (volume guard + exir fee + scheduler timeout) + PR #143 (FULL run logs + download), both merged — NOT yet deployed
+
+Operator relayed Hamid's complaint: his Tebyan4 stack placed nothing at the 08:44 open (2026-06-10); he re-ran manually later. Full forensic investigation, then two PRs fixing everything actionable. **Merged to main but the fleet still runs the old images — deploy is the next session's first task.**
+
+### The investigation (evidence in `.investigation/20260610-hamid/` + SUMMARY.md)
+
+- **"Tebyan4" = server row `Tebyan4` = `185.232.152.180`** (hostname `server2`!). The fleet had ANOTHER overnight reshuffle (admin 02:04–02:33: servers Tebyan2/3/4 named rows, stacks created/moved). **Server names ≠ hostnames ≠ prose — always re-derive from `servers`/`agent_stacks`.**
+- The 08:44 scheduled run on Tebyan4 RAN (auth OK, 7 sections / 2 karamad accounts prepared) but **every order POST was broker-rejected**: zero fire-log entries, zero open orders at the 08:46 sweep, zero broker-side registrations. Sibling-stack logs (the only surviving full logs) show the taxonomy: **1017** (pre-open, until exactly 08:45:00) then per-account **1011** insufficient-BP / **1001** "حجم سفارش اشتباه" wrong-volume / 1006 min-value / 1018 interval; Exir tenants got 1005 group-state.
+- **Root mechanics:** every section is sized to ~full per-account BP → per account at most ONE order can land (Tebyan2 proof: سهگمت 7.47B landed at 08:45:01.3 then everything else 1011 forever). Hamid's 0073179957 had **negative BP (−607,897)** → CalculateOrderParam returned **negative volumes (−30)** → 522 doomed POSTs (code 1001).
+- **"failed · exit 1" runs-page badge is the fleet NORM** (locust failure-stats exit from rejected spam) — all 12 stacks exit 1 daily; not a signal by itself.
+- **Evidence destruction:** `trading_bot.log` truncated at every locustfile import — Hamid's manual re-run wiped the morning log. Forensics came from: mgmt run-blob tails, `runs`/`trade_results`/`audit_log` DB, the 08:30 warmup blob, fire-log JSONL, and SIBLING stacks whose logs survived. Hosts without my SSH key are reachable via `run_command(server, cmd)` inside the api container.
+
+### PR #142 (merged `1518add`) — bot-only
+
+1. **Quiet skip on non-positive BUY volume** (operator: "just ignore it"): `locustfile_new.prepare_order_data` + `ephoenix_adapter.prepare_order` raise once (no spam) after the max-vol cap; `cache_warmup` warns + skips caching params but keeps the account GREEN. exir's existing guard untouched.
+2. **Exir fee silently 0 → over-spend (operator-observed):** `exir_adapter._buy_fee_rate` returned `entry.get("SIDE_BUY") or 0.0` — a wages miss sized volume with NO fee headroom → value+fee > BP → guaranteed rejection. Now returns None on miss and `prepare_order` applies `EXIR_FALLBACK_BUY_FEE = 0.005` (above real ~0.003712 → slight under-size, never over-spend) with a warning.
+3. **Scheduler timeout follows `--run-time`:** hard `subprocess.run(timeout=600)` would kill the now-standard 599s runs BEFORE `on_test_stop` (fire-log + order_results lost). Now `max(600, run_time + 180)` parsed from the built command (`_parse_locust_duration`/`_compute_job_timeout`).
+
+### PR #143 (merged `b5d3efc`) — FULL run logs end-to-end (gzipped) + Download on every run
+
+Operator: keep ALL logs efficiently + downloadable per run (for bug investigation).
+- **Bot `log_rotation.py`:** rotate-then-truncate — previous log archived complete+gzipped to `logs/` (host dir mount), truncate IN PLACE (rename detaches single-file bind-mount inode). Double-import-safe (mtime <60s no-op — locust `--processes` forks a worker that re-imports). Keep-20 prune by mtime (`BOT_LOG_KEEP`).
+- **Bot `scheduler.py`:** full combined output → `run_results/scheduled_run_<uuid>.log.gz` + additive marker field `log_file` (schema v1; 4KB tails stay as fallback); 7-day orphan prune.
+- **Mgmt ingestor:** fetches the gz (exact-name guard, in-read size cap via new `sftp_read_bytes`, streamed gzip-bomb verify ≤256MiB), stores gz AS-FETCHED at `run_logs/<run_id>.log.gz`. Fetch failure → tails fallback + **bounded retry**: marker+gz kept and re-attempted by later ticks until 24h past `finished_at`, then consumed (CodeRabbit caught the original "retry" being unreachable).
+- **Mgmt runs:** `finalize_run` gzips manual blobs too (55MB→~3MB); `read_run_log` gunzips transparently; new `read_run_log_tail`. Run detail renders last 256KB + "Download full log"; new `GET /admin|/agent/runs/{id}/log.txt` serves the gz with `Content-Encoding: gzip` (browser inflates; agent route 404-masked).
+- Compat additive both directions → deploy order unconstrained. Bot suite 199 / mgmt 515 green.
+
+### Learnings (Session 15)
+- **Sibling-stack logs are the forensic fallback** when a stack's own log was truncated — same minute, same broker, same code path. And manual-run mgmt blobs were ALWAYS full (55MB) while scheduled kept 4KB tails — fixed by #143.
+- **The 1011 wall:** prepared volume+fee tracks BP within rounding; ANY BP drop between prepare (08:44) and fire (08:45) → all-day 1011. One full-BP fill per account per open, BY DESIGN of full-BP sizing.
+- **Code 1001 = wrong order volume** (negative/cap-violating), distinct from 1011/1017/1018 — now prevented at source by #142.
+- **Don't run `git stash` mid-flight as a "baseline diff" trick** — it stashed the uncommitted feature work (recovered with `git stash pop`). Use `git show origin/main:file > /tmp/...` for baselines.
+- **Ruff configs differ per dir** (mgmt_ui/pyproject selects E,F,W,I,B,UP; repo root = defaults) — compare lint deltas against the SAME config, and judge new code against the file's existing idioms.
+- **CodeRabbit on #143 found a real design hole** (unreachable retry path) — worth reading past the nitpicks.
+
+### NEXT SESSION — deploy runbook (nothing deployed yet)
+1. Stage bot image `b5d3efc` on ALL 6 hosts (mirror pull-by-digest → retag `ghcr.io/pesahm/seller-market:latest` → verify revision label).
+2. `redeploy_stack` ALL stacks via api container with `warm_family_cache(db)` first (delivers rotation + new scheduler; compose unchanged).
+3. Deploy mgmt-ui `b5d3efc` (`compose up -d api`; no migration — alembic stays `0014_as_reload_status`).
+4. Verify per the PR checklists: B1 (negative-BP account → one skip line, zero 1001 spam), B2 (exir prepare log shows real fee or fallback warning), C (599s run completes on_test_stop), A (logs/*.log.gz archives appear; scheduled gz ingested then deleted; Download full log works on old 55MB manual run + new runs; agent 404-mask).
