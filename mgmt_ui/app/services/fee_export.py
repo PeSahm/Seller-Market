@@ -173,7 +173,7 @@ def build_fee_workbook(
                 v.isin,
                 v.symbol or "",
                 int(v.open_qty),
-                v.oldest_buy_date.isoformat() if v.oldest_buy_date else "",
+                v.oldest_buy_date,  # real Excel date cell (None → empty)
                 _num(v.avg_buy_price),
                 int(v.price),
                 "20d",
@@ -181,6 +181,10 @@ def build_fee_workbook(
                 _num(v.fee),
             ])
         _apply_formats(wsv, date_cols=[], money_cols=[7, 8, 11], pct_cols=[], nrows=len(report.virtual_rows))
+        # Day-resolution format for Oldest buy (the shared _DATE_FMT carries a
+        # time-of-day component that's noise for a pure date).
+        for r in range(2, len(report.virtual_rows) + 2):
+            wsv.cell(row=r, column=6).number_format = "yyyy-mm-dd"
         _autosize(wsv, [18, 16, 16, 12, 12, 12, 16, 14, 8, 8, 16])
 
     # ---- Sheet 3: Raw orders (audit) ------------------------------------

@@ -273,6 +273,10 @@ async def test_mtm_days_setting_resolved(monkeypatch):
     rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
     assert len(rep.virtual_rows) == 1
 
+    setting["value"] = "999"  # out of range (1..365) → default 20 → still marks
+    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
+    assert len(rep.virtual_rows) == 1
+
 
 async def test_virtual_row_oldest_buy_date(monkeypatch):
     # Two aged lots (29d and 25d) → ONE virtual row carrying the EARLIEST date.
@@ -286,6 +290,43 @@ async def test_virtual_row_oldest_buy_date(monkeypatch):
     assert len(rep.virtual_rows) == 1
     assert rep.virtual_rows[0].open_qty == 100
     assert rep.virtual_rows[0].oldest_buy_date == _OLD.date()
+
+
+async def test_20day_marks_only_aged_lots_in_mixed_age_position(monkeypatch):
+    # One aged lot (29d) + one RECENT lot (5d) on the same customer × stock →
+    # the virtual row covers ONLY the aged lot's open volume at ITS price; the
+    # recent lot stays open and unbilled. Kills the "mark the whole open
+    # remainder once any lot is aged" mutation (the #130 shape this reverts).
+    async def _price(_db, _isin):
+        return 7000
+    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+    aged_buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
+    recent_buy = _order(1, 50, 6200, is_bot=True, ts=_RECENT, tracking=2)
+    rep = await pr.build_fee_report(
+        _fake_db([aged_buy, recent_buy], [(_CUST, _AGENT)]), today=_TODAY
+    )
+    assert len(rep.virtual_rows) == 1
+    v = rep.virtual_rows[0]
+    assert v.open_qty == 100  # the aged lot only — NOT the recent 50
+    assert v.avg_buy_price == Decimal("6000")  # aged lot's price, not blended
+    assert v.fee == Decimal("1000")  # 1% × (7000-6000) × 100
+    assert v.oldest_buy_date == _OLD.date()
+
+
+async def test_20day_boundary_is_strictly_greater(monkeypatch):
+    # Aging is STRICTLY > mark_to_market_days: a lot EXACTLY N days old does
+    # not mark; lowering the window by one day makes it mark.
+    async def _price(_db, _isin):
+        return 7000
+    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+    exactly_20d = datetime(2026, 6, 10, tzinfo=timezone.utc)  # _TODAY − 20 days
+    buy = _order(1, 100, 6000, is_bot=True, ts=exactly_20d, tracking=1)
+    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
+    assert rep.virtual_rows == []
+    rep = await pr.build_fee_report(
+        _fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY, mark_to_market_days=19
+    )
+    assert len(rep.virtual_rows) == 1
 
 
 # ---------------------------------------------------------------------------

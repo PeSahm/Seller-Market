@@ -132,9 +132,9 @@
   {# ================= Profit & fee tab ================= #}
   {% set fr = fee_report %}
 
-  {# Per-agent fee % + 20-day fixed loss-fee override #}
+  {# Per-agent fee % + fixed mark-to-market loss-fee override #}
   <details class="card" style="margin-bottom: 12px;">
-    <summary class="text-small">Set an agent's fee % + 20-day loss fee</summary>
+    <summary class="text-small">Set an agent's fee % + {{ mtm_days }}-day loss fee</summary>
     <form method="post" action="/admin/bot-report/fee-config" class="filter-bar" style="margin-top:8px;">
       {% include "partials/csrf.html" %}
       <select name="agent_id" class="input" required>
@@ -144,7 +144,7 @@
         {% endfor %}
       </select>
       <input type="number" step="0.0001" min="0" name="fee_percent" class="input" placeholder="fee %" required title="Percent, e.g. 1.5 = 1.5%">
-      <input type="number" step="1" min="0" name="loss_fee_toman" class="input" placeholder="loss fee (Toman)" title="Fixed fee per losing position on the 20-day mark-to-market, in Toman (blank = global default)">
+      <input type="number" step="1" min="0" name="loss_fee_toman" class="input" placeholder="loss fee (Toman)" title="Fixed fee per losing position on the {{ mtm_days }}-day mark-to-market, in Toman (blank = global default)">
       <button class="btn btn--sm" type="submit">Save</button>
     </form>
     <p class="text-small text-muted" style="margin:6px 0 0;">
@@ -155,7 +155,8 @@
     </p>
     <form method="post" action="/admin/bot-report/mtm-days" class="filter-bar" style="margin-top:10px;">
       {% include "partials/csrf.html" %}
-      <input type="hidden" name="next" value="/admin/bot-report?tab=fees">
+      <input type="hidden" name="next"
+             value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
       <label class="text-small" style="align-self:center;">Mark-to-market after</label>
       <input type="number" step="1" min="1" max="365" name="mtm_days" class="input" style="max-width:90px;"
              value="{{ mtm_days }}" required

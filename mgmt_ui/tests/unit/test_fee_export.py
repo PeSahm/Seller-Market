@@ -162,5 +162,6 @@ def test_build_fee_workbook_mark_to_market_sheet():
     row = {header[i]: ws[2][i].value for i in range(len(header))}
     assert row["Customer"] == "Mostafa main"
     assert row["Trigger"] == "20d"
-    assert row["Oldest buy"] == "2026-06-01"
+    # Real Excel date cell (openpyxl reads date cells back as datetime).
+    assert row["Oldest buy"] == datetime(2026, 6, 1)
     assert row["Open qty"] == 40 and row["Fee"] == 400

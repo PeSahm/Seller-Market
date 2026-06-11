@@ -3817,9 +3817,12 @@ async def admin_bot_report(
     ctx["excluded_instruments_raw"] = exclude_raw
     ctx["excluded_count"] = len(exclude_set)
     try:
-        ctx["mtm_days"] = int(
-            str(await settings_store.get_setting(db, "mark_to_market_days"))
-        )
+        mtm_days = int(str(await settings_store.get_setting(db, "mark_to_market_days")))
+        # Same 1..365 rule as build_fee_report, so the page never displays a
+        # window the engine silently replaced with the default.
+        if not (1 <= mtm_days <= 365):
+            raise ValueError(mtm_days)
+        ctx["mtm_days"] = mtm_days
     except Exception:  # noqa: BLE001 — malformed setting must not 500 the page
         ctx["mtm_days"] = 20
     return templates.TemplateResponse("admin/bot_report.html", ctx)

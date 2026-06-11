@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
@@ -35,7 +35,15 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_FEE_PERCENT = Decimal("1.0")
 _MARK_TO_MARKET_DAYS = 20
+_MARK_TO_MARKET_DAYS_MAX = 365
 _TOMAN_TO_RIAL = Decimal("10")
+
+# Broker timestamps are stored as Tehran WALL-CLOCK labeled UTC (both
+# families relabel — see the Session-4 basis decision), so ``ts.date()`` IS
+# the Tehran market date already. Only "today" needs the real Tehran clock
+# (fixed +03:30 — Iran abolished DST in 2022), else the aging count runs a
+# day behind between Tehran midnight and UTC midnight.
+_TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 
 # Buy is fully sold / partly sold / not sold yet ("possible sell" still to come).
 STATUS_REALIZED = "realized"
@@ -230,16 +238,18 @@ async def build_fee_report(
     per-agent fee. ``mark_to_market_days=None`` resolves the
     ``mark_to_market_days`` setting (default 20).
     """
-    today = today or datetime.now(timezone.utc).date()
+    today = today or datetime.now(_TEHRAN_TZ).date()
     if mark_to_market_days is None:
         try:
             mark_to_market_days = int(
                 str(await settings_store.get_setting(db, "mark_to_market_days"))
             )
-            if mark_to_market_days < 1:
+            if not (1 <= mark_to_market_days <= _MARK_TO_MARKET_DAYS_MAX):
                 raise ValueError(mark_to_market_days)
         except Exception:  # noqa: BLE001 — malformed setting shouldn't 500 the report
-            logger.warning("mark_to_market_days setting is unparseable; using default")
+            logger.warning(
+                "mark_to_market_days setting is unparseable/out of range; using default"
+            )
             mark_to_market_days = _MARK_TO_MARKET_DAYS
     stmt = (
         select(BrokerOrder)
