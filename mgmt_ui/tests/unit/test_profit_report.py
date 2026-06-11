@@ -329,6 +329,22 @@ async def test_20day_boundary_is_strictly_greater(monkeypatch):
     assert len(rep.virtual_rows) == 1
 
 
+async def test_20day_uses_stored_wallclock_date_no_tz_shift(monkeypatch):
+    # Stored broker timestamps are Tehran WALL-CLOCK labeled UTC, so the aging
+    # date is ts.date() AS-IS. A late-evening lot (21:00 on June 9 wall clock)
+    # is 21 days old on June 30 → marks. An (incorrect) astimezone(+03:30)
+    # would roll it to June 10 → exactly 20 days → silently not mark; this
+    # pins against that double-shift regression.
+    async def _price(_db, _isin):
+        return 7000
+    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+    late_evening = datetime(2026, 6, 9, 21, 0, tzinfo=timezone.utc)
+    buy = _order(1, 100, 6000, is_bot=True, ts=late_evening, tracking=1)
+    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
+    assert len(rep.virtual_rows) == 1
+    assert rep.virtual_rows[0].oldest_buy_date == date(2026, 6, 9)
+
+
 # ---------------------------------------------------------------------------
 # get_fee_percent resolution: customer → agent → global → default (#116)
 # ---------------------------------------------------------------------------
