@@ -930,9 +930,9 @@ Old bot + sentinel config: sentinel is a comment, ignored. New bot + old (sentin
 
 ---
 
-## Session 15 — Hamid "orders not fired at 08:44" investigated; PR #142 (volume guard + exir fee + scheduler timeout) + PR #143 (FULL run logs + download), both merged — NOT yet deployed
+## Session 15 — Hamid "orders not fired at 08:44" investigated; PR #142 (volume guard + exir fee + scheduler timeout) + PR #143 (FULL run logs + download) — merged AND fleet-deployed
 
-Operator relayed Hamid's complaint: his Tebyan4 stack placed nothing at the 08:44 open (2026-06-10); he re-ran manually later. Full forensic investigation, then two PRs fixing everything actionable. **Merged to main but the fleet still runs the old images — deploy is the next session's first task.**
+Operator relayed Hamid's complaint: his Tebyan4 stack placed nothing at the 08:44 open (2026-06-10); he re-ran manually later. Full forensic investigation, then two PRs fixing everything actionable, then a same-session fleet deploy (operator: "yeah go and do that").
 
 ### The investigation (evidence in `.investigation/20260610-hamid/` + SUMMARY.md)
 
@@ -965,8 +965,16 @@ Operator: keep ALL logs efficiently + downloadable per run (for bug investigatio
 - **Ruff configs differ per dir** (mgmt_ui/pyproject selects E,F,W,I,B,UP; repo root = defaults) — compare lint deltas against the SAME config, and judge new code against the file's existing idioms.
 - **CodeRabbit on #143 found a real design hole** (unreachable retry path) — worth reading past the nitpicks.
 
-### NEXT SESSION — deploy runbook (nothing deployed yet)
-1. Stage bot image `b5d3efc` on ALL 6 hosts (mirror pull-by-digest → retag `ghcr.io/pesahm/seller-market:latest` → verify revision label).
-2. `redeploy_stack` ALL stacks via api container with `warm_family_cache(db)` first (delivers rotation + new scheduler; compose unchanged).
-3. Deploy mgmt-ui `b5d3efc` (`compose up -d api`; no migration — alembic stays `0014_as_reload_status`).
-4. Verify per the PR checklists: B1 (negative-BP account → one skip line, zero 1001 spam), B2 (exir prepare log shows real fee or fallback warning), C (599s run completes on_test_stop), A (logs/*.log.gz archives appear; scheduled gz ingested then deleted; Download full log works on old 55MB manual run + new runs; agent 404-mask).
+### Deploy state (END OF SESSION — all verified live, 2026-06-12 ~00:50 Tehran)
+
+- **Bot image: all 14 stacks / 6 hosts on revision `022aa30`** — that's the CLAUDE.md docs commit ON TOP of `b5d3efc`; bot code is byte-identical to `b5d3efc` (the docs-only merge re-triggered Docker Publish — `:latest` always tracks the newest main commit). Staged by immutable digest `sha256:12830c37…` (mirror-pull-by-digest with direct-ghcr fallback, in PARALLEL via `run_command` through the api container), revision-label-verified per host, then **`redeploy_stack` ×14 sequentially** (with `warm_family_cache(db)` first) → 14/14 `up`. ghcr was DIRECTLY reachable from PouyanIt this session (pulled `:latest` straight).
+- **mgmt UI on `b5d3efc`** at `5.10.248.55:/opt/seller-market-mgmt`: `/health`=200, alembic stays `0014_as_reload_status` (no migration), new `GET /admin|/agent/runs/{id}/log.txt` route registered (401 auth-gate, not 404).
+- **Auto-sell monitors all re-armed post-redeploy**: Mostafa's 2 سورنافود watches `armed 1` (PouyanIt + Tebyan2); all other stacks `armed 0` as expected.
+- **Deploy-ops notes**: (1) the stack-redeploy loop runs INSIDE the api container — never `compose up -d api` (which recreates that container) while a redeploy script is in flight; deploy mgmt LAST. (2) A legacy `seller-market-bot` container (rev `5b5d389`) on PouyanIt is the old pre-dashboard root deployment — NOT a managed stack, left untouched. (3) `gh pr merge` can succeed even when the surrounding command errors on a github connectivity blip — check `gh pr view --json state,mergedAt` before retrying a merge.
+
+### Watch at the next 08:30/08:44 open (first run on the new images)
+
+1. **B1**: a negative-BP account → ONE "skipping … computed BUY volume invalid" line, ZERO broker-1001 spam; warmup stays green with the skip warning.
+2. **B2**: exir prepare log line shows the real wages fee, or the fallback-0.005 warning — never fee=0.
+3. **C**: the 599s run completes `on_test_stop` (fire-log + order_results written; marker exit code real, not timeout).
+4. **A**: `logs/trading_bot_*.log.gz` archives appear per stack (`zcat` readable); `scheduled_run_<uuid>.log.gz` ingested then deleted from hosts; mgmt stores `run_logs/<run_id>.log.gz`; the Runs page shows "Download full log" on every run (incl. old 55MB manual blobs which still render instantly via the 256KB tail).
