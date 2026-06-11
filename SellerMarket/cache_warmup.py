@@ -29,12 +29,18 @@ from api_client import EphoenixAPIClient
 from cache_manager import TradingCache
 from captcha_utils import decode_captcha
 
-# Configure logging - truncate log file on each run
+# Configure logging — archive the previous warmup's log (gzipped) to logs/
+# then truncate in place (single-file bind mount: truncate, never rename),
+# instead of blindly wiping it with mode='w'.
+from log_rotation import rotate_and_truncate
+
+rotate_and_truncate('cache_warmup.log')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('cache_warmup.log', mode='w', encoding='utf-8'),  # mode='w' truncates file
+        logging.FileHandler('cache_warmup.log', mode='a', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )

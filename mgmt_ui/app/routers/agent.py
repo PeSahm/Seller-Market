@@ -21,12 +21,13 @@ from __future__ import annotations
 import difflib
 import logging
 from datetime import date, datetime, time, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1979,11 +1980,16 @@ async def agent_run_detail(
 
     # Archived log is only relevant once the run has finished; while
     # ``running`` the template opens a WebSocket and streams stdout live
-    # (the WS handler will replay any already-buffered output).
+    # (the WS handler will replay any already-buffered output). Only the
+    # TAIL renders inline — the complete log is the log.txt download.
     archived_log = ""
+    archived_log_total = 0
+    archived_log_truncated = False
     if run.status != "running":
-        bs = await services_runs.read_run_log(run)
-        archived_log = bs.decode("utf-8", errors="replace")
+        tail, total = await services_runs.read_run_log_tail(run)
+        archived_log = tail.decode("utf-8", errors="replace")
+        archived_log_total = total
+        archived_log_truncated = total > len(tail)
 
     ctx = _ctx(request, user, current_tab="/agent/runs")
     ctx["run"] = run
@@ -1993,7 +1999,36 @@ async def agent_run_detail(
     # tenant info to anyone over-the-shoulder.
     ctx["agent"] = agent_user
     ctx["archived_log"] = archived_log
+    ctx["archived_log_total"] = archived_log_total
+    ctx["archived_log_truncated"] = archived_log_truncated
     return templates.TemplateResponse("agent/run_detail.html", ctx)
+
+
+@router.get("/runs/{run_id}/log.txt")
+async def agent_run_log_download(
+    run_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download the COMPLETE archived run log (tenant-guarded, 404-masked).
+
+    Same serving strategy as the admin route: gzipped blobs go out with
+    ``Content-Encoding: gzip`` and the browser inflates to full text.
+    """
+    _require_agent_or_admin(user)
+    run = await services_runs.get_run(db, run_id)
+    if run is None or not services_runs.can_user_see_run(user, run):
+        raise HTTPException(status_code=404, detail="run not found")
+    if not run.log_blob_ref or not Path(run.log_blob_ref).exists():
+        raise HTTPException(status_code=404, detail="no archived log for this run")
+    headers = {"Content-Disposition": f'attachment; filename="run-{run_id}.log"'}
+    if run.log_blob_ref.endswith(".gz"):
+        headers["Content-Encoding"] = "gzip"
+    return FileResponse(
+        run.log_blob_ref,
+        media_type="text/plain; charset=utf-8",
+        headers=headers,
+    )
 
 
 @router.post("/runs/{run_id}/terminate")

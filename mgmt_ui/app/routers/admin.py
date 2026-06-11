@@ -15,13 +15,14 @@ import asyncio
 import difflib
 import logging
 from datetime import date, datetime, timezone
+from pathlib import Path
 from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import ValidationError
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -3312,16 +3313,54 @@ async def admin_run_detail(
         raise HTTPException(status_code=404, detail="run not found")
     stack = await services_stacks.get_stack(db, run.stack_id)
     agent = await services_agents.get_agent(db, run.agent_id)
+    # Inline render shows only the TAIL of the archived log — full blobs can
+    # be tens of MB (manual runs capture everything) and would stall the
+    # page. The complete log is one click away via the log.txt download.
     archived_log = ""
+    archived_log_total = 0
+    archived_log_truncated = False
     if run.status != "running":
-        bs = await services_runs.read_run_log(run)
-        archived_log = bs.decode("utf-8", errors="replace")
+        tail, total = await services_runs.read_run_log_tail(run)
+        archived_log = tail.decode("utf-8", errors="replace")
+        archived_log_total = total
+        archived_log_truncated = total > len(tail)
     ctx = _ctx(request, user, current_tab="/admin/runs")
     ctx["run"] = run
     ctx["stack"] = stack
     ctx["agent"] = agent
     ctx["archived_log"] = archived_log
+    ctx["archived_log_total"] = archived_log_total
+    ctx["archived_log_truncated"] = archived_log_truncated
     return templates.TemplateResponse("admin/run_detail.html", ctx)
+
+
+@router.get("/runs/{run_id}/log.txt")
+async def admin_run_log_download(
+    run_id: UUID,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download the COMPLETE archived run log as plain text.
+
+    Gzipped blobs are served as-is with ``Content-Encoding: gzip`` — the
+    small compressed file crosses the wire and the browser transparently
+    inflates it to the full text, so even the legacy 55 MB captures download
+    instantly with zero server CPU. ``log_blob_ref`` is mgmt-written (never
+    user input), so serving it directly is safe.
+    """
+    run = await services_runs.get_run(db, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if not run.log_blob_ref or not Path(run.log_blob_ref).exists():
+        raise HTTPException(status_code=404, detail="no archived log for this run")
+    headers = {"Content-Disposition": f'attachment; filename="run-{run_id}.log"'}
+    if run.log_blob_ref.endswith(".gz"):
+        headers["Content-Encoding"] = "gzip"
+    return FileResponse(
+        run.log_blob_ref,
+        media_type="text/plain; charset=utf-8",
+        headers=headers,
+    )
 
 
 @router.post("/runs/{run_id}/terminate")

@@ -208,6 +208,62 @@ def _best_effort_unlink(client: paramiko.SSHClient, path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def sftp_read_bytes(
+    server: Server, remote_path: str, max_bytes: int | None = None
+) -> bytes:
+    """Read a remote file as raw bytes (e.g. a gzipped run log).
+
+    ``max_bytes`` guards against pulling an unexpectedly huge file over the
+    wire: the remote size is stat'ed first (cheap fast-fail) AND enforced
+    again during the chunked read — a file that grows/gets replaced between
+    stat and read can't blow past the cap. Oversize raises ``SSHError``
+    (callers treat that like any other fetch failure and fall back).
+    """
+    def _read(client: paramiko.SSHClient) -> bytes:
+        try:
+            sftp: paramiko.SFTPClient = client.open_sftp()
+            try:
+                if max_bytes is not None:
+                    size = sftp.stat(remote_path).st_size or 0
+                    if size > max_bytes:
+                        raise SSHError(
+                            f"remote file too large: {size} > {max_bytes} bytes"
+                        )
+                with sftp.file(remote_path, "rb") as fh:
+                    if max_bytes is None:
+                        return fh.read()
+                    data = bytearray()
+                    while True:
+                        chunk = fh.read(1 << 20)
+                        if not chunk:
+                            break
+                        data.extend(chunk)
+                        if len(data) > max_bytes:
+                            raise SSHError(
+                                f"remote file too large while reading: "
+                                f"> {max_bytes} bytes"
+                            )
+                    return bytes(data)
+            finally:
+                try:
+                    sftp.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        except (socket.timeout, TimeoutError) as exc:
+            raise SSHConnectionError("sftp timed out") from exc
+        except SSHError:
+            raise
+        except (socket.error, OSError, IOError) as exc:
+            raise SSHError(f"sftp i/o failed: {exc}") from exc
+
+    try:
+        return await ssh_pool.run_with_retry(server, _read)
+    except paramiko.AuthenticationException as exc:
+        raise AuthenticationError(str(exc)) from exc
+    except paramiko.SSHException as exc:
+        raise SSHConnectionError(str(exc) or exc.__class__.__name__) from exc
+
+
 async def sftp_read_text(server: Server, remote_path: str) -> str:
     """Read a small UTF-8 text file from the remote server.
 

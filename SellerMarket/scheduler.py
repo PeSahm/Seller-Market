@@ -3,6 +3,8 @@ Simple Scheduler for Trading Bot
 Reads scheduler_config.json and executes jobs at scheduled times
 """
 
+import glob
+import gzip
 import json
 import os
 import re
@@ -76,6 +78,64 @@ def _emit_scheduled_run_marker(path: str, payload: Dict[str, Any]) -> bool:
     except Exception:  # noqa: BLE001 — never let marker I/O block the job
         logger.exception("failed to emit scheduled-run marker at %s", path)
         return False
+
+
+# Separator between the stdout and stderr sections of a combined run log.
+# MUST stay byte-identical to what the mgmt UI writes for manual runs
+# (services/runs.py::finalize_run / scheduled_run_ingestor._archive_log_if_final)
+# so every archived run log has one uniform shape.
+_RUN_LOG_STDERR_SEPARATOR = b"\n--- stderr ---\n"
+# Refuse to gzip absurdly large captures (runaway subprocess output).
+_RUN_LOG_MAX_BYTES = 128 * 1024 * 1024
+# Orphan .log.gz cleanup horizon: files the mgmt ingestor never consumed
+# (old mgmt image, mgmt down, fetch fallback) must not pile up forever.
+_RUN_LOG_GZ_MAX_AGE_DAYS = 7
+
+
+def _write_scheduled_run_log_gz(path: str, stdout: str, stderr: str) -> bool:
+    """Write the run's FULL combined output, gzip-compressed, atomically.
+
+    The mgmt UI's scheduled_run_ingestor fetches this over SFTP and archives
+    it verbatim so the operator can download the complete log from the Runs
+    page (the marker itself only carries 4 KB tails as a fallback). Returns
+    True on success; best-effort, never raises.
+    """
+    try:
+        out = (stdout or "").encode("utf-8", errors="replace")
+        err = (stderr or "").encode("utf-8", errors="replace")
+        blob = out + (_RUN_LOG_STDERR_SEPARATOR + err if err else b"")
+        if len(blob) > _RUN_LOG_MAX_BYTES:
+            logger.warning(
+                "scheduled-run log too large to archive (%d bytes > %d) — skipping",
+                len(blob), _RUN_LOG_MAX_BYTES,
+            )
+            return False
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with gzip.open(tmp, "wb") as gz:
+            gz.write(blob)
+        os.replace(tmp, path)
+        return True
+    except Exception:  # noqa: BLE001 — log archiving must never block the job
+        logger.exception("failed to write scheduled-run log gz at %s", path)
+        return False
+
+
+def _prune_old_run_log_gz(run_results_dir: str, max_age_days: int = _RUN_LOG_GZ_MAX_AGE_DAYS) -> None:
+    """Delete orphaned scheduled_run_*.log.gz older than ``max_age_days``."""
+    try:
+        cutoff = time.time() - max_age_days * 86400
+        for path in glob.glob(os.path.join(run_results_dir, "scheduled_run_*.log.gz")):
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "failed to prune scheduled_run_*.log.gz under %s",
+            run_results_dir, exc_info=True,
+        )
 
 
 def load_locust_config() -> Dict[str, Any]:
@@ -390,28 +450,36 @@ class JobScheduler:
                 logger.debug(f"Full stdout ({len(result.stdout)} chars):\n{result.stdout}")
                 logger.debug(f"Full stderr ({len(result.stderr)} chars):\n{result.stderr}")
 
-            # Final marker for the mgmt UI ingestor — includes terminal status
-            # and trimmed stdout/stderr tails so the ingestor can archive the
-            # log without us writing 100s of MB. The 4 KB cap mirrors what
-            # finalize_run keeps for an actually-streamed manual run.
+            # Final marker for the mgmt UI ingestor. The FULL combined output
+            # is written alongside as a gzipped log file the ingestor fetches
+            # over SFTP (operator decision: keep complete run logs — they're
+            # needed for bug investigation). The 4 KB stdout/stderr tails stay
+            # in the marker as the fallback for fetch failures / old mgmt.
             if mgmt_job_name is not None:
-                final_written = _emit_scheduled_run_marker(
-                    final_marker,
-                    {
-                        "schema_version": 1,
-                        "scheduled_run_id": scheduled_run_id,
-                        "job_name": mgmt_job_name,
-                        "trigger": "scheduled",
-                        "started_at": started_at_iso,
-                        "finished_at": finished_at_iso,
-                        "elapsed_seconds": round(elapsed_s, 3),
-                        "exit_code": int(result.returncode),
-                        "status": "success" if result.returncode == 0 else "failed",
-                        "stdout_tail": (result.stdout or "")[-4096:],
-                        "stderr_tail": (result.stderr or "")[-4096:],
-                        "command": command_for_logging,
-                    },
+                _prune_old_run_log_gz(run_results_dir)
+                log_gz_name = f"scheduled_run_{scheduled_run_id}.log.gz"
+                log_gz_written = _write_scheduled_run_log_gz(
+                    os.path.join(run_results_dir, log_gz_name),
+                    result.stdout or "",
+                    result.stderr or "",
                 )
+                final_payload = {
+                    "schema_version": 1,
+                    "scheduled_run_id": scheduled_run_id,
+                    "job_name": mgmt_job_name,
+                    "trigger": "scheduled",
+                    "started_at": started_at_iso,
+                    "finished_at": finished_at_iso,
+                    "elapsed_seconds": round(elapsed_s, 3),
+                    "exit_code": int(result.returncode),
+                    "status": "success" if result.returncode == 0 else "failed",
+                    "stdout_tail": (result.stdout or "")[-4096:],
+                    "stderr_tail": (result.stderr or "")[-4096:],
+                    "command": command_for_logging,
+                }
+                if log_gz_written:
+                    final_payload["log_file"] = log_gz_name
+                final_written = _emit_scheduled_run_marker(final_marker, final_payload)
                 # Only delete the running marker if the final marker
                 # actually persisted. Otherwise a transient disk-full /
                 # permission glitch would leave the mgmt UI's row stuck

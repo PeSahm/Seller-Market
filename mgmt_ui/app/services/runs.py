@@ -23,8 +23,11 @@ account.
 
 from __future__ import annotations
 
+import asyncio
+import gzip
 import hashlib
 import logging
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -162,8 +165,8 @@ async def finalize_run(
             catches it.
         exit_code: Process exit code if known; ``None`` when the
             executor never observed one (e.g. SSH dropped mid-run).
-        captured_log: Full combined stdout+stderr bytes. Written
-            verbatim to disk — no trimming, no encoding conversion.
+        captured_log: Full combined stdout+stderr bytes. Stored complete
+            (no trimming, no encoding conversion), gzip-compressed on disk.
         actor_id: User on whose behalf the finalize is happening, for
             the audit row. Usually the same actor as ``start_run``.
 
@@ -193,9 +196,15 @@ async def finalize_run(
 
     log_dir = Path(get_settings().run_logs_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{run.id}.log"
-    sha = hashlib.sha256(captured_log).hexdigest()
-    log_path.write_bytes(captured_log)
+    # Stored gzip-compressed (~10-20x smaller; a 55 MB capture becomes a few
+    # MB) — the operator keeps EVERY complete run log for bug investigation
+    # without the disk cost. Legacy plain ``.log`` blobs remain readable;
+    # all readers dispatch on the ``.gz`` suffix of ``log_blob_ref``. The
+    # compression runs in a thread so a huge capture can't stall the loop.
+    log_path = log_dir / f"{run.id}.log.gz"
+    stored = await asyncio.to_thread(gzip.compress, captured_log)
+    sha = hashlib.sha256(stored).hexdigest()
+    log_path.write_bytes(stored)
     try:
         log_path.chmod(0o600)
     except OSError:
@@ -353,7 +362,7 @@ def can_user_see_run(user: User, run: Run) -> bool:
 
 
 async def read_run_log(run: Run) -> bytes:
-    """Read the archived log bytes from disk.
+    """Read the archived log bytes from disk (decompressed when gzipped).
 
     Returns ``b""`` on missing file or IO error rather than raising —
     the UI degrades to "no log captured" gracefully. We do not verify
@@ -363,14 +372,70 @@ async def read_run_log(run: Run) -> bytes:
     """
     if not run.log_blob_ref:
         return b""
-    try:
+
+    def _read() -> bytes:
         p = Path(run.log_blob_ref)
         if not p.exists():
             return b""
-        return p.read_bytes()
-    except OSError as exc:
+        raw = p.read_bytes()
+        if p.suffix == ".gz":
+            return gzip.decompress(raw)
+        return raw
+
+    try:
+        # Off-loop: a large legacy blob (or its decompression) must not
+        # stall the event loop.
+        return await asyncio.to_thread(_read)
+    except (OSError, EOFError, zlib.error) as exc:
         logger.warning("read_run_log failed run=%s: %s", run.id, exc)
         return b""
+
+
+async def read_run_log_tail(run: Run, max_bytes: int = 262_144) -> tuple[bytes, int]:
+    """Last ``max_bytes`` of the archived log + the total decompressed size.
+
+    The run-detail page renders only this tail so a multi-MB (or the legacy
+    55 MB) blob can never stall the page; the full log is served by the
+    ``…/log.txt`` download route. Never loads the whole blob into memory:
+    plain logs are seek-read, gzipped blobs are stream-decompressed in 1 MiB
+    chunks keeping only the tail window. ``(b"", 0)`` on missing/corrupt
+    files — same degrade contract as :func:`read_run_log`.
+    """
+    if not run.log_blob_ref:
+        return b"", 0
+    p = Path(run.log_blob_ref)
+    try:
+        if not p.exists():
+            return b"", 0
+        if p.suffix == ".gz":
+            def _tail_gz() -> tuple[bytes, int]:
+                total = 0
+                # Keep only enough recent chunks to cover the window — one
+                # join at the end instead of re-concatenating per chunk.
+                chunks: list[bytes] = []
+                kept = 0
+                with gzip.open(p, "rb") as gz:
+                    while True:
+                        chunk = gz.read(1 << 20)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        chunks.append(chunk)
+                        kept += len(chunk)
+                        while chunks and kept - len(chunks[0]) >= max_bytes:
+                            kept -= len(chunks[0])
+                            chunks.pop(0)
+                return b"".join(chunks)[-max_bytes:], total
+
+            return await asyncio.to_thread(_tail_gz)
+        size = p.stat().st_size
+        with open(p, "rb") as fh:
+            if size > max_bytes:
+                fh.seek(size - max_bytes)
+            return fh.read(max_bytes), size
+    except (OSError, EOFError, zlib.error) as exc:
+        logger.warning("read_run_log_tail failed run=%s: %s", run.id, exc)
+        return b"", 0
 
 
 __all__ = [
@@ -380,4 +445,5 @@ __all__ = [
     "list_runs",
     "can_user_see_run",
     "read_run_log",
+    "read_run_log_tail",
 ]

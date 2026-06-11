@@ -28,12 +28,15 @@ from order_tracker import OrderResultTracker, OrderResult
 from cache_manager import TradingCache
 from captcha_utils import decode_captcha
 
-# Configure logging - truncate log file on each run
-_log_file_path = 'trading_bot.log'
+# Configure logging — archive the PREVIOUS run's log (gzipped, complete) to
+# logs/ then truncate in place. Blind truncation destroyed the morning run's
+# evidence whenever a manual re-run followed (2026-06-10 incident). The
+# rotation is double-import-safe (locust --processes forks a worker that
+# re-imports this module) and never raises.
+from log_rotation import rotate_and_truncate
 
-# Truncate the log file at module load
-with open(_log_file_path, 'w', encoding='utf-8') as f:
-    f.write('')  # Clear the file
+_log_file_path = 'trading_bot.log'
+rotate_and_truncate(_log_file_path)
 
 logging.basicConfig(
     level=logging.INFO,
