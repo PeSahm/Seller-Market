@@ -124,6 +124,26 @@ async def test_paid_and_remaining(monkeypatch):
     assert ct.paid == Decimal("200") and ct.remaining == Decimal("300")
 
 
+async def test_sell_predating_bot_buy_leaves_buy_open(monkeypatch):
+    # Chronological matching: a sell EXECUTED BEFORE the bot buy closes
+    # pre-existing/manual holdings, not the later buy. The buy stays fully
+    # open (and will age toward the 20-day mark), zero realized, zero fee.
+    async def _price(_db, _isin):
+        return 7000
+    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+    sell = _order(2, 100, 6500, is_bot=False,
+                  ts=datetime(2026, 6, 20, tzinfo=timezone.utc), tracking=1)
+    buy = _order(1, 100, 6000, is_bot=True,
+                 ts=datetime(2026, 6, 25, tzinfo=timezone.utc), tracking=2)
+    rep = await pr.build_fee_report(_fake_db([sell, buy], [(_CUST, _AGENT)]), today=_TODAY)
+    row = rep.buy_rows[0]
+    assert row.status == "open"
+    assert row.matched_volume == 0 and row.open_volume == 100
+    assert row.realized_profit == Decimal("0") and row.fee == Decimal("0")
+    assert rep.unmatched_sell_qty == 100
+    assert rep.virtual_rows == []  # only 5 days old — not aged yet
+
+
 async def test_loss_lot_earns_no_fee():
     buy = _order(1, 100, 7000, is_bot=True,
                  ts=datetime(2026, 6, 1, tzinfo=timezone.utc), tracking=1)

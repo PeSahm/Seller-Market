@@ -199,3 +199,83 @@ def test_zero_executed_volume_buys_ignored():
     assert len(summary.matched) == 1
     assert summary.matched[0].buy_tracking == 2
     assert summary.open_position_qty == 0
+
+
+# ---------------------------------------------------------------------------
+# Chronology: a sell can only consume lots bought BEFORE it
+# ---------------------------------------------------------------------------
+
+
+def test_sell_before_buy_is_unmatched():
+    """A sell that predates the only buy closes pre-existing holdings, NOT the
+    later buy — the buy stays fully open. (Live artifact this pins: June-3
+    sells were "closing" a June-10 buy, fabricating a -153M realized loss.)"""
+    early_sell = OrderLeg(
+        tracking_number=2, order_side=2, executed_volume=100,
+        price=Decimal("15"),
+        ts=datetime(2026, 5, 31, 10, 0, tzinfo=timezone.utc),  # BEFORE the buy
+    )
+    summary = match_lots(
+        buys=[_buy(1, 100, 20)],  # June 1, 08:45
+        sells=[early_sell],
+        fee_pct=Decimal("10"),
+    )
+    assert summary.matched == []
+    assert summary.unmatched_sell_qty == 100
+    assert summary.open_position_qty == 100
+    assert summary.realized_total == Decimal("0")
+    assert summary.fee_on_positive == Decimal("0")
+
+
+def test_same_timestamp_buy_then_sell_matches():
+    """At an identical timestamp the buy sorts first (buys-before-sells
+    tie-break), so a same-second fill pair still matches."""
+    ts_buy = _buy(1, 100, 10)
+    ts_sell = _sell(2, 100, 15)
+    same_ts_sell = OrderLeg(
+        tracking_number=ts_sell.tracking_number,
+        order_side=2,
+        executed_volume=100,
+        price=Decimal("15"),
+        ts=ts_buy.ts,  # EXACTLY the buy's timestamp
+    )
+    summary = match_lots(buys=[ts_buy], sells=[same_ts_sell], fee_pct=Decimal("10"))
+    assert len(summary.matched) == 1
+    assert summary.matched[0].realized_profit == Decimal("500")
+    assert summary.unmatched_sell_qty == 0
+
+
+def test_interleaved_chronology_pairs_by_time():
+    """buy1 → sell1 → buy2 → sell2: sell1 can only consume buy1 (buy2 doesn't
+    exist yet); sell2 then consumes buy2. Prices prove the pairing."""
+    buy1 = _buy(1, 100, 10, minute=0)                    # June 1 08:45:00
+    sell1 = OrderLeg(
+        tracking_number=2, order_side=2, executed_volume=150,
+        price=Decimal("15"),
+        ts=datetime(2026, 6, 1, 9, 0, tzinfo=timezone.utc),   # after buy1 only
+    )
+    buy2 = OrderLeg(
+        tracking_number=3, order_side=1, executed_volume=100,
+        price=Decimal("12"),
+        ts=datetime(2026, 6, 1, 10, 0, tzinfo=timezone.utc),
+    )
+    sell2 = OrderLeg(
+        tracking_number=4, order_side=2, executed_volume=100,
+        price=Decimal("20"),
+        ts=datetime(2026, 6, 1, 11, 0, tzinfo=timezone.utc),
+    )
+    summary = match_lots(buys=[buy1, buy2], sells=[sell1, sell2], fee_pct=Decimal("10"))
+    # sell1: 100 matched against buy1 @10, the excess 50 is unmatched (buy2
+    # hadn't happened yet — the old implementation would have consumed it).
+    assert summary.matched[0].buy_tracking == 1
+    assert summary.matched[0].sell_tracking == 2
+    assert summary.matched[0].matched_volume == 100
+    assert summary.matched[0].realized_profit == Decimal("500")   # (15-10)*100
+    assert summary.unmatched_sell_qty == 50
+    # sell2: consumes buy2 @12.
+    assert summary.matched[1].buy_tracking == 3
+    assert summary.matched[1].sell_tracking == 4
+    assert summary.matched[1].matched_volume == 100
+    assert summary.matched[1].realized_profit == Decimal("800")   # (20-12)*100
+    assert summary.open_position_qty == 0
+    assert summary.realized_total == Decimal("1300")

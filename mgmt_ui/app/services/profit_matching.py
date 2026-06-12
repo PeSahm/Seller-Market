@@ -83,24 +83,34 @@ def match_lots(
     sells: list[OrderLeg],
     fee_pct: Decimal,
 ) -> MatchSummary:
-    """FIFO-match ``sells`` against ``buys`` and compute the profit-share fee.
+    """FIFO-match ``sells`` against ``buys`` CHRONOLOGICALLY and compute the
+    profit-share fee.
 
     ``fee_pct`` is a PERCENT (e.g. ``Decimal("1.5")`` == 1.5%). Buys with zero
-    executed volume are ignored (placed but unfilled). Sells consume the
-    oldest open buy lots first, splitting a lot when the sell is smaller.
-    Excess sell volume with no matching buy becomes ``unmatched_sell_qty``;
-    buy volume never sold becomes ``open_position_qty``.
+    executed volume are ignored (placed but unfilled). Events are walked in
+    time order: a buy opens a lot, a sell consumes the oldest lots **bought
+    before it** — a sell can never close a buy that happens later (a real
+    portfolio can't; the old all-buys-up-front queue let a June-3 sell "close"
+    a June-10 buy, fabricating realized profit/loss that never happened).
+    At equal timestamps the buy sorts first, so a same-second fill pair still
+    matches. Sell volume with no earlier open lot is pre-existing/manual
+    holdings → ``unmatched_sell_qty``; buy volume never sold becomes
+    ``open_position_qty``.
     """
     summary = MatchSummary()
 
-    # FIFO queue of open buy lots: [remaining_qty, price, tracking].
-    open_lots: deque[list] = deque(
-        [b.executed_volume, b.price, b.tracking_number]
-        for b in sorted(buys, key=lambda o: (o.ts, o.tracking_number))
-        if b.executed_volume > 0
-    )
+    # FIFO queue of open buy lots AS OF the current event: [qty, price, tracking].
+    open_lots: deque[list] = deque()
 
-    for sell in sorted(sells, key=lambda o: (o.ts, o.tracking_number)):
+    events = sorted(
+        [b for b in buys if b.executed_volume > 0] + list(sells),
+        key=lambda o: (o.ts, o.order_side, o.tracking_number),
+    )
+    for leg in events:
+        if leg.order_side == 1:
+            open_lots.append([leg.executed_volume, leg.price, leg.tracking_number])
+            continue
+        sell = leg
         remaining = sell.executed_volume
         while remaining > 0 and open_lots:
             lot = open_lots[0]
