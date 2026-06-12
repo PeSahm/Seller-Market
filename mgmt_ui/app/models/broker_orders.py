@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional, Any
 
@@ -9,6 +9,7 @@ import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     ForeignKey,
     Integer,
     Numeric,
@@ -39,17 +40,19 @@ class BrokerOrder(Base):
       ``executed_amount``, ``net_traded_value``, ``pam_code``) that the fee
       report needs.
 
-    Idempotency: the dedup key is ``(broker, tracking_number)`` (UNIQUE) and the
-    reconciler upserts with ``ON CONFLICT (broker, tracking_number) DO UPDATE`` —
-    GetOrders is a poll of mutable broker state (``executed_volume`` / ``state`` /
-    fees change as an order fills), so we refresh the mutable fields on each fetch
-    but never rewrite the immutable ``created_at_broker`` / ``first_seen_at``.
+    Idempotency: the dedup key is ``(broker, account_username, tracking_number,
+    placed_date)`` (UNIQUE) and the reconciler upserts with ``ON CONFLICT DO
+    UPDATE`` on it — GetOrders is a poll of mutable broker state
+    (``executed_volume`` / ``state`` / fees change as an order fills), so we
+    refresh the mutable fields on each fetch but never rewrite the immutable
+    identity/placement columns (``created_at_broker`` / ``first_seen_at`` /
+    ``placed_date``).
 
-    The key is scoped to ``broker`` (not globally unique on ``tracking_number``)
-    because different broker families assign order ids from INDEPENDENT namespaces
-    (ephoenix ``trackingNumber`` vs Exir ``mmtpOrderId``); a global unique would
-    let an Exir id collide with — and silently overwrite — a different broker's /
-    customer's row (migration 0009).
+    Key history: a global ``tracking_number`` unique collided across broker
+    families (migration 0009 scoped it to ``broker``); then ephoenix
+    ``trackingNumber`` turned out to be a small broker-DAY sequence that repeats
+    across accounts and days, letting one customer's refresh silently overwrite
+    another's row (migration 0015 added ``account_username`` + ``placed_date``).
     """
 
     __tablename__ = "broker_orders"
@@ -79,8 +82,8 @@ class BrokerOrder(Base):
     broker: Mapped[str] = mapped_column(String(255), nullable=False)
     account_username: Mapped[str] = mapped_column(String(255), nullable=False)
     pam_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    # NOT globally unique — uniqueness is scoped to ``(broker, tracking_number)``
-    # via the table-level constraint below (see class docstring / migration 0009).
+    # NOT unique on its own — a broker-day sequence number; uniqueness is the
+    # 4-column constraint below (see class docstring / migrations 0009 + 0015).
     tracking_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # The GetOrders row's own ``id`` field — kept for cross-referencing the
     # broker UI; NOT the dedup key (tracking_number is).
@@ -118,6 +121,12 @@ class BrokerOrder(Base):
     placed_at: Mapped[Optional[datetime]] = mapped_column(
         sa.TIMESTAMP(timezone=True), nullable=True
     )
+    # The placement DATE (Tehran market date — stored timestamps are Tehran
+    # wall-clock labeled UTC). Part of the dedup key: ephoenix tracking numbers
+    # are day-sequence numbers, so the same number on a different day is a
+    # DIFFERENT order. Immutable after insert (like placed_at); sentinel
+    # 1970-01-01 when the broker row carries no timestamp at all.
+    placed_date: Mapped[date] = mapped_column(Date, nullable=False)
     # ``created`` from the GetOrders row (sub-second placement time).
     created_at_broker: Mapped[Optional[datetime]] = mapped_column(
         sa.TIMESTAMP(timezone=True), nullable=True
@@ -144,10 +153,14 @@ class BrokerOrder(Base):
     )
 
     __table_args__ = (
-        # Per-broker dedup key (see migration 0009). Order ids are only unique
-        # within the broker that issued them, not across families.
+        # Dedup key (migration 0015): tracking numbers are broker-day sequence
+        # numbers, so only (broker, account, tracking, date) names one order.
         sa.UniqueConstraint(
-            "broker", "tracking_number", name="uq_broker_orders_broker_tracking"
+            "broker",
+            "account_username",
+            "tracking_number",
+            "placed_date",
+            name="uq_bo_acct_tracking_date",
         ),
         sa.Index(
             "ix_broker_orders_customer_isin_side_state",
