@@ -978,3 +978,55 @@ Operator: keep ALL logs efficiently + downloadable per run (for bug investigatio
 2. **B2**: exir prepare log line shows the real wages fee, or the fallback-0.005 warning — never fee=0.
 3. **C**: the 599s run completes `on_test_stop` (fire-log + order_results written; marker exit code real, not timeout).
 4. **A**: `logs/trading_bot_*.log.gz` archives appear per stack (`zcat` readable); `scheduled_run_<uuid>.log.gz` ingested then deleted from hosts; mgmt stores `run_logs/<run_id>.log.gz`; the Runs page shows "Download full log" on every run (incl. old 55MB manual blobs which still render instantly via the 256KB tail).
+
+---
+
+## Session 16 — fee model back to plain FIFO + universal 20d (#144); broker_orders CORRUPTION found + fixed (#145/#146) + prod repair
+
+Three deliverables, all merged AND deployed same-session: the operator-requested fee revision (PR **#144** `c04a72e`), then an investigation of a "wrong fee" complaint that uncovered fleet-wide data corruption, fixed by PR **#145** `daa8768` (ingest re-key) + PR **#146** `d9d5349` (chronological matcher) + an operator-authorized one-time prod repair. **mgmt UI live on `d9d5349`, alembic `0015_bo_dedup_acct_date`.** No bot changes.
+
+### THE FEE MODEL — revised again (deployed; supersedes Session 9''s shape)
+
+- **Plain FIFO**: a sell bills ONLY the FIFO-matched sold shares (X% of positive realized per buy). The #130 "whole position realized on FIRST sell" trigger is **REMOVED** (`VirtualFeeRow.trigger=="sell"` no longer exists).
+- **20-day mark-to-market is UNIVERSAL**: any bot-buy lot still unsold > N days after its buy date marks to today''s live price — **regardless of partial sells** (previously only zero-sell positions; without this a 1-share sell would exempt the remainder forever). Per-LOT aging; only the aged lots realize (mutation-tested — see learnings).
+- **`mark_to_market_days` is a setting** (default "20"), editable on the fees tab (`POST /admin/bot-report/mtm-days`, exclusions-route pattern, 1..365 validated in BOTH the route ctx and `build_fee_report`). `VirtualFeeRow.oldest_buy_date` shown in UI + Excel.
+- Loss handling unchanged (fixed per-agent Toman fee). Sell-side bot fees still out of the model (deferred: auto-sell side=2 fires tag bot sells exactly when wanted).
+- **`today` for aging = Tehran clock** (`_TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))` — fixed offset, Iran has no DST since 2022, no tzdata dep). Stored broker timestamps stay AS-IS (`ts.date()`) — they are Tehran wall-clock LABELED UTC, so an `astimezone()` on them would DOUBLE-SHIFT (declined that half of a CodeRabbit suggestion, pinned by `test_20day_uses_stored_wallclock_date_no_tz_shift`).
+
+### The اعظم عالی complaint → verdict + two real bugs
+
+Operator: "hamid''s fee is 10%, customer profit 129,825,532, so fee should be 12,982,553?" **No** — Owed 46.5M was CORRECT (10% × the two genuinely profitable closed buys: +296M, +169M; losses don''t offset under positive-lots basis). The displayed **realized profit was the corrupted number**: a phantom −182M loss from ANOTHER ACCOUNT''s زیتون order stored in her row + a phantom −153M from June-3 sells "closing" a June-10 buy. After the fixes her realized reads **465.0M** and owed stays **46,500,000**. (If net-basis fee is ever wanted: `match_lots` already computes `fee_on_net` — report toggle only.)
+
+### Bug 1 (#145): ephoenix trackingNumber is a broker-DAY sequence → upsert collisions corrupted rows fleet-wide
+
+- **Session 4''s "per-broker id is unique per broker" was STILL too weak.** trk numbers (48, 984, 1126…) repeat across accounts AND days. `ON CONFLICT (broker, tracking_number) DO UPDATE` let customer B''s refresh overwrite customer A''s row''s MUTABLE columns (price/volume/symbol/dates/raw_json) while identity columns (customer_id/isin/account) kept A''s values → Frankenstein rows, flip-flopping on every refresh (last-writer-wins). Live damage: **135 rows / 5 brokers** (karamad 55, ayandeh 53, farabi 14, bbi 12, gs 1), incl. 21 same-account cross-day self-collisions.
+- **Detection idiom**: disagreement between stored identity and `raw_json` (last write) — raw pamCode suffix ≠ account_username OR raw isin ≠ isin OR raw date ≠ placed_date. The raw payload is the truth of the LAST writer.
+- **Fix**: migration **0015** adds `placed_date` (placement Tehran market date, immutable, sentinel 1970-01-01) + `UNIQUE(broker, account_username, tracking_number, placed_date)` (no dedupe needed — old key implies new key collision-free). Fetch loop now **SKIPS** pamCode-mismatch rows (was log-and-attribute-anyway). `repair_collision_rows(db, dry_run=)` deletes contaminated rows + resets `order_fires.reconciled` for affected customers (the is_bot tagging SQLs only consider unreconciled fires).
+- Known limitation (pre-existing): two customers sharing (broker, username) — `copy_customer_to_agent` — share one physical row per order, owned by whoever fetched first.
+
+### Bug 2 (#146): match_lots ignored chronology
+
+Built the whole buy queue up front → a June-3 sell could "close" a June-10 buy (and the mirror shape would fabricate phantom PROFIT = overbilling). Now one time-ordered event walk: buys open lots, a sell consumes only lots bought BEFORE it (buys-first tie-break at equal ts); leftover = `unmatched_sell_qty`. Fleet effect on deploy: grand fee UNCHANGED (the phantom matches were all losses), realized +152.9M (exactly the اعظم artifact), unmatched +100k — then the buys stay open and age into the 20d MTM.
+
+### Prod repair (operator-authorized via AskUserQuestion — classifier blocked the bare LIVE run as expected)
+
+`repair_runner.py` piped to the api container: dry-run → LIVE deleted **135**, fires_reset **19**, deep-refreshed **44 customers** from **2026-02-01**. **ayandeh''s identity captcha endpoint 429-rate-limits under a 44-login sweep** — re-ran its 14 customers after a ~7-min cooldown, clean. End state: **contamination 0 on every broker**, row counts GREW (karamad 715→863, bbi 194→245 — the deep window found more real history), fleet snapshot grand 973.0M additive-OK, unmatched sells dropped 580k (deeper buys legitimately match more). 123/145 fires unreconciled = NORMAL (fires for orders that never executed).
+
+### Learnings (Session 16)
+
+- **Mutation-test billing-critical conditionals.** The adversarial review workflow EMPIRICALLY proved `rem_lots = aged` was unpinned: mutating it to `rem_lots = open_lots` (the exact #130 over-billing shape being reverted) passed the ENTIRE suite — every test''s open lots were all-aged or all-recent. A mixed-age test kills it. Same pass refuted 12 plausible-but-wrong findings.
+- **CodeRabbit "pass / Review completed" check is MISLEADING under rate-limiting** — the comment says "couldn''t start this review". Verify a review OBJECT exists (`gh api .../reviews`); trigger `@coderabbitai review` after the window. Happened TWICE (#144, #146).
+- **The stored-timestamp basis (Tehran wall-clock labeled UTC) keeps confusing reviewers**: CodeRabbit twice suggested `astimezone(Tehran)` on stored ts — that double-shifts. Only `now()` needs the Tehran clock. Both pinned by tests now.
+- **Verify the upsert conflict-key assumption against LIVE id patterns** before trusting any "unique" claim — trk 126 on June 10 vs trk 15964 on June 3 (smaller later) exposed the daily reset. `jsonb_exists(raw_json, ...)` + raw-vs-stored disagreement is the generic corruption probe.
+- **Local pytest stalls = orphaned python processes** from previously killed runs (suite wedged at 40% for 10+ min; after `Stop-Process` on leftovers it ran in 77s). Don''t chase phantom hangs — kill orphans first. Piped `pytest | Select-Object` buffers; `python -u … > log` + tail is the reliable shape.
+- **429-aware refresh sweeps**: a 40+-customer captcha-login sweep trips identity-service rate limits (ephoenix/ayandeh). Re-run the failed broker after cooldown — upserts are idempotent.
+- `test_prune_keeps_only_n_archives` (S15 bot suite) flaked once in CI on an mtime tie (4 same-second rotations, equal mtimes → arbitrary prune order on fast runners); rerun passed. Candidate fix: tiebreak prune sort by filename.
+
+### Open follow-ups (Session 16)
+
+| # | Title | Why |
+|---|---|---|
+| — | **Watch the 20d rows grow** | اعظم''s June-10 فملی buys (100k bot + 22,699) are now correctly OPEN and age past 20 days ~July 1 → expect new 20d MTM fees then (at current prices ≈ profitable). Not a regression. |
+| — | Net-basis fee toggle | If the operator ever wants losses to offset gains: `fee_on_net` already computed by the matcher; report/UI switch only. |
+| — | mtime-tie flake in `test_log_rotation` | One-line tiebreak (sort by name after mtime) whenever convenient. |
+| — | copy_customer shared rows | Same (broker, username) under two agents shares physical order rows; surface if it ever bites attribution. |
