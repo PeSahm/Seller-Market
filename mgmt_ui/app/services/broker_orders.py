@@ -10,8 +10,9 @@ trades" gap and provides the data the profit/fee report runs on.
 Attribution is implicit + authoritative: we query GetOrders per customer using
 THAT customer's own decrypted token, so every returned row is that customer's.
 ``pamCode`` (e.g. ``"33094580090306"``) ends with the account/username
-(``"4580090306"``); we assert that as a sanity check but always attribute to
-the queried customer (the broker occasionally returns a parent pamCode).
+(``"4580090306"``); a row whose pamCode does NOT end with the queried username
+is a foreign account's order and is SKIPPED (storing it under the queried
+customer would mis-attribute money data).
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 from uuid import UUID
 
-from sqlalchemy import desc, func, literal_column, select
+from sqlalchemy import bindparam, delete, desc, func, literal_column, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -86,6 +87,28 @@ def _parse_dt(value: Optional[str]) -> Optional[datetime]:
     return dt
 
 
+# Dedup-key date when a broker row carries no usable timestamp at all (rare /
+# malformed). A fixed sentinel keeps placed_date NOT NULL without inventing a
+# fake "today" that would change between fetches of the same order.
+_PLACED_DATE_SENTINEL = date(1970, 1, 1)
+
+
+def _derive_placed_date(
+    placed_at: Optional[datetime],
+    created_at_broker: Optional[datetime],
+    execution_date: Optional[datetime],
+) -> date:
+    """Placement DATE for the dedup key (migration 0015).
+
+    Stored broker timestamps are Tehran wall-clock labeled UTC, so ``.date()``
+    IS the Tehran market date — the same basis the fire-log date reconcile
+    uses. Tracking numbers are broker-day sequences; without the date in the
+    key, the same number on a different day would clobber a different order.
+    """
+    dt = placed_at or created_at_broker or execution_date
+    return dt.date() if dt is not None else _PLACED_DATE_SENTINEL
+
+
 def map_getorders_row(row: dict, customer: Customer) -> dict:
     """Map one raw GetOrders row to ``broker_orders`` column values.
 
@@ -114,6 +137,9 @@ def _map_ephoenix_row(row: dict, customer: Customer) -> dict:
     This is the original, unchanged ephoenix mapping (the only family before
     Exir). Field names match the ephoenix GetOrders wire shape.
     """
+    placed_at = _parse_dt(row.get("date"))
+    created_at_broker = _parse_dt(row.get("created"))
+    execution_date = _parse_dt(row.get("executionDate"))
     return {
         "customer_id": customer.id,
         "agent_id": customer.agent_id,
@@ -138,9 +164,10 @@ def _map_ephoenix_row(row: dict, customer: Customer) -> dict:
         "state": int(row.get("state") or 0),
         "state_desc": row.get("stateDesc") or None,
         "is_done": bool(row.get("isDone", False)),
-        "placed_at": _parse_dt(row.get("date")),
-        "created_at_broker": _parse_dt(row.get("created")),
-        "execution_date": _parse_dt(row.get("executionDate")),
+        "placed_at": placed_at,
+        "placed_date": _derive_placed_date(placed_at, created_at_broker, execution_date),
+        "created_at_broker": created_at_broker,
+        "execution_date": execution_date,
         "raw_json": row,
     }
 
@@ -229,6 +256,7 @@ def _map_exir_row(row: dict, customer: Customer) -> dict:
         "state_desc": row.get("mmtpOrderStatusName") or None,
         "is_done": is_done,
         "placed_at": entry_dt,
+        "placed_date": _derive_placed_date(entry_dt, None, None),
         "created_at_broker": entry_dt,
         "execution_date": None,  # no execution timestamp in the orderbook feed
         "raw_json": row,
@@ -247,10 +275,11 @@ async def fetch_and_upsert_orders(
     """Pull one customer's order history and upsert into ``broker_orders``.
 
     Decrypts the customer's password, calls GetOrders (paginated), and
-    upserts each row with ``ON CONFLICT (tracking_number) DO UPDATE`` so a
-    re-fetch refreshes the mutable fields (state / executed_volume / fees)
-    of an order that has filled further since the last poll, without ever
-    duplicating it. The caller owns ``db.commit()``.
+    upserts each row with ``ON CONFLICT (broker, account_username,
+    tracking_number, placed_date) DO UPDATE`` so a re-fetch refreshes the
+    mutable fields (state / executed_volume / fees) of an order that has
+    filled further since the last poll, without ever duplicating it. The
+    caller owns ``db.commit()``.
 
     Errors are captured in :class:`FetchResult`, not raised — the caller
     sweeps many customers and one bad account must not wedge the rest.
@@ -287,12 +316,18 @@ async def fetch_and_upsert_orders(
             )
             continue
         if values["pam_code"] and not values["pam_code"].endswith(customer.username):
+            # A row whose pamCode doesn't end with the queried username belongs
+            # to a DIFFERENT account — storing it under this customer would
+            # mis-attribute money data (the pre-0015 collision corruption was
+            # exactly this shape). Skip it; the true owner's own fetch stores it.
             result.pam_mismatches += 1
             logger.warning(
-                "pamCode %s does not end with username %s (broker %s) — "
-                "attributing to queried customer anyway",
+                "skipping foreign-account row: pamCode %s does not end with "
+                "username %s (broker %s, trk %s)",
                 values["pam_code"], customer.username, customer.broker,
+                values["tracking_number"],
             )
+            continue
         inserted = await _upsert_order(db, values)
         if inserted:
             result.inserted += 1
@@ -337,9 +372,10 @@ async def _upsert_order(db: AsyncSession, values: dict) -> bool:
     """Insert one ``broker_orders`` row; ``True`` if newly inserted, else
     ``False`` (an existing row was updated).
 
-    ``ON CONFLICT (tracking_number) DO UPDATE`` keeps the row fresh as the
-    broker fills the order across polls. ``fetched_at`` is bumped to now()
-    on every update so the operator can see staleness.
+    ``ON CONFLICT (broker, account_username, tracking_number, placed_date) DO
+    UPDATE`` keeps the row fresh as the broker fills the order across polls.
+    ``fetched_at`` is bumped to now() on every update so the operator can see
+    staleness.
 
     Insert-vs-update is detected with the PostgreSQL ``(xmax = 0)`` idiom:
     a freshly inserted tuple has ``xmax = 0``; a tuple updated via DO UPDATE
@@ -358,11 +394,17 @@ async def _upsert_order(db: AsyncSession, values: dict) -> bool:
             set_[col] = excluded
     set_["fetched_at"] = func.now()
     stmt = stmt.on_conflict_do_update(
-        # Per-broker dedup: Exir mmtpOrderId and ephoenix trackingNumber are
-        # independent id namespaces, so a GLOBAL unique on tracking_number could
-        # match (and overwrite) a different broker's/customer's row. Scope the
-        # conflict to (broker, tracking_number) — see migration 0009.
-        index_elements=[BrokerOrder.broker, BrokerOrder.tracking_number],
+        # Dedup key (migration 0015): tracking numbers are broker-DAY sequence
+        # numbers that repeat across accounts and days. Only the same REAL
+        # order (same broker + account + number + placement date) may conflict
+        # — anything looser lets one customer's refresh overwrite another
+        # customer's (or the same customer's other-day) row.
+        index_elements=[
+            BrokerOrder.broker,
+            BrokerOrder.account_username,
+            BrokerOrder.tracking_number,
+            BrokerOrder.placed_date,
+        ],
         set_=set_,
     ).returning(literal_column("(xmax = 0)"))
     inserted = (await db.execute(stmt)).scalar_one()
@@ -587,6 +629,93 @@ async def reconcile_all_recent(
     return len(ids)
 
 
+# Rows corrupted by the pre-0015 dedup-key collisions: the last conflicting
+# write replaced the mutable columns (incl. raw_json) while the identity
+# columns kept the FIRST writer's values — so any disagreement between the
+# stored identity and the raw payload marks a clobbered row. Scoped to
+# ephoenix-shaped payloads (the only family observed colliding; Exir raw rows
+# carry none of these keys).
+_CONTAMINATED_ROWS_SQL = """
+    SELECT id, broker
+    FROM broker_orders
+    WHERE jsonb_exists(raw_json, 'pamCode')
+      AND (
+        (raw_json->>'pamCode' IS NOT NULL
+         AND right(raw_json->>'pamCode', length(account_username))
+             <> account_username)
+        OR (raw_json->>'isin' IS NOT NULL AND raw_json->>'isin' <> isin)
+        OR (left(raw_json->>'date', 10) ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+            AND left(raw_json->>'date', 10)::date <> placed_date)
+      )
+"""
+
+
+async def repair_collision_rows(db: AsyncSession, *, dry_run: bool = False) -> dict:
+    """One-time repair for rows corrupted by the pre-0015 dedup collisions.
+
+    Deletes every contaminated row (its data belongs to a different order —
+    the true owner's next refresh re-fetches it cleanly under the 0015 key;
+    data belonging to accounts that aren't customers doesn't belong here at
+    all) and resets ``order_fires.reconciled`` for customers of the affected
+    brokers so the fire-log reconciler re-tags ``is_bot`` on the re-fetched
+    rows (the tagging SQLs only consider unreconciled fires; re-tagging is
+    idempotent).
+
+    The caller then runs :func:`refresh_orders_for_customers` for the returned
+    ``affected_customer_ids`` over a deep window to restore the originals.
+    ``dry_run=True`` reports what WOULD be deleted without writing. Commits.
+    """
+    rows = (await db.execute(text(_CONTAMINATED_ROWS_SQL))).all()
+    per_broker: dict[str, int] = {}
+    contaminated_ids = []
+    for r in rows:
+        per_broker[r.broker] = per_broker.get(r.broker, 0) + 1
+        contaminated_ids.append(r.id)
+    affected_brokers = sorted(per_broker)
+
+    affected_customer_ids: list[UUID] = []
+    if affected_brokers:
+        res = await db.execute(
+            select(Customer.id).where(
+                func.lower(Customer.broker).in_([b.lower() for b in affected_brokers])
+            )
+        )
+        affected_customer_ids = [r[0] for r in res.all()]
+
+    summary = {
+        "dry_run": dry_run,
+        "contaminated_per_broker": per_broker,
+        "deleted": 0,
+        "fires_reset": 0,
+        "affected_brokers": affected_brokers,
+        "affected_customer_ids": affected_customer_ids,
+    }
+    if dry_run or not contaminated_ids:
+        return summary
+
+    await db.execute(
+        delete(BrokerOrder).where(BrokerOrder.id.in_(contaminated_ids))
+    )
+    summary["deleted"] = len(contaminated_ids)
+
+    if affected_customer_ids:
+        res = await db.execute(
+            text(
+                "UPDATE order_fires SET reconciled = false "
+                "WHERE reconciled = true AND customer_id IN :cids"
+            ).bindparams(bindparam("cids", expanding=True)),
+            {"cids": affected_customer_ids},
+        )
+        summary["fires_reset"] = res.rowcount or 0
+
+    await db.commit()
+    logger.info(
+        "repair_collision_rows: deleted=%d per_broker=%s fires_reset=%d",
+        summary["deleted"], per_broker, summary["fires_reset"],
+    )
+    return summary
+
+
 __all__ = [
     "FetchResult",
     "fetch_and_upsert_orders",
@@ -597,4 +726,5 @@ __all__ = [
     "is_excluded",
     "refresh_orders_for_customers",
     "reconcile_all_recent",
+    "repair_collision_rows",
 ]

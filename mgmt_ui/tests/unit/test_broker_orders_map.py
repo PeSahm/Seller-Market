@@ -7,7 +7,7 @@ field name silently corrupts the fee report) and the market-open window logic.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 
 from app.models.broker_orders import BrokerOrder
@@ -84,6 +84,50 @@ def test_map_getorders_row_parses_timestamps():
     assert v["placed_at"].year == 2026 and v["placed_at"].hour == 8
     assert v["created_at_broker"].second == 0 and v["created_at_broker"].microsecond == 657000
     assert v["execution_date"].hour == 9
+
+
+def test_map_getorders_row_placed_date_from_date():
+    # placed_date (dedup-key component, migration 0015) is the wall-clock DATE
+    # of the placement timestamp.
+    v = map_getorders_row(_SAMPLE_ROW, _customer())
+    assert v["placed_date"] == date(2026, 6, 1)
+    assert v["placed_date"] == v["placed_at"].date()
+
+
+def test_map_getorders_row_placed_date_fallback_chain():
+    # No "date" → falls back to "created"; no timestamps at all → sentinel
+    # (a fixed value, NOT today — it must not change between re-fetches).
+    row = dict(_SAMPLE_ROW)
+    del row["date"]
+    v = map_getorders_row(row, _customer())
+    assert v["placed_at"] is None
+    assert v["placed_date"] == date(2026, 6, 1)  # from "created"
+
+    bare = dict(_SAMPLE_ROW)
+    for k in ("date", "created", "executionDate"):
+        del bare[k]
+    v = map_getorders_row(bare, _customer())
+    assert v["placed_date"] == date(1970, 1, 1)
+
+
+def test_map_exir_row_placed_date_from_entry_datetime():
+    # Exir rows derive placed_date from the (Jalali) entryDateTime.
+    from app.services.broker_orders import _map_exir_row
+
+    cust = _customer()
+    row = {
+        "mmtpOrderId": 12345,
+        "insMaxLCode": "IRO1SROD0001",
+        "orderSideName": "خريد",
+        "entryDateTime": "1405/03/11-09:37:19",
+        "quantity": 100,
+        "tradedQuantity": 100,
+        "price": 9930,
+        "remainingQuantity": 0,
+    }
+    v = _map_exir_row(row, cust)
+    assert v["placed_at"] is not None
+    assert v["placed_date"] == v["placed_at"].date()
 
 
 def test_in_time_window_matches_market_open_burst():
