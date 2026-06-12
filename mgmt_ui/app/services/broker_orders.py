@@ -275,10 +275,11 @@ async def fetch_and_upsert_orders(
     """Pull one customer's order history and upsert into ``broker_orders``.
 
     Decrypts the customer's password, calls GetOrders (paginated), and
-    upserts each row with ``ON CONFLICT (tracking_number) DO UPDATE`` so a
-    re-fetch refreshes the mutable fields (state / executed_volume / fees)
-    of an order that has filled further since the last poll, without ever
-    duplicating it. The caller owns ``db.commit()``.
+    upserts each row with ``ON CONFLICT (broker, account_username,
+    tracking_number, placed_date) DO UPDATE`` so a re-fetch refreshes the
+    mutable fields (state / executed_volume / fees) of an order that has
+    filled further since the last poll, without ever duplicating it. The
+    caller owns ``db.commit()``.
 
     Errors are captured in :class:`FetchResult`, not raised — the caller
     sweeps many customers and one bad account must not wedge the rest.
