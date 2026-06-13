@@ -13,6 +13,21 @@
   <strong>Owed − paid = remaining.</strong> Payments are recorded by the operator.
 </p>
 
+{% if my_customers %}
+<form method="get" action="/agent/fees" class="filter-bar">
+  <select name="customer_id" class="input">
+    <option value="">All customers</option>
+    {% for c in my_customers %}
+      <option value="{{ c.id }}" {% if filter_customer_id and filter_customer_id == (c.id|string) %}selected{% endif %} dir="auto">
+        {{ c.display_name }} ({{ c.broker }})
+      </option>
+    {% endfor %}
+  </select>
+  <button class="btn btn--ghost btn--sm" type="submit">Filter</button>
+  {% if filter_customer_id %}<a class="btn btn--ghost btn--sm" href="/agent/fees">Clear</a>{% endif %}
+</form>
+{% endif %}
+
 {% if not fr or not fr.per_customer %}
 <div class="card">
   <p class="text-muted">No fees yet.</p>
@@ -60,7 +75,7 @@
 <div class="table-scroll">
 <table class="table">
   <thead>
-    <tr><th>Customer</th><th>Symbol / ISIN</th><th>Buy date</th><th>Buy vol</th><th>Buy price</th><th>Sold</th><th>Realized</th><th>Fee</th><th>Status</th><th>Orders / decline</th></tr>
+    <tr><th>Customer</th><th>Symbol / ISIN</th><th>Buy date</th><th>Buy vol</th><th>Buy price</th><th>Sold</th><th>Realized</th><th>Fee</th><th>Status</th><th>Actions</th></tr>
   </thead>
   <tbody>
     {% for r in fr.buy_rows %}
@@ -82,8 +97,9 @@
         {% elif r.status == 'partial' %}<span class="badge badge--pending">partial</span>
         {% else %}<span class="badge">open</span>{% endif %}
       </td>
-      <td>{% include "partials/fee_order_subgrid.html" %}</td>
+      <td>{% include "partials/fee_row_actions.html" %}</td>
     </tr>
+    <tr class="fee-detail" hidden><td colspan="10">{% include "partials/fee_order_legs.html" %}</td></tr>
     {% endfor %}
   </tbody>
 </table>

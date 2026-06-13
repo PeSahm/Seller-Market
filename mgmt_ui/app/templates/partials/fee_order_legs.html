@@ -1,0 +1,30 @@
+{#
+  Full-width orders detail for one BuyFeeRow `r`: the buy leg + the sells that
+  realized it, as a compact WRAPPING list — not a nested <table> (that blew the
+  row width past the viewport). Lives in a full-colspan <tr class="fee-detail">.
+  Inputs: r.
+#}
+{% set o = r.buy %}
+<div class="order-legs">
+  <div class="legs-head text-small text-muted">
+    {% if o.is_bot %}Bot — fire-log confirmed{% else %}Bot — open-window guess{% endif %}
+    · orders behind this fee
+  </div>
+  <div class="leg">
+    <span class="leg-tag leg-tag--buy">Buy</span>
+    <span class="leg-when text-small text-muted">{{ o.placed_at.strftime('%Y-%m-%d %H:%M:%S') if o.placed_at else '—' }}</span>
+    <span class="leg-qty text-small">{{ '{:,}'.format(o.executed_volume) }} @ {{ '{:,.0f}'.format(o.price) if o.price is not none else '—' }}</span>
+    <span class="leg-val text-small text-muted">value {{ '{:,.0f}'.format(r.buy_value) }}</span>
+  </div>
+  {% for ms in r.matched_sells %}
+  <div class="leg">
+    <span class="leg-tag leg-tag--sell">Sell</span>
+    <span class="leg-when text-small text-muted">{{ ms.sell_at.strftime('%Y-%m-%d %H:%M:%S') if ms.sell_at else '—' }}</span>
+    <span class="leg-qty text-small">{{ '{:,}'.format(ms.matched_volume) }} @ {{ '{:,.0f}'.format(ms.sell_price) }}</span>
+    <span class="leg-val text-small text-muted">realized {{ '{:,.0f}'.format(ms.realized_profit) }}</span>
+  </div>
+  {% endfor %}
+  {% if not r.matched_sells %}
+  <div class="text-small text-muted">No sells matched yet — open position (possible sell to come).</div>
+  {% endif %}
+</div>

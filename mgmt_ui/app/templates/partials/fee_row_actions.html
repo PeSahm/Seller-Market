@@ -1,0 +1,21 @@
+{#
+  Main-row actions cell for one BuyFeeRow `r`: the Decline button (or a locked
+  chip) + a toggle that reveals this fee's full-width orders detail row (the
+  next <tr class="fee-detail">). Inputs: r, is_admin, decline_base, current_url.
+#}
+{% set o = r.buy %}
+{% set declinable = is_admin or (o.order_side == 1 and not o.is_bot) %}
+<div class="fee-actions">
+  {% if declinable %}
+  <form method="post" action="{{ decline_base }}/{{ o.id }}/decline" style="display:inline;">
+    {% include "partials/csrf.html" %}
+    <input type="hidden" name="next" value="{{ current_url }}">
+    <button class="btn btn--danger btn--sm" type="submit"
+            title="Mark as the customer's own manual trade — exclude from the fee">Decline</button>
+  </form>
+  {% else %}
+  <span class="chip chip--locked" title="fire-log confirmed — only the operator can decline">🔒 locked</span>
+  {% endif %}
+  <button type="button" class="orders-toggle" aria-expanded="false"
+          title="Show the buy + the sells behind this fee">orders</button>
+</div>
