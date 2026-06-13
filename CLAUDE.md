@@ -1157,3 +1157,51 @@ Three issues: Decline was a faint `.btn--ghost` (looked like text); the orders r
 | — | **Cache-bust static assets** (re-flagged) | `app.css`/`app.js` are linked with no `?v=`; #150 changed both, so a browser that cached the old assets must **hard-refresh once** or the page looks unstyled / the orders toggle won't fire. A build-hash query or `Cache-Control: must-revalidate` kills this class. |
 | — | Net-basis fee toggle | If losses should offset gains: `fee_on_net` already computed by the matcher; report/UI switch only (carried from S16). |
 | — | `copy_customer_to_agent` multi-TI section_name | Same `""`-placeholder-then-flush collision shape; harden by minting ids up front (carried from S18). |
+
+---
+
+## Session 20 — Hamid "added but no trade" root-caused = ORPHANED-active customers (#151); fixed live + prevented
+
+Operator relayed: Hamid's customers `0690238274` / `0016887190` / `0063151898` were added on Tebyan4 but never traded at the 08:44 open. Root-caused to a silent data-state bug, fixed the live orphans out-of-band, then shipped + deployed a preventive fix (PR **#151**, `648719f`). **mgmt-UI only — no migration (alembic stays `0016`), no bot/stack redeploy.**
+
+### Root cause — "orphaned-active" customers (active + `stack_id` NULL)
+A customer with `assignment_status='active'` but `stack_id` NULL is **invisible and never trades**, because:
+- the config renderer selects customers `WHERE stack_id == stack.id` ([stacks.py](mgmt_ui/app/services/stacks.py) `_build_render_context`, ~line 454) → a NULL-`stack_id` customer is **never written into any `config.ini`**; and
+- the Pending inbox (`distribution.pending_customers`) filters `status='pending'` → the orphan doesn't show there either.
+
+**How they got that way:** `deprovision_stack` deletes the `agent_stacks` row but does NOTHING to its customers; the `customers.stack_id` FK is `ON DELETE SET NULL`, so deleting a stack (a reshuffle delete+recreate) NULLs every customer's `stack_id` while leaving them `'active'`. The recreate re-bound only some, leaving 4 orphaned (the 3 named + `2755573503` فرید عباسی, which additionally had 0 instructions).
+
+**Evidence chain (all three layers):** (1) DB — the 3 were `active`, server=Tebyan4, `stack_id` NULL, each with 4-5 instructions; (2) renderer code keys on `stack_id`; (3) the **08:44 scheduled open run log** (`888581f7`, pulled via #143's full-log feature) — the 3 usernames appeared **0×** (never authed/attempted) while the stack's *bound* customers were active; the run loaded only the bound customers' sections.
+
+### Immediate fix (out-of-band, operator-authorized)
+Re-bound the 4 orphans via `distribution.assign_customer(db, cid, server_id=<Tebyan4>, actor_id=admin)` (run in the api container, `warm_family_cache` first — the S6/S12 cold-cache guard) → sets `stack_id` + audits + pushes config.ini. Verified: stack_id set, fleet orphan count 0, Tebyan4 config.ini grew 11→27 sections (the 3 now present).
+
+### Fleet-wide audit (the operator's "check everywhere") — clean
+- **Orphaned-active fleet-wide: 0** (after the fix). **Binding drift: 0** — all 57 active customers bound to an `up` stack on the matching server+agent (no wrong-server/wrong-agent/dead-stack bindings).
+- **~16 active customers have 0 trade instructions** → bound but render no section → won't trade. A DIFFERENT, benign class ("account created, instructions added in the morning" — operator confirmed expected). Not a bug.
+
+### Preventive fix — PR #151 (merged `648719f`, deployed)
+- **Prevent:** `deprovision_stack` now calls a new `_demote_stack_customers(db, stack_id, actor_id)` BEFORE `db.delete(stack)` (same txn) — the stack's customers become `status='pending'` with `server_id`/`stack_id` cleared, so they land in the admin inbox instead of becoming invisible orphans. Audited `stack.demote_customers`.
+- **Surface:** `distribution.pending_customers` now also returns `active` + `stack_id`-NULL orphans (`or_(pending, and_(active, stack_id IS NULL))`) — belt-and-suspenders for out-of-band orphans; the inbox's *Preview & assign* heals them. Inbox copy updated. 3 new unit tests (TDD); full suite **560 passed**.
+
+### Post-fix reshuffle (the customers MOVED again — verified clean)
+A re-check showed Hamid's customers had moved AGAIN between my fix and the audit. The audit log explains: my `customer.assign ×4` at 00:16 Tehran, then an operator reshuffle at ~01:09–01:15 (`customer.move ×18` + 1 `stack.deprovision`) moved them to PouyanIt/Tebyan-Saeed and **deprovisioned the old Tebyan4 stack** (`d4a56f8c`, now gone). Done cleanly — customers were moved OFF first, so the stack was empty at delete → no new orphans. Current placement: `0016887190`+`0063151898`+`2755573503`→PouyanIt, `0690238274`→Tebyan-Saeed; all `up`, all in config (the with-instruction ones).
+
+### The DB↔config.ini reconciliation (the definitive "is it actually trading" check)
+For each stack: DB-expected = active customers bound to it WITH ≥1 instruction (a 0-instruction customer renders no section); compare to the host's `config.ini` `^username =` lines via `run_command(server, ...)` through the api container. **Missing (expected ∉ config) = the dangerous silent-no-trade case.** All Hamid stacks reconciled 0-missing. This is the strongest fleet-health probe — use it whenever "added but no trade" comes up.
+
+### Learnings (Session 20)
+- **`active` + `stack_id` NULL = an invisible orphan** — dropped from every `config.ini` (renderer keys on `stack_id`) AND absent from the inbox (keys on `status='pending'`). The `stack_id` FK `ON DELETE SET NULL` is the silent mechanism; `deprovision_stack` must demote-to-pending, not just delete.
+- **DB↔config.ini reconciliation is the gold "is this customer trading" check** (expected-bound-with-instructions vs the host's `^username` lines). Three-layer evidence (DB + renderer code + the run log showing 0 occurrences) nails "never attempted" vs "attempted-and-rejected."
+- **A 0-instruction customer renders no section → won't trade** — a distinct, benign "added but no trade" cause; don't conflate with orphaning.
+- **Server names ≠ hostnames, re-confirmed AGAIN** — over reshuffles the Tebyan2/3/4 named rows remap hosts (now: Tebyan2=`185.232.152.177`, Tebyan3=`185.232.152.189`, Tebyan-Saeed=`185.232.152.246`; Tebyan4=`185.232.152.180` was Hamid's, now deprovisioned). ALWAYS derive host/stack from `servers`/`agent_stacks`, never the prose/name.
+- **`assign_customer(server_id=<override>)` cleanly re-binds an orphaned active customer** (sets `stack_id` to the find_or_create stack + pushes config) — the right heal for an out-of-band orphan.
+- A mgmt-UI-only PR (deprovision/inbox logic) needs **only the mgmt deploy — NO bot/stack redeploy** (the bot image is untouched).
+- The reshuffle that deprovisioned `d4a56f8c` ran on the OLD code but was safe because the operator moved customers off first; the new demote guard protects the case where a non-empty stack is deleted.
+
+### Open follow-ups (Session 20)
+| # | Title | Why |
+|---|---|---|
+| — | Prod Fernet `key.part2` missing | The prod mgmt container logs `Fernet key part2 not found at /etc/sm/key.part2 — using part1 alone (INSECURE for production)` on every customer op. Pre-existing, unrelated to this fix — worth a dedicated look (provision the part2 key file). |
+| — | 0-instruction active customers | ~16 fleet-wide are bound but have no trade instructions (agents add them in the morning — confirmed expected). Not a bug; surface a count if it ever masks a real omission. |
+| — | Auto-heal / alert on orphans | #151 surfaces orphans in the inbox; a proactive alert (health signal) when `active + stack_id NULL` appears would catch them without waiting for an operator to look. |
