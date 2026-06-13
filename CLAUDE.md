@@ -1077,3 +1077,49 @@ ghcr.io **blocked** from PouyanIt (curl → 000). Mirror `ghcr-mirror.liara.ir/.
 | — | Cache-bust static assets | `app.css`/`app.js` are linked without a `?v=` query; deploys rely on ETag revalidation + hard-refresh. A build-hash query (or `Cache-Control: must-revalidate`) would make CSS/JS changes appear without a manual hard-refresh. |
 | — | Pre-existing dark-theme bugs (out of scope of #147) | `.flash--error` hardcodes `#fdecea` and `.btn--warning` hardcodes light colors (app.css) — both ignore the dark theme. Flagged, not fixed. |
 | — | Optional `.td-wrap` escape hatch | The `≤800px` `nowrap` cell rule ships a `.table-scroll .table .td-wrap` opt-out for genuinely long free-text columns; none needed today, apply per-cell if one appears. |
+
+---
+
+## Session 18 — bulk-add a trade instruction to many customers at once (#148), merged + deployed
+
+Operator: *"instead of going to each customer page to add a trade, I need another page — choose symbol + side, choose from customers, click save, and all chosen customers get the trade instruction."* Shipped a new **Bulk add trades** page for both agents and admins. PR **#148** (`01be9e8`) → live on the mgmt VPS. **mgmt-UI only — no migration (alembic stays `0015_bo_dedup_acct_date`), no bot changes.**
+
+### Deploy state (END OF SESSION — current live)
+- **mgmt-UI** on `5.10.248.55:/opt/seller-market-mgmt` → **`01be9e8`**, `Up (healthy)`, `/health=200`, alembic **`0015`** (no migration ran — entrypoint `alembic upgrade head` was a no-op). Both new routes registered (401 auth-gated, not 404). Mirror `ghcr-mirror.liara.ir/...mgmt-ui:latest` was **FRESH on attempt 1** (revision label == merge SHA). Bots/trading hosts **untouched**.
+
+### The feature (operator-confirmed via AskUserQuestion — 3 choices)
+New page at `/agent/bulk-trade-instructions` + `/admin/bulk-trade-instructions`: pick instrument (existing ISIN typeahead) + side (+ optional auto-sell threshold) ONCE, tick MANY customers, Save creates a TradeInstruction per selected customer + pushes config.ini once per affected stack.
+- **Skip & report** (not overwrite): a customer that already has `(isin, side)` keeps its row; flash reads *"Added to N, skipped M that already had it."*
+- **Full side options** (Buy / Sell / Auto-sell only + threshold) — mirrors the single-customer form incl. `map_side_form` (side=3 → side=1 + `auto_sell_only`).
+- **Admin selects across agents** (agent + broker filters, grouped by broker, agent column); each instruction lands under its own customer's agent. Agents only ever see/select their own (foreign id → 404).
+
+### Architecture (8 files, +1082)
+- **`services/trade_instructions.bulk_create_trade_instruction(db, customer_ids, data, actor_id, *, expected_agent_id=None) -> BulkCreateResult`** — one customer-load query (id/agent_id/broker/stack_id PRIMITIVES, dodging the PR-#73 MissingGreenlet trap), one duplicate pre-query (skip not abort, keyed on `data.side` which is already the STORED side), ONE summary audit row (`trade_instruction.bulk_create`, inlined like `delete_all_for_agent` since `_write_audit` hardcodes target_type), ONE commit; returns created/skipped/missing + de-duped non-NULL `affected_stack_ids`. **Does NOT loop the per-customer `create_trade_instruction`** (which commits per call).
+- `routers/agent.py` + `admin.py` — GET+POST each, the PR-#73 `db.refresh(user)` re-render guard, agent ownership gate, config pushed once per affected stack (best-effort). `_bulk_summary` / `_sorted_for_bulk` local helpers (duplicated per router, house style).
+- Shared body partial `partials/bulk_trade_instructions_body.html` (typeahead + side radios + threshold + customer checkbox fieldset grouped by broker with select-all / per-broker-select-all / client-side quick-filter that preserves ticks) + two thin pages + a nav tab in `page_shell.html`.
+
+### THE BUG found in live verification (the headline learning)
+The bulk insert added every row with `section_name=""` (placeholder, copying the single-create pattern) and did ONE `db.flush()` → **two empty section_names in one flush collide on the `section_name` UNIQUE** → caught as the friendly "already exists" ValueError. **Single-customer worked, multi-customer 400'd** — invisible to the mocked unit tests (no real DB enforces the constraint); the live HTTP run is what exposed it. **Fix**: mint each `ti.id = uuid4()` in Python and build the final `section_name` BEFORE insert (the id column has a server_default but accepts a client value), so no "" placeholder ever hits the unique. **General rule: the single-row create's ""-placeholder-then-UPDATE trick does NOT scale to a batch — any column with a UNIQUE must carry its real value at INSERT when inserting N>1 rows in one flush.** (`copy_customer_to_agent` has the same latent shape for a multi-TI source customer — not hit yet, worth hardening.)
+
+### CodeRabbit review — 1 real, 2 hallucinated (it CAN approve)
+- **2 Major findings hallucinated**: both demanded an `@autorize(...)` decorator from `app.auth` per a cited "coding guideline". **Verified non-existent** — `grep -rn "autorize\|app.auth" app/` returns nothing, no `app/auth.py`, and EVERY existing write route uses `Depends(require_admin)` (admin) / `get_current_user`+`_require_agent_or_admin`+ownership-gate (agent). Adding it would `ImportError`. Declined both with that evidence in-thread.
+- **1 Minor real**: a validation-error rerender on the admin page reloaded the FULL customer list + reset the agent/broker dropdowns (selection was preserved, but the scoped view widened). Fixed (`bc0dc77`): round-trip the active filter through hidden POST inputs, reuse in `_rerender`.
+- **CodeRabbit then APPROVED** ("Approve command performed: Comments resolved") after the push + a summary comment with `@coderabbitai review` — so it DOES approve sometimes (contra the S2/S6 "never approves" note; that was the stale-review-blocks-merge case). CI (`test`, `mgmt-ui-test`) green → clean `--squash --delete-branch` merge, no `--admin` needed.
+
+### Verification (local live HTTP run — the real surface)
+Drove the actual form POST flow against `uvicorn` + the dev Postgres (S17 recipe: `docker compose up -d postgres`, `alembic upgrade head`, seed admin + an agent + 3 customers, all `ENABLE_*` workers `false`). httpx with login + CSRF (the `/auth/login` POST is CSRF-EXEMPT; the bulk POST needs the `csrf_token` form field minted on a prior GET). Confirmed end-to-end: create-2 → `created=2`; re-add-all-3 → `created=1&skipped=2` (skip-&-report); empty→400; foreign-id→404; Sell drops the threshold; admin cross-agent page renders; **DB proof: 3 rows in one batch with DISTINCT unique section_names**. 28 ti unit tests + full suite 544 green (1 known Windows proactor flake, passes solo).
+
+### Learnings (Session 18)
+- **A UNIQUE-column batch insert can't use the single-row ""-placeholder trick** — mint the id client-side and compute the final value before INSERT (see THE BUG). Mocked unit tests can't catch it (no constraint enforcement); only a real-DB run does — which is exactly why the live visual verification earned its keep.
+- **Verify a reviewer's cited "coding guideline" against the actual repo** before implementing — CodeRabbit invented an `@autorize`/`app.auth` rule that doesn't exist here; following it would have broken the build. `grep` for the decorator/module + check what sibling write routes actually do.
+- **CodeRabbit CAN approve** — push the fix, post a summary comment tagging `@coderabbitai review`, and it resolves comments + approves; `reviewDecision` then clears and a normal squash merge works (no `--admin`).
+- **Driving the real form surface needs the CSRF dance**: `/auth/login` is CSRF-exempt (no session yet); every other POST needs the `csrf_token` form field == the cookie minted on a GET. httpx `data=` wants a dict (`customer_ids` as a list value) — a list-of-tuples body throws in h11. Set `PYTHONIOENCODING=utf-8` so `→`/`≤` in labels don't crash the Windows console.
+- **A killed `uvicorn --reload`-less server keeps the OLD code** — after editing the service mid-verification I had to stop + relaunch uvicorn to load the fix (it doesn't hot-reload). `Get-NetTCPConnection -State Listen` can miss the listener; match by start-time / `Win32_Process` CommandLine to kill the right pid.
+- The Windows asyncio **`ProactorEventLoop` `socketpair()` "Unexpected peer connection"** flake also hits ad-hoc `asyncio.run(...)` DB scripts — fall back to `docker exec mgmt_ui-postgres-1 psql` for one-off DB pokes.
+
+### Open follow-ups (Session 18)
+| # | Title | Why |
+|---|---|---|
+| — | Operator smoke of the live page | Open `/agent/bulk-trade-instructions` (and `/admin/...`), pick an ISIN, tick a few customers, Save → confirm the flash counts + the instructions land + each affected stack's config.ini re-pushed. Hard-refresh once if the nav tab is cached. |
+| — | `copy_customer_to_agent` multi-TI section_name | Same ""-placeholder-then-flush shape as the bug fixed here — would collide if a source customer has 2+ TIs whose names all start ""; harden by minting ids up front when convenient. |
+| — | Bulk page filter loses ticks on GET re-filter | The admin filter bar is a GET `<form>` (reloads, dropping ticks) — by design for v1; the in-page client-side quick-filter preserves ticks. Promote to client-side or carry selection if it bites. |
