@@ -1030,3 +1030,50 @@ Built the whole buy queue up front → a June-3 sell could "close" a June-10 buy
 | — | Net-basis fee toggle | If the operator ever wants losses to offset gains: `fee_on_net` already computed by the matcher; report/UI switch only. |
 | — | mtime-tie flake in `test_log_rotation` | One-line tiebreak (sort by name after mtime) whenever convenient. |
 | — | copy_customer shared rows | Same (broker, username) under two agents shares physical order rows; surface if it ever bites attribution. |
+
+---
+
+## Session 17 — mgmt UI made mobile-friendly / responsive (#147), merged + deployed
+
+Operator: *"make the mgmt mobile friendly and it should be responsive."* Shipped a CSS/JS-only responsive pass (no migration, no Python, no bot changes) and deployed it. PR **#147** (`5be2def`) → live on the mgmt VPS.
+
+### What it was
+The mgmt UI (FastAPI + Jinja2, ONE custom stylesheet `mgmt_ui/app/static/css/app.css` ~10KB) was desktop-only: fixed 200px sidebar (`.app-shell { grid: 200px 1fr }`), 14 admin / 8 agent nav tabs duplicated in a horizontal `.tabs` strip, **35 data tables** (up to 12 cols) with NO scroll containers, `.field-row` forms that never stacked, and a `.filter-bar` class used in 14 templates with **no CSS rule at all**. Exactly ONE media query in the whole stylesheet. On a 375px phone the sidebar ate half the screen and wide tables blew out the layout.
+
+### Approach (operator-confirmed via AskUserQuestion)
+1. **Tables → horizontal-scroll wrapper.** Every `<table class="table">` wrapped in `<div class="table-scroll">` (all columns preserved, swipe sideways). HTMX `<tr>`-partials (`partials/auto_sell_rows.html`, `admin/partials/customer_row.html`, `health_row.html`) **untouched** — the wrapper lives in the page template, OUTSIDE the swap target, so the auto-sell `<tbody hx-get … every 3s>` poll keeps working.
+2. **Nav → hide sidebar + swipe-scrollable tabs** below the breakpoint (NOT a hamburger). Zero structural template change — CSS targets `.sidebar`/`.tabs` directly.
+3. **Scope = everything**, one pass, **desktop look unchanged** (additive desktop-first `max-width` queries).
+
+### The change (3 code files + 28 templates)
+- **`app.css`** — appended one "Responsive" section: `.table-scroll` (overflow-x:auto + overscroll-contain); first-ever `.filter-bar` rule (flex-wrap, 8px gap); `.input--wide`; `.kv dd { min-width:0; overflow-wrap:anywhere }`. **Two breakpoints**: `≤800px` (matches the pre-existing `.server-detail-grid` query) hides the sidebar, makes `.tabs` a swipe strip (hidden scrollbar cross-browser, 24px right edge-fade via `mask-image` so it's theme-independent), `nowrap` table cells inside `.table-scroll`, 16px `.input` (iOS focus-zoom fix — base html font is 14px), padding step-down; `≤600px` stacks `.field-row` (+ `.field--narrow` flex-basis reset or 120px becomes a HEIGHT), wraps the header nav with `.nav-user` ellipsis, flexes filter inputs. `@media (pointer:coarse)` → touch-target min-heights.
+- **`app.js`** — center the active tab in the scrollable strip on mobile. **Writes `strip.scrollLeft` only** (gated on `getComputedStyle(strip).overflowX === 'auto'`); never `scrollIntoView`.
+- **28 templates** — 35 table wraps + 4 mobile-blocking inline-style fixes (2 `.filter-bar` forms `agent/runs.html`+`agent/trades.html` reduced to margin-only; `admin/stacks.html` agent-filter gains `flex-wrap`; `admin/customers.html`+`agent/customers.html` search inputs swap inline `min-width:220px` → class `input--wide`).
+
+Desktop unchanged EXCEPT `.filter-bar` gaining a flex rule (intentional — also activates a pre-existing inline `justify-content:space-between` on `bot_report.html`, moving its Export button to the right edge). No migration (alembic stays `0015_bo_dedup_acct_date`).
+
+### Adversarial review caught a real DESKTOP regression (the key save)
+First `app.js` impl used `tab.scrollIntoView({inline:'center'})` guarded by `scrollWidth <= clientWidth`. **That guard tests OVERFLOW, not SCROLLABILITY.** On desktop `.tabs` is `display:flex; overflow:visible` (NOT a scroll container) but the 14-tab strip still overflows the content column at viewport widths **~801–1250px** (a common half-screen window) — so the guard passed and `scrollIntoView` scrolled the DOCUMENT, shifting the whole page right on load when the active tab was a right-side one (Settings/Audit/Health). My own browser test MISSED it (assertions ran only at 375px; screenshots at exactly 1280px where the tabs just fit). The 4-lens / 2-vote review (10 agents) confirmed it major + 2 related minors (back-nav scroll-restoration fight; old-Safari `scrollIntoView`-options coercion to `true`). **One fix killed all three**: switch to `strip.scrollLeft +=` (strip-only, never touches the document) gated on computed `overflow-x`. Re-verified at 960/1024/1180/1280px: `docScrollLeft=0` (no shift) AND 375px still centers (`stripScrollLeft=803`, doc stays 0).
+
+### Verification
+- 537 unit tests pass, all 67 templates compile (Jinja smoke check — the suite renders NO templates, so that compile loop is the only automated catch for malformed wrapper edits).
+- Headless **Playwright via the `msedge` channel** (the playwright Chromium CDN `cdn.playwright.dev` is **403/blocked from this Iranian host** — use an already-installed browser channel instead): all 16 admin pages at 375px → zero document h-scroll, sidebar hidden, tabs scrollable, wrappers present; desktop band 960–1280px → no doc shift.
+- Built the wraps with a 4-agent disjoint-file-ownership workflow (35 wraps + 4 inline fixes), then independently grep-verified 35 balanced `<div class="table-scroll">` open/close pairs in the diff.
+
+### Deploy (standard mgmt runbook, clean)
+ghcr.io **blocked** from PouyanIt (curl → 000). Mirror `ghcr-mirror.liara.ir/...mgmt-ui:latest` was **FRESH on attempt 1** (revision label == merge SHA `5be2def`) — pull-and-verify-label loop, retag → `ghcr.io/...:latest`, `cd /opt/seller-market-mgmt && docker compose up -d api`. Verified live: running container revision `5be2def`, `Up (healthy)`, `/health=200`, alembic `0015`, and the served `/static/css/app.css` contains the responsive section (14,368 bytes, fresh ETag). No migration → no DB risk; only `api` recreated, Postgres untouched. **app.css has NO `?v=` cache-bust** but its ETag/Last-Modified changed → a normal reload revalidates and gets the new file; tell the operator to hard-refresh once on a phone that cached the old page.
+
+### Learnings (Session 17)
+- **A guard that checks `scrollWidth > clientWidth` tests CONTENT OVERFLOW, not whether the element is a SCROLL CONTAINER.** For "is this scrollable" gate on `getComputedStyle(el).overflowX === 'auto'|'scroll'`. Mismatching the two is how a "mobile-only" script leaks onto desktop.
+- **Prefer setting `el.scrollLeft` over `scrollIntoView` for in-strip centering** — `scrollIntoView` scrolls ALL ancestor scrollers incl. the document (page-shift) AND, pre-15.4-Safari, coerces its options object to `true` (align-to-top jump). A direct `scrollLeft +=` write touches only that element.
+- **`scrollIntoView` desktop-shift is invisible if you only test the phone width + a width where the nav happens to fit.** Test the in-between band (here 801–1250px) explicitly. The adversarial-review fan-out found what my own 375/1280 sweep didn't.
+- **Playwright Chromium download is geo-blocked from the Iranian host** (`cdn.playwright.dev` → 403 "service is not available in your location"). Launch with `channel="msedge"`/`"chrome"` against the already-installed browser instead of `playwright install chromium`.
+- **`gh pr merge` "success" is NOT proof** — under the host's intermittent github connectivity the merge command errored (graphql dial-tcp refused) yet a regex on `gh pr view --json state` spuriously matched "MERGED", and the follow-up `git reset --hard origin/main` then reset the working tree to the STALE pre-merge tip (the Session-14 footgun, re-hit). **Confirm merges via the API `merged` boolean** (`gh api repos/…/pulls/N` → `.merged == true`); the `merge_commit_sha` field is populated even on OPEN PRs (GitHub's computed test-merge) so it is NOT a merge signal. Work was safe on the feature branch throughout; re-merged once connectivity recovered.
+- **Local dev run recipe confirmed working** (for visual checks): `docker compose up -d postgres` (the stopped `mgmt_ui-postgres-1` volume survives), `DATABASE_URL` from `.env`, `alembic upgrade head`, seed `python -m scripts.seed_admin`, `uvicorn app.main:app` with all `ENABLE_*` workers set `false` so nothing SSHes the production fleet. Login headlessly via `ctx.request.post('/auth/login', form=…)` (the in-page form is HTMX-wired and flaky to drive).
+
+### Open follow-ups (Session 17)
+| # | Title | Why |
+|---|---|---|
+| — | Cache-bust static assets | `app.css`/`app.js` are linked without a `?v=` query; deploys rely on ETag revalidation + hard-refresh. A build-hash query (or `Cache-Control: must-revalidate`) would make CSS/JS changes appear without a manual hard-refresh. |
+| — | Pre-existing dark-theme bugs (out of scope of #147) | `.flash--error` hardcodes `#fdecea` and `.btn--warning` hardcodes light colors (app.css) — both ignore the dark theme. Flagged, not fixed. |
+| — | Optional `.td-wrap` escape hatch | The `≤800px` `nowrap` cell rule ships a `.table-scroll .table .td-wrap` opt-out for genuinely long free-text columns; none needed today, apply per-cell if one appears. |
