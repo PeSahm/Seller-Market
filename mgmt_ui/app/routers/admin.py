@@ -1315,6 +1315,10 @@ async def admin_bulk_trade_instructions_create(
     comment: Optional[str] = Form(None),
     auto_sell_threshold: Optional[str] = Form(None),
     customer_ids: list[UUID] = Form(default=[]),
+    # Round-tripped from the page's hidden inputs so a validation rerender keeps
+    # the operator's scoped view (the GET filter bar is a separate <form>).
+    filter_agent_id: Optional[str] = Form(None),
+    filter_broker: Optional[str] = Form(None),
 ):
     """Create one TradeInstruction across many selected customers (any agent)."""
     sticky = {
@@ -1328,11 +1332,16 @@ async def admin_bulk_trade_instructions_create(
     async def _rerender(message: str, code: int):
         # PR #73: a service rollback expires loaded ORM attrs incl. user.
         await db.refresh(user)
-        customers = await services_customers.list_customers(db)
+        # Reload under the SAME filter the operator had scoped, so a validation
+        # bounce doesn't silently widen the visible cohort.
+        f_broker = filter_broker or None
+        customers = await services_customers.list_customers(
+            db, agent_id=_parse_optional_uuid(filter_agent_id), broker=f_broker
+        )
         ctx = await _bulk_admin_ctx(request, user, db)
         ctx["customers"] = _sorted_for_bulk(customers)
-        ctx["filter_agent_id"] = None
-        ctx["filter_broker"] = None
+        ctx["filter_agent_id"] = filter_agent_id
+        ctx["filter_broker"] = f_broker
         ctx["form_error"] = message
         ctx["form_values"] = sticky
         ctx["result_summary"] = None

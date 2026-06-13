@@ -74,6 +74,11 @@
 
 <form method="post" action="{{ post_url }}" id="bulk-form">
   {% include "partials/csrf.html" %}
+  {% if is_admin %}
+  {# Carry the active scope so a validation rerender keeps the same cohort. #}
+  <input type="hidden" name="filter_agent_id" value="{{ filter_agent_id or '' }}">
+  <input type="hidden" name="filter_broker" value="{{ filter_broker or '' }}">
+  {% endif %}
 
   {# --- Instrument: stock-name search → fills the #isin field below.
        instrument_search_url is supplied by the route context and is visible
