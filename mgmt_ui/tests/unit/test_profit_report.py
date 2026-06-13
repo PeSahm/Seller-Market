@@ -400,13 +400,20 @@ async def test_declined_order_absent_drops_buyrow_and_lowers_totals():
                  ts=datetime(2026, 6, 1, tzinfo=timezone.utc), tracking=1)
     sell = _order(2, 100, 6500, is_bot=False,
                   ts=datetime(2026, 6, 10, tzinfo=timezone.utc), tracking=2)
-    full = await pr.build_fee_report(_fake_db([buy, sell], [(_CUST, _AGENT)]))
+    db_full = _fake_db([buy, sell], [(_CUST, _AGENT)])
+    full = await pr.build_fee_report(db_full)
     assert len(full.buy_rows) == 1 and full.grand_fee == Decimal("500")
 
     declined = await pr.build_fee_report(_fake_db([sell], [(_CUST, _AGENT)]))
     assert declined.buy_rows == []
     assert declined.grand_fee == Decimal("0")
     assert declined.per_customer[_CUST].total_fee == Decimal("0")
+
+    # Pin the contract: the orders SELECT must carry the decline predicate, so a
+    # regression that drops the filter (and would re-bill declined orders) fails
+    # here, not just via the consequence above.
+    sql = str(db_full.execute.await_args_list[0].args[0])
+    assert "fee_excluded_at" in sql and "IS NULL" in sql
 
 
 async def test_matched_sells_lists_the_sell():

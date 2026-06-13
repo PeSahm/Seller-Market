@@ -4124,6 +4124,7 @@ def _bot_report_safe_next(next_url: Optional[str]) -> str:
         and "//" not in next_url
         and "\\" not in next_url
         and "\n" not in next_url
+        and "\r" not in next_url
     ):
         return next_url
     return "/admin/bot-report"
