@@ -82,7 +82,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditLog
@@ -1022,15 +1022,19 @@ async def pending_customers(
 ) -> list[Customer]:
     """Customers awaiting admin assignment (the "Pending" inbox).
 
-    Filter:
+    Filter (a customer matches if EITHER holds):
 
     * ``assignment_status == 'pending'`` — explicitly tagged as needing
-      placement. We do NOT also include rows with ``server_id IS NULL``
-      regardless of status, because a customer can legitimately sit in
-      ``'assigned'`` between resolution and the SFTP push (a transient
-      state we don't want to expose as "pending").
-    * ``enabled == True`` — a disabled customer is dormant by design;
-      the admin doesn't need to see them in the placement queue.
+      placement. We do NOT include the transient ``'assigned'`` state (between
+      resolution and the SFTP push) just because ``server_id IS NULL``.
+    * ``assignment_status == 'active' AND stack_id IS NULL`` — an ORPHANED
+      active customer. This happens when its stack was deleted: the
+      ``stack_id`` FK (``ON DELETE SET NULL``) clears the binding but leaves
+      the row 'active', so it falls out of every ``config.ini`` (the renderer
+      selects ``WHERE stack_id == stack.id``) yet wouldn't show here either —
+      silently no-trading. Surfacing it lets the admin re-assign it. (The
+      deprovision path now demotes to 'pending' directly; this catches any
+      out-of-band orphans.)
 
     Optionally filter by ``agent_id`` so an agent's own UI can show
     "your pending customers" without sifting through every other
@@ -1038,7 +1042,15 @@ async def pending_customers(
     """
     stmt = (
         select(Customer)
-        .where(Customer.assignment_status == "pending")
+        .where(
+            or_(
+                Customer.assignment_status == "pending",
+                and_(
+                    Customer.assignment_status == "active",
+                    Customer.stack_id.is_(None),
+                ),
+            )
+        )
         .order_by(Customer.created_at.asc())
     )
     if agent_id is not None:

@@ -62,7 +62,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import (
@@ -181,6 +181,54 @@ async def _write_audit(
             after_json=after,
         )
     )
+
+
+async def _demote_stack_customers(
+    db: AsyncSession, stack_id: UUID, actor_id: Optional[UUID]
+) -> int:
+    """Demote a deprovisioned stack's customers to 'pending' so they stay
+    VISIBLE in the admin inbox for re-placement.
+
+    Without this, deleting the stack row leaves its customers
+    ``assignment_status='active'`` with ``stack_id`` NULL (the FK is
+    ``ON DELETE SET NULL``) — invisible to BOTH the config renderer (which
+    selects ``WHERE stack_id == stack.id``) and the Pending inbox
+    (``status='pending'``), so they silently stop trading. Clearing
+    server_id/stack_id and setting 'pending' lands them back in the inbox.
+
+    Returns the number demoted. Does NOT commit — runs inside the
+    deprovision transaction so the demote + the row delete commit together.
+    """
+    ids = list(
+        (
+            await db.execute(
+                select(Customer.id).where(Customer.stack_id == stack_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not ids:
+        return 0
+    await db.execute(
+        update(Customer)
+        .where(Customer.id.in_(ids))
+        .values(
+            assignment_status="pending",
+            server_id=None,
+            stack_id=None,
+            updated_at=_now_utc(),
+        )
+    )
+    await _write_audit(
+        db,
+        actor_id=actor_id,
+        action="stack.demote_customers",
+        target_id=stack_id,
+        before={"count": len(ids)},
+        after={"status": "pending"},
+    )
+    return len(ids)
 
 
 def _assert_stack_path_in_scope(stack: AgentStack, remote_path: str) -> None:
@@ -1383,8 +1431,13 @@ async def deprovision_stack(
                 )
 
             # Step 6: both teardown steps succeeded — safe to delete the
-            # row. Audit BEFORE delete so the target_id reference still
-            # makes sense to a future reader.
+            # row. First demote this stack's customers to 'pending' so they
+            # don't become invisible orphans (active + stack_id NULL) when the
+            # FK nulls their stack_id — they land back in the admin inbox for
+            # re-placement instead of silently dropping out of config.ini.
+            await _demote_stack_customers(db, stack.id, actor_id)
+            # Audit BEFORE delete so the target_id reference still makes sense
+            # to a future reader.
             await _write_audit(
                 db,
                 actor_id=actor_id,
