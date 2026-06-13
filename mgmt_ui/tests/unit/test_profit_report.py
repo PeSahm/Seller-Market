@@ -385,3 +385,86 @@ async def test_get_fee_percent_falls_back_to_agent():
         SimpleNamespace(fee_percent=Decimal("1.5")),  # agent config
     ])
     assert await _REAL_GET_FEE_PERCENT(db, _AGENT, customer_id=_CUST) == Decimal("1.5")
+
+
+# ---------------------------------------------------------------------------
+# Per-order decline (fee_excluded_at) + matched-sell sub-grid enrichment
+# ---------------------------------------------------------------------------
+
+
+async def test_declined_order_absent_drops_buyrow_and_lowers_totals():
+    # The decline filter lives in SQL (WHERE fee_excluded_at IS NULL); the fake
+    # db can't run it, so we assert the CONSEQUENCE: with the buy filtered out
+    # (only the sell loads), its fee row disappears and the totals drop to 0.
+    buy = _order(1, 100, 6000, is_bot=True,
+                 ts=datetime(2026, 6, 1, tzinfo=timezone.utc), tracking=1)
+    sell = _order(2, 100, 6500, is_bot=False,
+                  ts=datetime(2026, 6, 10, tzinfo=timezone.utc), tracking=2)
+    db_full = _fake_db([buy, sell], [(_CUST, _AGENT)])
+    full = await pr.build_fee_report(db_full)
+    assert len(full.buy_rows) == 1 and full.grand_fee == Decimal("500")
+
+    declined = await pr.build_fee_report(_fake_db([sell], [(_CUST, _AGENT)]))
+    assert declined.buy_rows == []
+    assert declined.grand_fee == Decimal("0")
+    assert declined.per_customer[_CUST].total_fee == Decimal("0")
+
+    # Pin the contract: the orders SELECT must carry the decline predicate, so a
+    # regression that drops the filter (and would re-bill declined orders) fails
+    # here, not just via the consequence above.
+    sql = str(db_full.execute.await_args_list[0].args[0])
+    assert "fee_excluded_at" in sql and "IS NULL" in sql
+
+
+async def test_matched_sells_lists_the_sell():
+    buy = _order(1, 100, 6000, is_bot=True,
+                 ts=datetime(2026, 6, 1, tzinfo=timezone.utc), tracking=1)
+    sell = _order(2, 100, 6500, is_bot=False,
+                  ts=datetime(2026, 6, 10, tzinfo=timezone.utc), tracking=2)
+    rep = await pr.build_fee_report(_fake_db([buy, sell], [(_CUST, _AGENT)]))
+    row = rep.buy_rows[0]
+    assert len(row.matched_sells) == 1
+    ms = row.matched_sells[0]
+    assert ms.matched_volume == 100
+    assert ms.sell_price == Decimal("6500")
+    assert ms.sell_value == Decimal("650000")
+    assert ms.realized_profit == Decimal("50000")
+    assert ms.sell is not None and ms.sell.tracking_number == 2
+
+
+async def test_matched_sells_partial_split():
+    # One buy realized by TWO sells → two MatchedSell entries with the split vols.
+    buy = _order(1, 100, 6000, is_bot=True,
+                 ts=datetime(2026, 6, 1, tzinfo=timezone.utc), tracking=1)
+    s1 = _order(2, 40, 6500, is_bot=False,
+                ts=datetime(2026, 6, 5, tzinfo=timezone.utc), tracking=2)
+    s2 = _order(2, 60, 6700, is_bot=False,
+                ts=datetime(2026, 6, 9, tzinfo=timezone.utc), tracking=3)
+    rep = await pr.build_fee_report(_fake_db([buy, s1, s2], [(_CUST, _AGENT)]))
+    row = rep.buy_rows[0]
+    vols = sorted(ms.matched_volume for ms in row.matched_sells)
+    assert vols == [40, 60]
+    trackings = {ms.sell.tracking_number for ms in row.matched_sells}
+    assert trackings == {2, 3}
+
+
+async def test_matched_sells_group_local_no_cross_group_leak():
+    # Two customers (groups) REUSE tracking numbers 1/2. The group-local lookup
+    # must give each buy row ITS OWN group's sell — a global by-tracking map
+    # would collide on tracking=2 and attach the wrong customer's sell.
+    a_buy = _order(1, 100, 6000, is_bot=True,
+                   ts=datetime(2026, 6, 1, tzinfo=timezone.utc), tracking=1, cust=_CUST)
+    a_sell = _order(2, 100, 6500, is_bot=False,
+                    ts=datetime(2026, 6, 10, tzinfo=timezone.utc), tracking=2, cust=_CUST)
+    b_buy = _order(1, 100, 6000, is_bot=True,
+                   ts=datetime(2026, 6, 1, tzinfo=timezone.utc), tracking=1, cust=_CUST_B)
+    b_sell = _order(2, 100, 7000, is_bot=False,
+                    ts=datetime(2026, 6, 10, tzinfo=timezone.utc), tracking=2, cust=_CUST_B)
+    rep = await pr.build_fee_report(
+        _fake_db([a_buy, a_sell, b_buy, b_sell], [(_CUST, _AGENT), (_CUST_B, _AGENT)])
+    )
+    by_cust = {r.buy.customer_id: r for r in rep.buy_rows}
+    a_ms = by_cust[_CUST].matched_sells[0]
+    b_ms = by_cust[_CUST_B].matched_sells[0]
+    assert a_ms.sell.customer_id == _CUST and a_ms.sell_price == Decimal("6500")
+    assert b_ms.sell.customer_id == _CUST_B and b_ms.sell_price == Decimal("7000")

@@ -1,0 +1,46 @@
+{#
+  "Declined orders" panel — the only place declined orders are visible (the fee
+  report filters them out), so Undo lives here. Shared by both fee pages.
+
+  Inputs: declined_orders (list[BrokerOrder]), customers_by_id,
+          decline_base, current_url.
+#}
+{% if declined_orders %}
+<section class="card" style="margin-top:16px;">
+  <h2 class="h3" style="margin-top:0;">Declined orders</h2>
+  <p class="text-small text-muted">
+    Orders marked as the customer's own manual trade — excluded from the fee.
+    <strong>Undo</strong> to re-bill an order.
+  </p>
+  <div class="table-scroll">
+  <table class="table">
+    <thead>
+      <tr><th>Customer</th><th>Symbol / ISIN</th><th>Side</th><th>Date</th><th>Vol</th><th>Price</th><th>Declined</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for o in declined_orders %}
+      {% set cust = customers_by_id.get(o.customer_id) %}
+      <tr>
+        <td class="text-small" dir="auto">{{ cust.display_name if cust else o.account_username }}</td>
+        <td>
+          {% if o.symbol %}<code class="text-small" dir="auto">{{ o.symbol }}</code> {% endif %}<code class="text-small">{{ o.isin }}</code>
+        </td>
+        <td class="text-small">{{ 'Buy' if o.order_side == 1 else 'Sell' }}</td>
+        <td class="text-small text-muted">{{ o.placed_at.strftime('%Y-%m-%d %H:%M:%S') if o.placed_at else '—' }}</td>
+        <td class="text-small">{{ '{:,}'.format(o.executed_volume) }}</td>
+        <td class="text-small">{{ '{:,.0f}'.format(o.price) if o.price is not none else '—' }}</td>
+        <td class="text-small text-muted">{{ o.fee_excluded_at.strftime('%Y-%m-%d %H:%M') if o.fee_excluded_at else '—' }}</td>
+        <td>
+          <form method="post" action="{{ decline_base }}/{{ o.id }}/undo" style="display:inline;">
+            {% include "partials/csrf.html" %}
+            <input type="hidden" name="next" value="{{ current_url }}">
+            <button class="btn btn--ghost btn--sm" type="submit">Undo</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}

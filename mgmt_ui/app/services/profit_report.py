@@ -52,6 +52,23 @@ STATUS_OPEN = "open"
 
 
 @dataclass
+class MatchedSell:
+    """One sell slice that realized part of a bot buy — for the fee sub-grid.
+
+    ``sell`` is the actual sell order (resolved GROUP-LOCALLY, not via the global
+    by-tracking map — tracking_number is a broker-day sequence, not globally
+    unique). It can be ``None`` only for malformed data; templates guard.
+    """
+
+    sell: Optional[BrokerOrder]
+    matched_volume: int
+    sell_price: Decimal
+    sell_value: Decimal  # sell_price * matched_volume
+    realized_profit: Decimal  # (sell_price − buy_price) * matched_volume
+    sell_at: Optional[datetime] = None
+
+
+@dataclass
 class BuyFeeRow:
     """One bot BUY with its matched sells rolled up + the fee it earns."""
 
@@ -65,6 +82,8 @@ class BuyFeeRow:
     fee_percent: Decimal = Decimal("0")
     last_sell_at: Optional[datetime] = None
     sell_trackings: list[int] = field(default_factory=list)
+    # The sells (with details) that realized this buy — drives the UI sub-grid.
+    matched_sells: list[MatchedSell] = field(default_factory=list)
     status: str = STATUS_OPEN
 
 
@@ -255,6 +274,10 @@ async def build_fee_report(
         select(BrokerOrder)
         .where(BrokerOrder.state == 3)
         .where(BrokerOrder.price.isnot(None))
+        # Per-order decline: a declined order ("the customer's own manual trade")
+        # never enters grouping/matching, so a declined buy drops out of buy_rows
+        # and a declined sell stops realizing its buy — totals auto-adjust.
+        .where(BrokerOrder.fee_excluded_at.is_(None))
         .order_by(BrokerOrder.placed_at)
         .limit(max_rows)
     )
@@ -293,7 +316,6 @@ async def build_fee_report(
     for o in orders:
         groups.setdefault((o.customer_id, o.isin), []).append(o)
 
-    by_tracking = {o.tracking_number: o for o in orders}
     report = FeeReport()
     fee_pct_cache: dict[tuple, Decimal] = {}
     loss_fee_cache: dict[Optional[UUID], Decimal] = {}
@@ -328,6 +350,10 @@ async def build_fee_report(
 
         bot_buys = [o for o in group if _is_bot_buy(o, window_start, window_end)]
         sells = [o for o in group if o.order_side == 2]
+        # Group-LOCAL sell lookup for the sub-grid. NOT the global by_tracking
+        # (line ~296): tracking_number is a broker-day sequence (repeats across
+        # days/accounts), so the global map can attach a foreign group's sell.
+        sells_by_tracking = {s.tracking_number: s for s in sells}
         if not bot_buys:
             continue
 
@@ -353,7 +379,8 @@ async def build_fee_report(
             row.sell_value += lot.sell_price * lot.matched_volume
             row.realized_profit += lot.realized_profit
             row.sell_trackings.append(lot.sell_tracking)
-            sell_order = by_tracking.get(lot.sell_tracking)
+            sell_order = sells_by_tracking.get(lot.sell_tracking)
+            sell_ts = None
             if sell_order is not None:
                 sell_ts = (
                     sell_order.execution_date
@@ -364,6 +391,16 @@ async def build_fee_report(
                     row.last_sell_at is None or sell_ts > row.last_sell_at
                 ):
                     row.last_sell_at = sell_ts
+            row.matched_sells.append(
+                MatchedSell(
+                    sell=sell_order,
+                    matched_volume=lot.matched_volume,
+                    sell_price=lot.sell_price,
+                    sell_value=lot.sell_price * lot.matched_volume,
+                    realized_profit=lot.realized_profit,
+                    sell_at=sell_ts,
+                )
+            )
 
         for row in per_buy.values():
             if row.matched_volume == 0:
@@ -498,6 +535,7 @@ async def build_fee_report(
 
 __all__ = [
     "BuyFeeRow",
+    "MatchedSell",
     "VirtualFeeRow",
     "CustomerFeeTotals",
     "AgentTotals",

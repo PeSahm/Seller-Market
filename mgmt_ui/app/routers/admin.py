@@ -3920,6 +3920,7 @@ async def admin_bot_report(
     }
     fee_report = None
     orders: list = []
+    declined_orders: list = []
     if tab == "fees":
         fee_report = await services_profit_report.build_fee_report(
             db,
@@ -3932,7 +3933,13 @@ async def admin_bot_report(
             window_end=p_we,
             exclude=exclude_set,
         )
+        # Declined orders are filtered OUT of the report — load them separately
+        # for the Undo panel (and to widen the customer-name map).
+        declined_orders = await services_broker_orders.list_declined_orders(
+            db, agent_id=p_agent, customer_id=p_customer
+        )
         cust_ids = {cid for cid in fee_report.per_customer if cid is not None}
+        cust_ids |= {o.customer_id for o in declined_orders if o.customer_id}
     else:
         orders = await services_broker_orders.list_orders(
             db,
@@ -3958,6 +3965,7 @@ async def admin_bot_report(
     ctx["tab"] = "fees" if tab == "fees" else "orders"
     ctx["orders"] = orders
     ctx["fee_report"] = fee_report
+    ctx["declined_orders"] = declined_orders
     ctx["agents_by_id"] = agents
     ctx["customers_by_id"] = await _bot_report_customer_map(db, cust_ids)
     ctx["all_agents"] = sorted(agents.values(), key=lambda a: a.username)
@@ -4116,6 +4124,7 @@ def _bot_report_safe_next(next_url: Optional[str]) -> str:
         and "//" not in next_url
         and "\\" not in next_url
         and "\n" not in next_url
+        and "\r" not in next_url
     ):
         return next_url
     return "/admin/bot-report"
@@ -4172,6 +4181,51 @@ async def admin_bot_report_mtm_days(
         )
         await db.commit()
 
+    target = _bot_report_safe_next(next_url)
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target}
+    )
+
+
+@router.post("/bot-report/orders/{order_id}/decline")
+async def admin_decline_order(
+    order_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    next_url: str = Form("/admin/bot-report?tab=fees", alias="next"),
+):
+    """Decline an order out of the fee (the customer's own manual trade). Admin
+    may decline ANY order; the whole fees view recomputes on the 303 back."""
+    try:
+        await services_broker_orders.decline_order(
+            db, order_id, actor_id=user.id, allow_confirmed_bot=True
+        )
+    except services_broker_orders.OrderNotFoundError:
+        raise HTTPException(status_code=404, detail="order not found")
+    target = _bot_report_safe_next(next_url)
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target}
+    )
+
+
+@router.post("/bot-report/orders/{order_id}/undo")
+async def admin_undo_decline(
+    order_id: UUID,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    next_url: str = Form("/admin/bot-report?tab=fees", alias="next"),
+):
+    """Reverse a decline (re-bill the order)."""
+    try:
+        await services_broker_orders.undo_decline(db, order_id, actor_id=user.id)
+    except services_broker_orders.OrderNotFoundError:
+        raise HTTPException(status_code=404, detail="order not found")
     target = _bot_report_safe_next(next_url)
     if request.headers.get("HX-Request"):
         return Response(status_code=204, headers={"HX-Redirect": target})
