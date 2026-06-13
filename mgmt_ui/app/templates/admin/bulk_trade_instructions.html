@@ -1,0 +1,11 @@
+{#
+  Admin bulk "add one trade instruction to many customers" page.
+  Thin shell — the body lives in the shared partial. ``is_admin`` switches on
+  the agent column + the agent/broker scoping filter bar.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Bulk add trades{% endblock %}
+
+{% block page_body %}
+{% include "partials/bulk_trade_instructions_body.html" %}
+{% endblock %}

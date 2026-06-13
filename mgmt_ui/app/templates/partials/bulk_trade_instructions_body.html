@@ -1,0 +1,307 @@
+{#
+  Shared body for the bulk "add one trade instruction to many customers" page.
+
+  Rendered by the thin agent/admin page templates which extend page_shell and
+  {% include %} this. Context keys:
+    post_url              — where the <form> POSTs
+    instrument_search_url — typeahead endpoint (/agent|/admin/instruments/search)
+    back_url              — "← back" / Cancel target
+    customers             — list[Customer], pre-sorted by (broker, display_name)
+    form_values           — sticky values on a re-render: isin, side,
+                            auto_sell_threshold, comment, selected_ids (set[str])
+    form_error            — validation error string (or None)
+    result_summary        — green banner text after a successful save (or None)
+    is_admin              — show the agent column + the agent/broker filter bar
+    agents_by_id          — {agent_id: User} for the admin agent column
+    all_agents, broker_groups, filter_agent_id, filter_broker — admin filter bar
+#}
+{% set fv = form_values|default({}) %}
+{% set selected_ids = fv.selected_ids|default([]) %}
+
+<div class="page-header">
+  <div>
+    <h1 class="h1">Bulk add trades</h1>
+    <p class="text-muted text-small">
+      Pick one instrument + side once, tick as many customers as you like, and
+      Save creates the trade instruction for every selected account. Customers
+      that already have that ISIN + side are skipped (their existing row is
+      left untouched).
+    </p>
+  </div>
+  <a class="btn btn--ghost btn--sm" href="{{ back_url }}">← back</a>
+</div>
+
+{% if result_summary %}
+<div class="flash flash--success">
+  <span class="flash-message">✓ {{ result_summary }}</span>
+</div>
+{% endif %}
+{% if form_error %}
+<div class="flash flash--error">
+  <strong>✗ Could not save</strong>
+  <p class="text-small">{{ form_error }}</p>
+</div>
+{% endif %}
+
+{% if is_admin %}
+{# Admin scoping filter — a GET form that reloads the customer list. Note: it
+   resets any ticked boxes, so scope first, then tick + Save. #}
+<form method="get" action="{{ post_url }}" class="filter-bar">
+  <select name="agent_id" class="input">
+    <option value="">All agents</option>
+    {% for a in all_agents|default([]) %}
+      <option value="{{ a.id }}" {% if filter_agent_id and filter_agent_id == a.id %}selected{% endif %} dir="auto">
+        {{ a.username }}{% if a.deleted_at %} (deleted){% endif %}
+      </option>
+    {% endfor %}
+  </select>
+  <select name="broker" class="input">
+    <option value="">Any broker</option>
+    {% for family, brokers in broker_groups|default([]) %}
+      <optgroup label="{{ family }}">
+        {% for broker in brokers %}
+          <option value="{{ broker.code }}" {% if filter_broker == broker.code %}selected{% endif %}>{{ broker.label }}</option>
+        {% endfor %}
+      </optgroup>
+    {% endfor %}
+  </select>
+  <button class="btn btn--ghost btn--sm" type="submit">Filter</button>
+  {% if filter_agent_id or filter_broker %}
+    <a class="btn btn--ghost btn--sm" href="{{ post_url }}">Clear</a>
+  {% endif %}
+</form>
+{% endif %}
+
+<form method="post" action="{{ post_url }}" id="bulk-form">
+  {% include "partials/csrf.html" %}
+  {% if is_admin %}
+  {# Carry the active scope so a validation rerender keeps the same cohort. #}
+  <input type="hidden" name="filter_agent_id" value="{{ filter_agent_id or '' }}">
+  <input type="hidden" name="filter_broker" value="{{ filter_broker or '' }}">
+  {% endif %}
+
+  {# --- Instrument: stock-name search → fills the #isin field below.
+       instrument_search_url is supplied by the route context and is visible
+       to the included partial. --- #}
+  {% include "partials/instrument_search.html" %}
+
+  <div class="field-row">
+    <div class="field field--grow">
+      <label class="label" for="isin">ISIN</label>
+      <input class="input" id="isin" name="isin" required
+             value="{{ fv.isin|default('') }}"
+             placeholder="e.g. IRO3SAIPA0001"
+             maxlength="32"
+             onblur="this.value = this.value.trim().toUpperCase();">
+      <p class="text-small text-muted">
+        ASCII alphanumeric only. Auto-uppercased on blur.
+      </p>
+    </div>
+    <div class="field field--narrow">
+      <label class="label">Side</label>
+      <label class="radio-row">
+        <input type="radio" name="side" value="1"
+               {% if fv.side|string == '1' or not fv.side %}checked{% endif %}>
+        Buy (1)
+      </label>
+      <label class="radio-row">
+        <input type="radio" name="side" value="2"
+               {% if fv.side|string == '2' %}checked{% endif %}>
+        Sell (2)
+      </label>
+      <label class="radio-row">
+        <input type="radio" name="side" value="3"
+               {% if fv.side|string == '3' %}checked{% endif %}>
+        Auto-sell only
+      </label>
+      <p class="text-small text-muted">
+        Auto-sell only: no order at market open — sells the existing holding
+        when the buy-queue thins to the threshold.
+      </p>
+    </div>
+  </div>
+
+  {# --- Auto-sell threshold — shown for Buy + Auto-sell only --- #}
+  <div class="field" id="auto-sell-field"{% if fv.side|string == '2' %} style="display:none;"{% endif %}>
+    <label class="label" for="auto_sell_threshold">Auto-sell when buy-queue &le; (shares)</label>
+    <input class="input" id="auto_sell_threshold" name="auto_sell_threshold"
+           type="number" min="0" step="1"
+           value="{{ fv.auto_sell_threshold|default('') }}"
+           placeholder="leave empty to disable auto-sell">
+    <p class="text-small text-muted">
+      Applied to every selected customer. When the stock's best-buy-queue share
+      count drops to/below this number, the bot sells each held position at the
+      day's floor price. Optional on a Buy; required for Auto-sell only.
+    </p>
+  </div>
+
+  {# --- Comment --- #}
+  <div class="field">
+    <label class="label" for="comment">Comment (optional)</label>
+    <textarea class="input" id="comment" name="comment" rows="2" maxlength="1024" dir="auto">{{ fv.comment|default('') }}</textarea>
+  </div>
+
+  {# --- Customer multi-select --- #}
+  <fieldset class="field bulk-customers">
+    <legend class="label">Customers</legend>
+    {% if not customers %}
+      <p class="text-muted">
+        No customers to add to.
+        <a href="{{ back_url }}">Add a customer first.</a>
+      </p>
+    {% else %}
+      <div class="bulk-toolbar">
+        <label class="radio-row">
+          <input type="checkbox" id="bulk-select-all"> Select all (visible)
+        </label>
+        <input class="input input--wide" id="bulk-quick-filter" type="search"
+               placeholder="Quick-filter by name / username…" autocomplete="off">
+        <span class="text-small text-muted"><span id="bulk-count">0</span> selected</span>
+      </div>
+
+      {% for broker, group in customers|groupby('broker') %}
+      <div class="bulk-broker-group" data-broker-group="{{ broker }}">
+        <div class="bulk-broker-head">
+          <label class="radio-row">
+            <input type="checkbox" class="bulk-broker-all" data-broker="{{ broker }}">
+            <span class="badge">{{ broker }}</span>
+            <span class="text-small text-muted">({{ group|length }})</span>
+          </label>
+        </div>
+        {% for c in group %}
+        <label class="bulk-cust" data-search="{{ (c.display_name ~ ' ' ~ c.username)|lower }}">
+          <input type="checkbox" name="customer_ids" value="{{ c.id }}"
+                 data-broker="{{ c.broker }}"
+                 {% if (c.id|string) in selected_ids %}checked{% endif %}>
+          <span class="bulk-cust-name" dir="auto">{{ c.display_name }}</span>
+          <code class="text-small" dir="ltr">{{ c.username }}</code>
+          {% if is_admin and agents_by_id %}
+            {% set _ag = agents_by_id.get(c.agent_id) %}
+            <span class="badge badge--muted" dir="auto">{{ _ag.username if _ag else '—' }}</span>
+          {% endif %}
+          {% if c.assignment_status != 'active' %}
+            <span class="badge badge--pending">{{ c.assignment_status }}</span>
+          {% endif %}
+        </label>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    {% endif %}
+  </fieldset>
+
+  <div class="form-actions">
+    <a class="btn btn--ghost" href="{{ back_url }}">Cancel</a>
+    <button class="btn btn--primary" type="submit" id="bulk-submit"
+            {% if not customers %}disabled{% endif %}>Save to selected customers</button>
+  </div>
+</form>
+
+<style>
+  .bulk-customers { border:1px solid var(--border,#ccc); border-radius:8px; padding:12px; }
+  .bulk-toolbar { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-bottom:10px; }
+  .bulk-broker-group { margin:8px 0; }
+  .bulk-broker-head { margin:6px 0 2px; }
+  .bulk-cust { display:flex; gap:8px; align-items:center; padding:4px 8px 4px 24px; cursor:pointer; }
+  .bulk-cust:hover { background:var(--accent-bg,#eef); border-radius:6px; }
+  .bulk-cust-name { min-width:0; overflow-wrap:anywhere; }
+  .badge--muted { opacity:.75; }
+</style>
+
+<script>
+(function () {
+  // --- Side → show/hide the auto-sell threshold (no per-customer holdings
+  //     probe here — there's no single account to query in bulk). ---
+  var field = document.getElementById('auto-sell-field');
+  var radios = document.querySelectorAll('input[name="side"]');
+  var threshold = document.getElementById('auto_sell_threshold');
+  function side() {
+    for (var i = 0; i < radios.length; i++) {
+      if (radios[i].checked) return radios[i].value;
+    }
+    return null;
+  }
+  function syncSide() {
+    var s = side();
+    if (field) field.style.display = (s === '1' || s === '3') ? '' : 'none';
+    if (threshold) {
+      if (s === '3') { threshold.setAttribute('required', 'required'); }
+      else { threshold.removeAttribute('required'); }
+      // A hidden field still posts; disabling stops a stale value riding along
+      // on a Sell (the server clears it anyway, but don't send it at all).
+      threshold.disabled = (s === '2');
+    }
+  }
+  for (var i = 0; i < radios.length; i++) {
+    radios[i].addEventListener('change', syncSide);
+  }
+
+  // --- Customer multi-select helpers ---
+  var boxes = Array.prototype.slice.call(
+    document.querySelectorAll('input[name="customer_ids"]')
+  );
+  var countEl = document.getElementById('bulk-count');
+  var selectAll = document.getElementById('bulk-select-all');
+  var quick = document.getElementById('bulk-quick-filter');
+
+  function labelOf(box) { return box.closest('.bulk-cust'); }
+  function isVisible(box) {
+    var l = labelOf(box);
+    return l && l.style.display !== 'none';
+  }
+  function updateCount() {
+    if (!countEl) return;
+    var n = 0;
+    boxes.forEach(function (b) { if (b.checked) n++; });
+    countEl.textContent = n;
+  }
+  boxes.forEach(function (b) { b.addEventListener('change', updateCount); });
+
+  if (selectAll) {
+    selectAll.addEventListener('change', function () {
+      boxes.forEach(function (b) {
+        if (isVisible(b)) b.checked = selectAll.checked;
+      });
+      updateCount();
+    });
+  }
+
+  Array.prototype.slice.call(
+    document.querySelectorAll('.bulk-broker-all')
+  ).forEach(function (master) {
+    master.addEventListener('change', function () {
+      var br = master.getAttribute('data-broker');
+      boxes.forEach(function (b) {
+        if (b.getAttribute('data-broker') === br && isVisible(b)) {
+          b.checked = master.checked;
+        }
+      });
+      updateCount();
+    });
+  });
+
+  if (quick) {
+    quick.addEventListener('input', function () {
+      var q = quick.value.trim().toLowerCase();
+      boxes.forEach(function (b) {
+        var l = labelOf(b);
+        if (!l) return;
+        var hay = l.getAttribute('data-search') || '';
+        l.style.display = (!q || hay.indexOf(q) !== -1) ? '' : 'none';
+      });
+      // Hide a broker group whose rows are all filtered out.
+      Array.prototype.slice.call(
+        document.querySelectorAll('.bulk-broker-group')
+      ).forEach(function (grp) {
+        var any = Array.prototype.slice.call(
+          grp.querySelectorAll('.bulk-cust')
+        ).some(function (l) { return l.style.display !== 'none'; });
+        grp.style.display = any ? '' : 'none';
+      });
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { syncSide(); updateCount(); });
+  } else { syncSide(); updateCount(); }
+})();
+</script>
