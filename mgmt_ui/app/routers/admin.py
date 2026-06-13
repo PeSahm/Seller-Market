@@ -1238,6 +1238,159 @@ async def admin_customer_update(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Bulk add trades (one instrument → many customers)
+# ---------------------------------------------------------------------------
+
+
+def _bulk_summary(created: int, skipped: int, missing: int) -> Optional[str]:
+    """Compact flash text for a finished bulk-add (None when nothing happened)."""
+    if created == 0 and skipped == 0 and missing == 0:
+        return None
+    parts = [f"Added to {created} customer{'' if created == 1 else 's'}"]
+    if skipped:
+        parts.append(f"skipped {skipped} that already had it")
+    if missing:
+        parts.append(f"{missing} not found")
+    return ", ".join(parts) + "."
+
+
+def _sorted_for_bulk(customers: list) -> list:
+    """Stable (broker, display_name) order so the template's groupby is clean."""
+    return sorted(customers, key=lambda c: (c.broker, (c.display_name or "").lower()))
+
+
+async def _bulk_admin_ctx(request: Request, user: User, db: AsyncSession) -> dict:
+    """Shared admin bulk-page context: the agent column + filter-bar lookups."""
+    agents = {
+        a.id: a
+        for a in await services_agents.list_agents(db, include_deleted=True)
+    }
+    ctx = _ctx(request, user, current_tab="/admin/bulk-trade-instructions")
+    ctx["instrument_search_url"] = "/admin/instruments/search"
+    ctx["post_url"] = "/admin/bulk-trade-instructions"
+    ctx["back_url"] = "/admin/customers"
+    ctx["is_admin"] = True
+    ctx["agents_by_id"] = agents
+    ctx["all_agents"] = list(agents.values())
+    ctx["broker_groups"] = await brokers_admin.list_all_grouped(db)
+    return ctx
+
+
+@router.get("/bulk-trade-instructions")
+async def admin_bulk_trade_instructions_form(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    agent_id: Optional[str] = None,
+    broker: Optional[str] = None,
+    created: int = 0,
+    skipped: int = 0,
+    missing: int = 0,
+):
+    """Render the bulk-add page; admins may scope by agent + broker and tick
+    customers across agents in one save."""
+    agent_uuid = _parse_optional_uuid(agent_id)
+    broker = broker or None
+    customers = await services_customers.list_customers(
+        db, agent_id=agent_uuid, broker=broker
+    )
+    ctx = await _bulk_admin_ctx(request, user, db)
+    ctx["customers"] = _sorted_for_bulk(customers)
+    ctx["filter_agent_id"] = agent_id
+    ctx["filter_broker"] = broker
+    ctx["form_error"] = None
+    ctx["form_values"] = {}
+    ctx["result_summary"] = _bulk_summary(created, skipped, missing)
+    return templates.TemplateResponse("admin/bulk_trade_instructions.html", ctx)
+
+
+@router.post("/bulk-trade-instructions")
+async def admin_bulk_trade_instructions_create(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    isin: str = Form(...),
+    side: int = Form(...),
+    comment: Optional[str] = Form(None),
+    auto_sell_threshold: Optional[str] = Form(None),
+    customer_ids: list[UUID] = Form(default=[]),
+):
+    """Create one TradeInstruction across many selected customers (any agent)."""
+    sticky = {
+        "isin": isin,
+        "side": str(side),
+        "comment": comment or "",
+        "auto_sell_threshold": auto_sell_threshold or "",
+        "selected_ids": {str(c) for c in customer_ids},
+    }
+
+    async def _rerender(message: str, code: int):
+        # PR #73: a service rollback expires loaded ORM attrs incl. user.
+        await db.refresh(user)
+        customers = await services_customers.list_customers(db)
+        ctx = await _bulk_admin_ctx(request, user, db)
+        ctx["customers"] = _sorted_for_bulk(customers)
+        ctx["filter_agent_id"] = None
+        ctx["filter_broker"] = None
+        ctx["form_error"] = message
+        ctx["form_values"] = sticky
+        ctx["result_summary"] = None
+        return templates.TemplateResponse(
+            "admin/bulk_trade_instructions.html", ctx, status_code=code
+        )
+
+    if not customer_ids:
+        return await _rerender(
+            "Select at least one customer.", status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        mapped_side, auto_sell_only = map_side_form(side)
+        payload = TradeInstructionCreate(
+            isin=isin,
+            side=mapped_side,  # type: ignore[arg-type]
+            comment=comment if comment else None,
+            auto_sell_threshold=_parse_optional_int(auto_sell_threshold),
+            auto_sell_only=auto_sell_only,
+        )
+    except (ValidationError, ValueError) as exc:
+        msg = (
+            "Invalid input. Please review the form fields and try again."
+            if isinstance(exc, ValidationError)
+            else str(exc)
+        )
+        return await _rerender(msg, status.HTTP_400_BAD_REQUEST)
+
+    try:
+        res = await services_trade_instructions.bulk_create_trade_instruction(
+            db, list(customer_ids), payload, actor_id=user.id,
+        )
+    except ValueError as exc:
+        return await _rerender(str(exc), status.HTTP_400_BAD_REQUEST)
+
+    # Push config.ini once per affected stack (already de-duped). Best-effort.
+    for stack_id in res.affected_stack_ids:
+        try:
+            await services_stacks.push_config_ini_for_stack(
+                db, stack_id=stack_id, actor_id=user.id
+            )
+            await db.commit()
+        except Exception:  # noqa: BLE001 — post-commit push is best-effort
+            logger.exception(
+                "bulk-trade-instructions: config.ini push failed stack=%s",
+                stack_id,
+            )
+
+    loc = (
+        "/admin/bulk-trade-instructions"
+        f"?created={res.created_count}"
+        f"&skipped={len(res.skipped_customer_ids)}"
+        f"&missing={len(res.missing_customer_ids)}"
+    )
+    return _flash_redirect(request, loc)
+
+
 @router.get("/customers/{customer_id}/trade-instructions/new")
 async def admin_trade_instruction_new_form(
     customer_id: UUID,

@@ -35,9 +35,10 @@ new format includes ``t<...>`` to disambiguate.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -271,6 +272,201 @@ def _duplicate_tuple_message(side: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Bulk create (one instrument → many customers)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BulkCreateResult:
+    """Outcome of a bulk trade-instruction create across many customers.
+
+    ``skipped`` are customers that already had a row for ``(isin, side)`` —
+    they keep their existing row untouched (skip & report, not overwrite).
+    ``missing`` are ids that weren't found, or (when ``expected_agent_id`` is
+    set) belong to a different agent. ``affected_stack_ids`` is the de-duped,
+    NULL-dropped set of stacks the caller must re-push ``config.ini`` to.
+    """
+
+    created_count: int = 0
+    created_customer_ids: list[UUID] = field(default_factory=list)
+    skipped_customer_ids: list[UUID] = field(default_factory=list)
+    missing_customer_ids: list[UUID] = field(default_factory=list)
+    affected_stack_ids: list[UUID] = field(default_factory=list)
+
+
+async def bulk_create_trade_instruction(
+    db: AsyncSession,
+    customer_ids: list[UUID],
+    data: TradeInstructionCreate,
+    actor_id: UUID,
+    *,
+    expected_agent_id: Optional[UUID] = None,
+) -> BulkCreateResult:
+    """Create ONE trade instruction (``data``) across MANY customers.
+
+    Per-customer duplicates are SKIPPED, not errors: a customer that already
+    has a row for ``(data.isin, data.side)`` is recorded in
+    ``skipped_customer_ids`` and the rest still get created. ``data`` is
+    already mapped (``data.side`` is the STORED side 1/2 and
+    ``data.auto_sell_only`` the watch-only flag — the form's side=3 alias was
+    resolved by ``map_side_form`` in the route), so the duplicate check uses
+    ``data.side`` verbatim.
+
+    Writes ONE summary audit row and commits ONCE (mirrors
+    :func:`delete_all_for_agent`). Returns a :class:`BulkCreateResult`; the
+    caller re-pushes ``config.ini`` to each ``affected_stack_ids`` entry.
+
+    ``expected_agent_id`` (set by the agent route to ``user.id``) drops any
+    customer owned by a different agent into ``missing_customer_ids`` —
+    defence in depth behind the route's ownership gate. Admin passes ``None``.
+
+    Raises ``ValueError`` only on the rare TOCTOU collision (a concurrent
+    writer inserts the same tuple between our pre-query and our flush).
+    """
+    result = BulkCreateResult()
+
+    # De-dup the posted ids — a double-ticked box (or duplicated markup) must
+    # not create two rows / two skips for one customer.
+    requested = list(dict.fromkeys(customer_ids))
+    if not requested:
+        return result  # empty selection — no audit, no commit
+
+    # One SELECT of the candidates → primitive tuples (id, agent_id, broker,
+    # stack_id). We read EVERYTHING we need here so nothing touches an ORM row
+    # after the commit expires it (PR #73 MissingGreenlet trap).
+    cust_rows = (
+        await db.execute(
+            select(
+                Customer.id,
+                Customer.agent_id,
+                Customer.broker,
+                Customer.stack_id,
+            ).where(Customer.id.in_(requested))
+        )
+    ).all()
+    cust_by_id = {r[0]: r for r in cust_rows}
+
+    eligible_ids: list[UUID] = []
+    for cid in requested:
+        row = cust_by_id.get(cid)
+        if row is None or (
+            expected_agent_id is not None and row[1] != expected_agent_id
+        ):
+            result.missing_customer_ids.append(cid)
+            continue
+        eligible_ids.append(cid)
+
+    if not eligible_ids:
+        return result  # nothing actionable — no audit, no commit
+
+    # Pre-query existing rows for THIS (isin, side) across the eligible set so
+    # duplicates are SKIPPED (not an aborting IntegrityError). Cheaper than a
+    # per-row savepoint and matches the bulk contract (one SELECT, one commit).
+    existing = set(
+        (
+            await db.execute(
+                select(TradeInstruction.customer_id).where(
+                    TradeInstruction.customer_id.in_(eligible_ids),
+                    TradeInstruction.isin == data.isin,
+                    TradeInstruction.side == data.side,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    to_create: list[UUID] = []
+    for cid in eligible_ids:
+        if cid in existing:
+            result.skipped_customer_ids.append(cid)
+        else:
+            to_create.append(cid)
+
+    if not to_create:
+        # Every eligible customer already had the row — honest no-op (no audit,
+        # no commit), mirroring delete_all_for_agent's empty contract.
+        return result
+
+    # Auto-sell only makes sense for a BUY; normalize 0 → None so "disabled"
+    # has ONE representation (same as create_trade_instruction).
+    threshold = (
+        data.auto_sell_threshold
+        if (data.side == 1 and data.auto_sell_threshold)
+        else None
+    )
+
+    new_rows: list[tuple[UUID, TradeInstruction]] = []
+    for cid in to_create:
+        _, agent_id, broker, _ = cust_by_id[cid]
+        # Mint the id in Python so the (globally-UNIQUE) section_name can be
+        # computed up front and INSERTed directly. The single-row create gets
+        # away with a "" placeholder + a follow-up UPDATE, but a BATCH of 2+
+        # rows would all carry "" at the single flush → they'd collide on the
+        # section_name UNIQUE. Building the final name before insert avoids it.
+        tid = uuid4()
+        ti = TradeInstruction(
+            id=tid,
+            customer_id=cid,
+            isin=data.isin,
+            side=data.side,
+            auto_sell_threshold=threshold,
+            auto_sell_only=data.auto_sell_only,
+            section_name=_build_section_name(
+                agent_id, cid, tid, broker, data.isin, data.side
+            ),
+            comment=data.comment,
+            version=1,
+        )
+        db.add(ti)
+        new_rows.append((cid, ti))
+
+    # ONE summary audit row — per-row snapshots would flood the log.
+    # _write_audit hardcodes target_type="trade_instruction" + a single trade
+    # id, which is wrong for a batch, so inline the AuditLog (the same reasoning
+    # delete_all_for_agent uses).
+    db.add(
+        AuditLog(
+            actor_user_id=actor_id,
+            action="trade_instruction.bulk_create",
+            target_type="agent" if expected_agent_id else "user",
+            target_id=str(expected_agent_id or actor_id),
+            before_json=None,
+            after_json={
+                "isin": data.isin,
+                "side": data.side,
+                "auto_sell_only": data.auto_sell_only,
+                "auto_sell_threshold": threshold,
+                "created_count": len(new_rows),
+                "created_customer_ids": [str(c) for c, _ in new_rows],
+                "skipped_customer_ids": [
+                    str(c) for c in result.skipped_customer_ids
+                ],
+            },
+        )
+    )
+
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        # TOCTOU: a concurrent writer inserted the same (customer, isin, side)
+        # between our pre-query and this commit (or an astronomically-unlikely
+        # section_name uuid clash).
+        await db.rollback()
+        raise ValueError(_duplicate_tuple_message(data.side)) from exc
+
+    # Post-commit: assemble from the primitives captured above — NEVER read the
+    # now-expired ORM rows.
+    result.created_count = len(new_rows)
+    result.created_customer_ids = [cid for cid, _ in new_rows]
+    result.affected_stack_ids = sorted(
+        {cust_by_id[cid][3] for cid, _ in new_rows if cust_by_id[cid][3] is not None},
+        key=str,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Update
 # ---------------------------------------------------------------------------
 
@@ -321,8 +517,8 @@ async def update_trade_instruction(
             "delete the instruction instead of clearing it"
         )
 
-    for field, value in changes.items():
-        setattr(ti, field, value)
+    for attr, value in changes.items():
+        setattr(ti, attr, value)
     ti.auto_sell_threshold = eff_threshold
 
     # Section name embeds isin+side — regenerate when either changed.
@@ -446,7 +642,9 @@ async def delete_all_for_agent(
 
 
 __all__ = [
+    "BulkCreateResult",
     "OptimisticLockError",
+    "bulk_create_trade_instruction",
     "create_trade_instruction",
     "delete_all_for_agent",
     "get_trade_instruction",

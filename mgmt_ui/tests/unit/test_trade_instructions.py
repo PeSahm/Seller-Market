@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
+from app.models.audit import AuditLog
+from app.models.trade_instructions import TradeInstruction
 from app.schemas.trade_instruction import (
     TradeInstructionCreate,
     TradeInstructionOut,
@@ -23,9 +25,9 @@ from app.services import trade_instructions as ti_svc
 from app.services.trade_instructions import (
     OptimisticLockError,
     _build_section_name,
+    bulk_create_trade_instruction,
     update_trade_instruction,
 )
-
 
 # ---------------------------------------------------------------------------
 # section_name builder
@@ -305,3 +307,239 @@ async def test_delete_all_for_agent_empty_is_noop() -> None:
     assert count == 0 and stacks == []
     db.add.assert_not_called()
     db.commit.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# bulk_create_trade_instruction (one instrument → many customers)
+# ---------------------------------------------------------------------------
+
+
+def _bulk_db(cust_rows, existing_ids):
+    """Mock AsyncSession for bulk_create: the cust-load SELECT, then the dup
+    SELECT. ``flush`` mints an id on each added TradeInstruction so the
+    section-name builder has a real UUID to slice."""
+    cust_result = MagicMock()
+    cust_result.all.return_value = cust_rows
+    dup_result = MagicMock()
+    dup_result.scalars.return_value.all.return_value = list(existing_ids)
+
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[cust_result, dup_result])
+
+    added: list = []
+
+    def _add(obj):
+        added.append(obj)
+
+    async def _flush():
+        for o in added:
+            if isinstance(o, TradeInstruction) and getattr(o, "id", None) is None:
+                o.id = uuid.uuid4()
+
+    db.add = MagicMock(side_effect=_add)
+    db.flush = AsyncMock(side_effect=_flush)
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    db._added = added
+    return db
+
+
+def _added_tis(db):
+    return [o for o in db._added if isinstance(o, TradeInstruction)]
+
+
+def _added_audits(db):
+    return [o for o in db._added if isinstance(o, AuditLog)]
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_all_new_creates_and_dedups_stacks() -> None:
+    agent_id = uuid.uuid4()
+    c1, c2, c3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    stack_a = uuid.uuid4()
+    cust_rows = [
+        (c1, agent_id, "bbi", stack_a),
+        (c2, agent_id, "ayandeh", stack_a),  # same stack → deduped
+        (c3, agent_id, "gs", None),          # unassigned → dropped
+    ]
+    db = _bulk_db(cust_rows, existing_ids=[])
+    data = TradeInstructionCreate(isin="IRO3AYHZ0001", side=1)
+
+    res = await bulk_create_trade_instruction(
+        db, [c1, c2, c3], data, actor_id=uuid.uuid4()
+    )
+
+    assert res.created_count == 3
+    assert set(res.created_customer_ids) == {c1, c2, c3}
+    assert res.skipped_customer_ids == []
+    assert res.affected_stack_ids == [stack_a]  # deduped + NULL dropped
+    assert db.add.call_count == 4  # 3 TIs + 1 summary audit
+    audits = _added_audits(db)
+    assert len(audits) == 1
+    assert audits[0].action == "trade_instruction.bulk_create"
+    db.commit.assert_awaited_once()
+    # Every batched row must carry a DISTINCT, non-empty section_name — a shared
+    # "" placeholder would collide on the section_name UNIQUE at INSERT time.
+    names = [ti.section_name for ti in _added_tis(db)]
+    assert all(names) and len(set(names)) == len(names)
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_mixed_duplicates_skips_some() -> None:
+    agent_id = uuid.uuid4()
+    c1, c2, c3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    stack_a = uuid.uuid4()
+    cust_rows = [
+        (c1, agent_id, "bbi", stack_a),
+        (c2, agent_id, "bbi", stack_a),
+        (c3, agent_id, "gs", None),
+    ]
+    db = _bulk_db(cust_rows, existing_ids=[c2])  # c2 already has (isin, side)
+    data = TradeInstructionCreate(isin="IRO3AYHZ0001", side=1)
+
+    res = await bulk_create_trade_instruction(
+        db, [c1, c2, c3], data, actor_id=uuid.uuid4()
+    )
+
+    assert res.created_count == 2
+    assert set(res.created_customer_ids) == {c1, c3}
+    assert res.skipped_customer_ids == [c2]
+    assert res.affected_stack_ids == [stack_a]
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_all_duplicates_is_noop() -> None:
+    agent_id = uuid.uuid4()
+    c1, c2 = uuid.uuid4(), uuid.uuid4()
+    cust_rows = [
+        (c1, agent_id, "bbi", uuid.uuid4()),
+        (c2, agent_id, "bbi", uuid.uuid4()),
+    ]
+    db = _bulk_db(cust_rows, existing_ids=[c1, c2])
+    data = TradeInstructionCreate(isin="IRO3AYHZ0001", side=1)
+
+    res = await bulk_create_trade_instruction(
+        db, [c1, c2], data, actor_id=uuid.uuid4()
+    )
+
+    assert res.created_count == 0
+    assert set(res.skipped_customer_ids) == {c1, c2}
+    assert res.affected_stack_ids == []
+    db.add.assert_not_called()       # no audit row
+    db.flush.assert_not_awaited()
+    db.commit.assert_not_awaited()   # honest no-op
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_empty_list_is_noop() -> None:
+    db = _bulk_db([], existing_ids=[])
+    data = TradeInstructionCreate(isin="IRO3AYHZ0001", side=1)
+
+    res = await bulk_create_trade_instruction(db, [], data, actor_id=uuid.uuid4())
+
+    assert res.created_count == 0
+    assert res.created_customer_ids == []
+    db.execute.assert_not_awaited()  # never even queried
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_foreign_agent_filtered_to_missing() -> None:
+    agent_id = uuid.uuid4()
+    other_agent = uuid.uuid4()
+    c1, c2 = uuid.uuid4(), uuid.uuid4()
+    stack_a = uuid.uuid4()
+    cust_rows = [
+        (c1, agent_id, "bbi", stack_a),
+        (c2, other_agent, "gs", stack_a),  # belongs to a different agent
+    ]
+    db = _bulk_db(cust_rows, existing_ids=[])
+    data = TradeInstructionCreate(isin="IRO3AYHZ0001", side=1)
+
+    res = await bulk_create_trade_instruction(
+        db, [c1, c2], data, actor_id=uuid.uuid4(), expected_agent_id=agent_id
+    )
+
+    assert res.missing_customer_ids == [c2]
+    assert res.created_count == 1
+    assert set(res.created_customer_ids) == {c1}
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_section_name_per_customer() -> None:
+    agent_id = uuid.uuid4()
+    c1 = uuid.uuid4()
+    cust_rows = [(c1, agent_id, "bbi", uuid.uuid4())]
+    db = _bulk_db(cust_rows, existing_ids=[])
+    data = TradeInstructionCreate(isin="IRO3AYHZ0001", side=1)
+
+    await bulk_create_trade_instruction(db, [c1], data, actor_id=uuid.uuid4())
+
+    ti = _added_tis(db)[0]
+    assert ti.section_name.startswith(f"a{agent_id.hex[:8]}_")
+    assert "_bbi_" in ti.section_name
+    assert ti.section_name.endswith("_IRO3AYHZ0001_s1")
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_side2_drops_threshold() -> None:
+    agent_id = uuid.uuid4()
+    c1 = uuid.uuid4()
+    cust_rows = [(c1, agent_id, "bbi", uuid.uuid4())]
+    db = _bulk_db(cust_rows, existing_ids=[])
+    # A Sell with a stray threshold must NOT persist it (auto-sell is BUY-only).
+    data = TradeInstructionCreate(isin="IRO3AYHZ0001", side=2, auto_sell_threshold=500)
+
+    await bulk_create_trade_instruction(db, [c1], data, actor_id=uuid.uuid4())
+
+    ti = _added_tis(db)[0]
+    assert ti.side == 2
+    assert ti.auto_sell_threshold is None
+
+
+@pytest.mark.asyncio
+async def test_agent_bulk_route_rejects_foreign_customer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent POST handler 404s if any posted id isn't the agent's own —
+    BEFORE the bulk service is ever invoked."""
+    from fastapi import HTTPException
+
+    from app.routers import agent as agent_router
+
+    owned_id = uuid.uuid4()
+    foreign_id = uuid.uuid4()
+    user = SimpleNamespace(id=uuid.uuid4(), role="agent", username="ag")
+
+    async def _list_customers(_db, *, agent_id=None, **_kw):
+        return [SimpleNamespace(id=owned_id)]
+
+    monkeypatch.setattr(
+        agent_router.services_customers, "list_customers", _list_customers
+    )
+
+    async def _never(*_a, **_k):
+        raise AssertionError("service must not be called for a foreign id")
+
+    monkeypatch.setattr(
+        agent_router.services_trade_instructions,
+        "bulk_create_trade_instruction",
+        _never,
+    )
+
+    db = MagicMock()
+    db.refresh = AsyncMock()
+
+    with pytest.raises(HTTPException) as ei:
+        await agent_router.agent_bulk_trade_instructions_create(
+            request=MagicMock(),
+            user=user,
+            db=db,
+            isin="IRO3AYHZ0001",
+            side=1,
+            comment=None,
+            auto_sell_threshold=None,
+            customer_ids=[foreign_id],
+        )
+    assert ei.value.status_code == 404

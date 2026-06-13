@@ -826,6 +826,156 @@ async def agent_trade_instruction_create(
     )
 
 
+# ---------------------------------------------------------------------------
+# Bulk add trades (one instrument → many customers)
+# ---------------------------------------------------------------------------
+
+
+def _bulk_summary(created: int, skipped: int, missing: int) -> Optional[str]:
+    """Compact flash text for a finished bulk-add (None when nothing happened)."""
+    if created == 0 and skipped == 0 and missing == 0:
+        return None
+    parts = [f"Added to {created} customer{'' if created == 1 else 's'}"]
+    if skipped:
+        parts.append(f"skipped {skipped} that already had it")
+    if missing:
+        parts.append(f"{missing} not found")
+    return ", ".join(parts) + "."
+
+
+def _sorted_for_bulk(customers: list) -> list:
+    """Stable (broker, display_name) order so the template's groupby is clean."""
+    return sorted(customers, key=lambda c: (c.broker, (c.display_name or "").lower()))
+
+
+@router.get("/bulk-trade-instructions")
+async def agent_bulk_trade_instructions_form(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    created: int = 0,
+    skipped: int = 0,
+    missing: int = 0,
+):
+    """Render the bulk-add page with the agent's own selectable customers."""
+    _require_agent_or_admin(user)
+    agent_id = None if user.role == "admin" else user.id
+    customers = await services_customers.list_customers(db, agent_id=agent_id)
+    ctx = _ctx(request, user, current_tab="/agent/bulk-trade-instructions")
+    ctx["customers"] = _sorted_for_bulk(customers)
+    ctx["instrument_search_url"] = "/agent/instruments/search"
+    ctx["post_url"] = "/agent/bulk-trade-instructions"
+    ctx["back_url"] = "/agent/customers"
+    ctx["is_admin"] = False
+    ctx["form_error"] = None
+    ctx["form_values"] = {}
+    ctx["result_summary"] = _bulk_summary(created, skipped, missing)
+    return templates.TemplateResponse("agent/bulk_trade_instructions.html", ctx)
+
+
+@router.post("/bulk-trade-instructions")
+async def agent_bulk_trade_instructions_create(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    isin: str = Form(...),
+    side: int = Form(...),
+    comment: Optional[str] = Form(None),
+    auto_sell_threshold: Optional[str] = Form(None),
+    customer_ids: list[UUID] = Form(default=[]),
+):
+    """Create one TradeInstruction across many of the agent's own customers."""
+    _require_agent_or_admin(user)
+    agent_id = None if user.role == "admin" else user.id
+
+    sticky = {
+        "isin": isin,
+        "side": str(side),
+        "comment": comment or "",
+        "auto_sell_threshold": auto_sell_threshold or "",
+        "selected_ids": {str(c) for c in customer_ids},
+    }
+
+    async def _rerender(message: str, code: int):
+        # PR #73: a service rollback expires loaded ORM attrs incl. user —
+        # refresh BEFORE the sync Jinja render so page_shell doesn't lazy-load.
+        await db.refresh(user)
+        customers = await services_customers.list_customers(db, agent_id=agent_id)
+        ctx = _ctx(request, user, current_tab="/agent/bulk-trade-instructions")
+        ctx["customers"] = _sorted_for_bulk(customers)
+        ctx["instrument_search_url"] = "/agent/instruments/search"
+        ctx["post_url"] = "/agent/bulk-trade-instructions"
+        ctx["back_url"] = "/agent/customers"
+        ctx["is_admin"] = False
+        ctx["form_error"] = message
+        ctx["form_values"] = sticky
+        ctx["result_summary"] = None
+        return templates.TemplateResponse(
+            "agent/bulk_trade_instructions.html", ctx, status_code=code
+        )
+
+    if not customer_ids:
+        return await _rerender(
+            "Select at least one customer.", status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        mapped_side, auto_sell_only = map_side_form(side)
+        payload = TradeInstructionCreate(
+            isin=isin,
+            side=mapped_side,  # type: ignore[arg-type]
+            comment=comment if comment else None,
+            auto_sell_threshold=_parse_optional_int(auto_sell_threshold),
+            auto_sell_only=auto_sell_only,
+        )
+    except (ValidationError, ValueError) as exc:
+        msg = (
+            "Invalid input. Please review the form fields and try again."
+            if isinstance(exc, ValidationError)
+            else str(exc)
+        )
+        return await _rerender(msg, status.HTTP_400_BAD_REQUEST)
+
+    # Ownership gate: an agent may only target their OWN customers. A foreign id
+    # means a tampered form → 404 (don't leak the UUID space), matching
+    # _can_access_customer. Admins acting as agent skip the gate.
+    if user.role != "admin":
+        owned = await services_customers.list_customers(db, agent_id=user.id)
+        owned_ids = {c.id for c in owned}
+        if any(cid not in owned_ids for cid in customer_ids):
+            raise HTTPException(status_code=404, detail="customer not found")
+
+    try:
+        res = await services_trade_instructions.bulk_create_trade_instruction(
+            db, list(customer_ids), payload, actor_id=user.id,
+            expected_agent_id=agent_id,
+        )
+    except ValueError as exc:
+        return await _rerender(str(exc), status.HTTP_400_BAD_REQUEST)
+
+    # Push config.ini once per affected stack (already de-duped). Best-effort —
+    # the DB write is committed; an SSH hiccup is logged, not fatal.
+    for stack_id in res.affected_stack_ids:
+        try:
+            await services_stacks.push_config_ini_for_stack(
+                db, stack_id=stack_id, actor_id=user.id
+            )
+            await db.commit()
+        except Exception:  # noqa: BLE001 — post-commit push is best-effort
+            logger.exception(
+                "bulk-trade-instructions: config.ini push failed stack=%s",
+                stack_id,
+            )
+
+    loc = (
+        "/agent/bulk-trade-instructions"
+        f"?created={res.created_count}"
+        f"&skipped={len(res.skipped_customer_ids)}"
+        f"&missing={len(res.missing_customer_ids)}"
+    )
+    return _flash_redirect(request, loc)
+
+
 @router.get("/customers/{customer_id}/trade-instructions/{trade_id}/edit")
 async def agent_trade_instruction_edit_form(
     customer_id: UUID,

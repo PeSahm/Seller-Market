@@ -1,0 +1,10 @@
+{#
+  Agent bulk "add one trade instruction to many customers" page.
+  Thin shell — the body lives in the shared partial (see the admin twin).
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Bulk add trades{% endblock %}
+
+{% block page_body %}
+{% include "partials/bulk_trade_instructions_body.html" %}
+{% endblock %}
