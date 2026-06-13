@@ -13,7 +13,7 @@
 {# Filter form. Empty values are treated as "no filter" server-side, so
    submitting with all dropdowns blank shows everything. #}
 <form method="get" action="/agent/runs" class="filter-bar"
-      style="display: flex; gap: 12px; align-items: end; margin: 12px 0;">
+      style="margin: 12px 0;">
   <label class="field">
     <span class="field-label text-small text-muted">Stack</span>
     <select name="stack_id">
@@ -62,6 +62,7 @@
   {% endif %}
 </div>
 {% else %}
+<div class="table-scroll">
 <table class="table">
   <thead><tr>
     <th>Started</th>
@@ -125,6 +126,7 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 <p class="text-muted text-small">
   Showing the most recent {{ runs|length }} run{% if runs|length != 1 %}s{% endif %}
   (capped at 200).

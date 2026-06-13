@@ -24,7 +24,7 @@
 </p>
 
 <form method="get" action="/agent/trades" class="filter-bar"
-      style="display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 12px 0;">
+      style="margin: 12px 0;">
   <label class="field">
     <span class="field-label text-small text-muted">Since</span>
     <input type="datetime-local" name="since" value="{{ filter_since }}">
@@ -88,6 +88,7 @@
   {% endif %}
 </div>
 {% else %}
+<div class="table-scroll">
 <table class="table">
   <thead><tr>
     <th>When</th>
@@ -164,6 +165,7 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 <p class="text-muted text-small">
   Showing the most recent {{ trades|length }} trade{% if trades|length != 1 %}s{% endif %}
   (capped at 500).

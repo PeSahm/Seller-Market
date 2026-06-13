@@ -22,3 +22,36 @@ document.addEventListener("htmx:configRequest", function (e) {
   }
 });
 
+// Mobile tabs (responsive nav): center the active tab inside the horizontally
+// scrollable .tabs strip. Only acts when the strip is an actual scroll
+// container (the <=800px layout, where overflow-x:auto is set) and only ever
+// scrolls the strip itself — never scrollIntoView, which would scroll ancestor
+// scrollers including the document and shift the whole desktop page on load.
+// Fully wrapped so this nav nicety can never break the page.
+(function () {
+  function revealActiveTab() {
+    try {
+      var tab = document.querySelector(".tabs .tab--active");
+      if (!tab || typeof tab.closest !== "function") return;
+      var strip = tab.closest(".tabs");
+      if (!strip) return;
+      var overflowX = window.getComputedStyle(strip).overflowX;
+      if (overflowX !== "auto" && overflowX !== "scroll") return; // desktop: not a scroller
+      if (strip.scrollWidth <= strip.clientWidth) return; // nothing to scroll
+      var tabRect = tab.getBoundingClientRect();
+      var stripRect = strip.getBoundingClientRect();
+      // Shift the strip's own scroll so the tab sits centered; the browser
+      // clamps scrollLeft to the valid range. The document scroll is untouched.
+      strip.scrollLeft +=
+        tabRect.left - stripRect.left - (strip.clientWidth - tabRect.width) / 2;
+    } catch (e) {
+      /* a nav nicety must never break the page */
+    }
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", revealActiveTab);
+  } else {
+    revealActiveTab();
+  }
+})();
+

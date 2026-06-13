@@ -14,9 +14,9 @@
 </p>
 
 <form method="get" action="/agent/customers" class="filter-bar">
-  <input type="search" name="q" class="input"
+  <input type="search" name="q" class="input input--wide"
          placeholder="Search by name or username…"
-         value="{{ filter_q|default('') }}" style="min-width: 220px;">
+         value="{{ filter_q|default('') }}">
   <select name="status" class="input">
     <option value="">Any status</option>
     {% for s in ['pending','assigned','active'] %}
@@ -39,6 +39,7 @@
   {% endif %}
 </div>
 {% else %}
+<div class="table-scroll">
 <table class="table">
   <thead>
     <tr>
@@ -91,6 +92,7 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 {% endif %}
 
 {% if total_trade_instructions %}

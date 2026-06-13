@@ -98,6 +98,7 @@
   {% if not trade_instructions %}
     <p class="text-muted">No trade instructions yet. Click <strong>+ Add trade</strong> to register one.</p>
   {% else %}
+  <div class="table-scroll">
   <table class="table">
     <thead>
       <tr>
@@ -134,6 +135,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% endif %}
 </section>
 
@@ -181,6 +183,7 @@
     <button class="btn btn--sm btn--primary" type="submit">Record payment</button>
   </form>
   {% if fee_payments %}
+  <div class="table-scroll">
   <table class="table">
     <thead><tr><th>Amount</th><th>Paid on</th><th>Note</th><th>Recorded</th></tr></thead>
     <tbody>
@@ -194,6 +197,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% else %}
   <p class="text-muted text-small">No payments recorded yet.</p>
   {% endif %}

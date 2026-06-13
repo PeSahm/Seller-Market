@@ -20,8 +20,8 @@
 
 {# Filter chips + search. All round-trip via query string. #}
 <form method="get" action="/admin/customers" class="filter-bar">
-  <input type="search" name="q" class="input" placeholder="Search by name or username…"
-         value="{{ filter_q|default('') }}" style="min-width: 220px;">
+  <input type="search" name="q" class="input input--wide" placeholder="Search by name or username…"
+         value="{{ filter_q|default('') }}">
   <select name="agent_id" class="input">
     <option value="">All agents</option>
     {% for a in all_agents %}
@@ -64,6 +64,7 @@
   {% endif %}
 </div>
 {% else %}
+<div class="table-scroll">
 <table class="table">
   <thead>
     <tr>
@@ -81,5 +82,6 @@
     {% for c in customers %}{% include "admin/partials/customer_row.html" %}{% endfor %}
   </tbody>
 </table>
+</div>
 {% endif %}
 {% endblock %}
