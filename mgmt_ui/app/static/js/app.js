@@ -55,3 +55,24 @@ document.addEventListener("htmx:configRequest", function (e) {
   }
 })();
 
+// Fee detail: an "orders" toggle on a fee row reveals/hides the full-width
+// orders detail row beneath it (its next sibling <tr class="fee-detail">).
+// Delegated so it covers every fee row + survives HTMX swaps. Wrapped so a UI
+// nicety can never break the page.
+(function () {
+  document.addEventListener("click", function (e) {
+    try {
+      var btn = e.target.closest && e.target.closest(".orders-toggle");
+      if (!btn) return;
+      var mainRow = btn.closest("tr");
+      var detail = mainRow && mainRow.nextElementSibling;
+      if (!detail || !detail.classList.contains("fee-detail")) return;
+      var show = detail.hidden;
+      detail.hidden = !show;
+      btn.setAttribute("aria-expanded", show ? "true" : "false");
+    } catch (err) {
+      /* a disclosure nicety must never break the page */
+    }
+  });
+})();
+

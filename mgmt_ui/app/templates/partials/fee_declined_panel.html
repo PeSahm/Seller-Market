@@ -34,7 +34,8 @@
           <form method="post" action="{{ decline_base }}/{{ o.id }}/undo" style="display:inline;">
             {% include "partials/csrf.html" %}
             <input type="hidden" name="next" value="{{ current_url }}">
-            <button class="btn btn--ghost btn--sm" type="submit">Undo</button>
+            <button class="btn btn--primary btn--sm" type="submit"
+                    title="Re-bill this order — put it back in the fee">Undo</button>
           </form>
         </td>
       </tr>

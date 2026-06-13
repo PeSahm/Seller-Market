@@ -1291,12 +1291,22 @@ async def agent_fees(
     request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    customer_id: Optional[str] = None,
 ):
     """Read-only fee panel: what the agent owes the operator, per customer
     (owed − paid = remaining). Scoped to the agent's own customers; admins see
-    the whole fleet. Recording payments stays admin-only (#116)."""
+    the whole fleet. Optional ``customer_id`` filter narrows to one customer.
+    Recording payments stays admin-only (#116)."""
     _require_agent_or_admin(user)
     own_agent_id = None if user.role == "admin" else user.id
+
+    # Lenient: a bad UUID in the query string → "no filter" (never 422). Ownership
+    # is inherent — build_fee_report/list_declined are pinned to own_agent_id, so
+    # a foreign customer_id returns nothing.
+    try:
+        cust_filter = UUID(customer_id) if customer_id else None
+    except (ValueError, AttributeError):
+        cust_filter = None
 
     def _parse_date(s):
         try:
@@ -1322,6 +1332,7 @@ async def agent_fees(
     report = await services_profit_report.build_fee_report(
         db,
         agent_id=own_agent_id,
+        customer_id=cust_filter,
         since=since,
         window_start=ws,
         window_end=we,
@@ -1331,8 +1342,11 @@ async def agent_fees(
     # Declined orders are filtered OUT of the report, so they need their own
     # query for the Undo panel (and to widen the customer-name lookup).
     declined = await services_broker_orders.list_declined_orders(
-        db, agent_id=own_agent_id
+        db, agent_id=own_agent_id, customer_id=cust_filter
     )
+
+    # The agent's own customers populate the filter dropdown.
+    my_customers = await services_customers.list_customers(db, agent_id=own_agent_id)
 
     cust_ids = list(
         {cid for cid in report.per_customer if cid is not None}
@@ -1347,6 +1361,8 @@ async def agent_fees(
     ctx["fee_report"] = report
     ctx["customers_by_id"] = customers_by_id
     ctx["declined_orders"] = declined
+    ctx["my_customers"] = my_customers
+    ctx["filter_customer_id"] = customer_id
     ctx["grand_paid"] = sum((t.paid for t in report.per_customer.values()), 0)
     ctx["grand_remaining"] = sum(
         (t.remaining for t in report.per_customer.values()), 0
