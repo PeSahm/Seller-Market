@@ -30,6 +30,7 @@ from sqlalchemy import bindparam, delete, desc, func, literal_column, select, te
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.audit import AuditLog
 from app.models.broker_orders import BrokerOrder
 from app.models.customers import Customer
 from app.security import crypto
@@ -366,6 +367,10 @@ _MUTABLE_ON_CONFLICT = (
 _COALESCE_ON_CONFLICT = frozenset(
     {"price", "total_fee", "executed_amount", "net_traded_value", "serial_number"}
 )
+
+# NOT in _MUTABLE_ON_CONFLICT (and absent from map_getorders_row): the per-order
+# fee-decline columns ``fee_excluded_at`` / ``fee_excluded_by``. A re-fetch must
+# never clear a decline and silently re-bill the order.
 
 
 async def _upsert_order(db: AsyncSession, values: dict) -> bool:
@@ -716,6 +721,134 @@ async def repair_collision_rows(db: AsyncSession, *, dry_run: bool = False) -> d
     return summary
 
 
+# ---------------------------------------------------------------------------
+# Per-order fee decline (mark a customer's own manual trade out of the fee)
+# ---------------------------------------------------------------------------
+
+
+class OrderNotFoundError(Exception):
+    """No broker_order with that id."""
+
+
+class DeclineNotAllowedError(Exception):
+    """An agent tried to decline a non-buy or a fire-log-CONFIRMED bot buy.
+
+    Agents may only decline a time-window-GUESS buy (order_side==1 AND
+    is_bot==False) — a manual order can never carry the bot's fire-log tag, so
+    this blocks zero legitimate declines while protecting genuine bot trades.
+    Admins bypass via ``allow_confirmed_bot=True``.
+    """
+
+
+async def decline_order(
+    db: AsyncSession,
+    order_id: UUID,
+    *,
+    actor_id: UUID,
+    allow_confirmed_bot: bool,
+) -> BrokerOrder:
+    """Mark one executed order as the customer's OWN manual trade → excluded from
+    the fee. Sets ``fee_excluded_at``/``fee_excluded_by``, writes an audit row,
+    commits. Ownership scoping is the caller's (route's) job.
+
+    Guardrail (when ``allow_confirmed_bot`` is False, i.e. an agent): the order
+    must be a window-guess buy (order_side==1 AND not is_bot) else
+    ``DeclineNotAllowedError``. Idempotent: re-declining is a no-op (no second
+    audit row). Raises ``OrderNotFoundError`` if the id is unknown.
+    """
+    order = await db.get(BrokerOrder, order_id)
+    if order is None:
+        raise OrderNotFoundError(str(order_id))
+    if not allow_confirmed_bot and (order.order_side != 1 or order.is_bot):
+        raise DeclineNotAllowedError(str(order_id))
+    if order.fee_excluded_at is not None:
+        return order  # already declined — no duplicate audit
+    order.fee_excluded_at = datetime.now(timezone.utc)
+    order.fee_excluded_by = actor_id
+    db.add(
+        AuditLog(
+            actor_user_id=actor_id,
+            action="broker_order.decline",
+            target_type="broker_order",
+            target_id=str(order.id),
+            before_json={"fee_excluded_at": None},
+            after_json={
+                "fee_excluded_at": order.fee_excluded_at.isoformat(),
+                "fee_excluded_by": str(actor_id),
+                "customer_id": str(order.customer_id) if order.customer_id else None,
+                "isin": order.isin,
+                "tracking_number": order.tracking_number,
+                "order_side": order.order_side,
+                "is_bot": order.is_bot,
+            },
+        )
+    )
+    await db.commit()
+    return order
+
+
+async def undo_decline(
+    db: AsyncSession,
+    order_id: UUID,
+    *,
+    actor_id: UUID,
+) -> BrokerOrder:
+    """Reverse a decline: clear the fee-exclusion columns, audit, commit.
+
+    No-op (no audit) if the order is already active. ``OrderNotFoundError`` on an
+    unknown id. Authority/ownership scoping is the route's job — an agent who
+    could decline an order may always undo it.
+    """
+    order = await db.get(BrokerOrder, order_id)
+    if order is None:
+        raise OrderNotFoundError(str(order_id))
+    if order.fee_excluded_at is None:
+        return order  # already active — no-op
+    prev_at = order.fee_excluded_at
+    prev_by = order.fee_excluded_by
+    order.fee_excluded_at = None
+    order.fee_excluded_by = None
+    db.add(
+        AuditLog(
+            actor_user_id=actor_id,
+            action="broker_order.undo_decline",
+            target_type="broker_order",
+            target_id=str(order.id),
+            before_json={
+                "fee_excluded_at": prev_at.isoformat() if prev_at else None,
+                "fee_excluded_by": str(prev_by) if prev_by else None,
+            },
+            after_json={"fee_excluded_at": None},
+        )
+    )
+    await db.commit()
+    return order
+
+
+async def list_declined_orders(
+    db: AsyncSession,
+    *,
+    agent_id: Optional[UUID] = None,
+    customer_id: Optional[UUID] = None,
+) -> list[BrokerOrder]:
+    """Currently-declined executed orders (``fee_excluded_at IS NOT NULL``), for
+    the Undo panel. ``build_fee_report`` filters these OUT, so they need their
+    own query. Scoped by ``BrokerOrder.agent_id`` (the same snapshot the report
+    filters the agent's orders on) and/or ``customer_id``. Newest decline first.
+    """
+    stmt = (
+        select(BrokerOrder)
+        .where(BrokerOrder.fee_excluded_at.isnot(None))
+        .order_by(desc(BrokerOrder.fee_excluded_at))
+        .limit(2000)
+    )
+    if agent_id is not None:
+        stmt = stmt.where(BrokerOrder.agent_id == agent_id)
+    if customer_id is not None:
+        stmt = stmt.where(BrokerOrder.customer_id == customer_id)
+    return list((await db.execute(stmt)).scalars().all())
+
+
 __all__ = [
     "FetchResult",
     "fetch_and_upsert_orders",
@@ -727,4 +860,9 @@ __all__ = [
     "refresh_orders_for_customers",
     "reconcile_all_recent",
     "repair_collision_rows",
+    "OrderNotFoundError",
+    "DeclineNotAllowedError",
+    "decline_order",
+    "undo_decline",
+    "list_declined_orders",
 ]

@@ -140,6 +140,19 @@ class BrokerOrder(Base):
     is_bot: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
+    # Per-order fee decline: an executed order an agent/admin marked as the
+    # customer's OWN manual trade (not the bot's) — excluded from the fee
+    # report's grouping + matching while ``fee_excluded_at`` is set (reversible).
+    # Deliberately OUT of broker_orders._MUTABLE_ON_CONFLICT so a re-fetch never
+    # re-bills it. ``fee_excluded_by`` is the actor, for the audit trail.
+    fee_excluded_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.TIMESTAMP(timezone=True), nullable=True
+    )
+    fee_excluded_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     raw_json: Mapped[Any] = mapped_column(JSONB, nullable=False)
     first_seen_at: Mapped[datetime] = mapped_column(
         sa.TIMESTAMP(timezone=True),
@@ -172,4 +185,10 @@ class BrokerOrder(Base):
         sa.Index("ix_broker_orders_placed_at", "placed_at"),
         sa.Index("ix_broker_orders_agent_id_placed_at", "agent_id", "placed_at"),
         sa.Index("ix_broker_orders_serial_number", "serial_number"),
+        # The declined complement is small; the report filters on IS NULL.
+        sa.Index(
+            "ix_broker_orders_fee_excluded_at",
+            "fee_excluded_at",
+            postgresql_where=text("fee_excluded_at IS NOT NULL"),
+        ),
     )

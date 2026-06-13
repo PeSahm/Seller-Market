@@ -131,6 +131,9 @@
 {% if tab == 'fees' %}
   {# ================= Profit & fee tab ================= #}
   {% set fr = fee_report %}
+  {% set is_admin = True %}
+  {% set decline_base = '/admin/bot-report/orders' %}
+  {% set current_url = request.url.path ~ ('?' ~ request.url.query if request.url.query else '') %}
 
   {# Per-agent fee % + fixed mark-to-market loss-fee override #}
   <details class="card" style="margin-bottom: 12px;">
@@ -246,7 +249,7 @@
           <th>Agent</th><th>Customer</th><th>Symbol / ISIN</th>
           <th>Buy date</th><th>Buy vol</th><th>Buy price</th>
           <th>Sold</th><th>Sell value</th><th>Realized</th>
-          <th>Fee %</th><th>Fee</th><th>Status</th>
+          <th>Fee %</th><th>Fee</th><th>Status</th><th>Orders / decline</th>
         </tr>
       </thead>
       <tbody>
@@ -274,6 +277,7 @@
             {% elif r.status == 'partial' %}<span class="badge badge--pending">partial</span>
             {% else %}<span class="badge">open / possible sell</span>{% endif %}
           </td>
+          <td>{% include "partials/fee_order_subgrid.html" %}</td>
         </tr>
         {% endfor %}
       </tbody>
@@ -325,6 +329,8 @@
     </div>
     {% endif %}
   {% endif %}
+
+  {% include "partials/fee_declined_panel.html" %}
 
 {% else %}
   {# ================= Bot orders tab ================= #}

@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.models.audit import AuditLog
+from app.models.broker_orders import BrokerOrder
 from app.models.customers import Customer
 from app.models.runs import StackRunLock
 from app.models.stacks import AgentStack
@@ -1327,7 +1328,16 @@ async def agent_fees(
         exclude=exclude,
     )
 
-    cust_ids = [cid for cid in report.per_customer if cid is not None]
+    # Declined orders are filtered OUT of the report, so they need their own
+    # query for the Undo panel (and to widen the customer-name lookup).
+    declined = await services_broker_orders.list_declined_orders(
+        db, agent_id=own_agent_id
+    )
+
+    cust_ids = list(
+        {cid for cid in report.per_customer if cid is not None}
+        | {o.customer_id for o in declined if o.customer_id is not None}
+    )
     customers_by_id: dict[UUID, Customer] = {}
     if cust_ids:
         res = await db.execute(select(Customer).where(Customer.id.in_(cust_ids)))
@@ -1336,11 +1346,96 @@ async def agent_fees(
     ctx = _ctx(request, user, current_tab="/agent/fees")
     ctx["fee_report"] = report
     ctx["customers_by_id"] = customers_by_id
+    ctx["declined_orders"] = declined
     ctx["grand_paid"] = sum((t.paid for t in report.per_customer.values()), 0)
     ctx["grand_remaining"] = sum(
         (t.remaining for t in report.per_customer.values()), 0
     )
     return templates.TemplateResponse("agent/fees.html", ctx)
+
+
+def _fees_safe_next(next_url: Optional[str]) -> str:
+    """Constrain the post-decline redirect to the agent fees page (no open
+    redirect) — mirrors admin._bot_report_safe_next."""
+    if (
+        next_url
+        and next_url.startswith("/agent/fees")
+        and "//" not in next_url
+        and "\\" not in next_url
+        and "\n" not in next_url
+    ):
+        return next_url
+    return "/agent/fees"
+
+
+async def _agent_order_or_404(
+    db: AsyncSession, user: User, order_id: UUID
+) -> "BrokerOrder":
+    """Load a broker order the caller may act on, else 404 (no UUID leak).
+
+    Agents may only touch orders of their OWN customers (current owner via the
+    customer row); admins-acting-as-agent may touch any.
+    """
+    order = await db.get(BrokerOrder, order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="order not found")
+    if user.role != "admin":
+        customer = (
+            await services_customers.get_customer(db, order.customer_id)
+            if order.customer_id is not None
+            else None
+        )
+        if customer is None or not _can_access_customer(user, customer):
+            raise HTTPException(status_code=404, detail="order not found")
+    return order
+
+
+@router.post("/fees/orders/{order_id}/decline")
+async def agent_decline_order(
+    order_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    next_url: str = Form("/agent/fees", alias="next"),
+):
+    """Decline an order (the customer's own manual trade) → excluded from the fee.
+
+    Agents may decline ONLY a time-window-guess buy (side==1, is_bot False) of
+    their own customers: a confirmed-bot order or a sell → 403; a foreign/unknown
+    order → 404. Recomputes the whole fees page via a 303 back."""
+    _require_agent_or_admin(user)
+    await _agent_order_or_404(db, user, order_id)
+    try:
+        await services_broker_orders.decline_order(
+            db, order_id, actor_id=user.id,
+            allow_confirmed_bot=(user.role == "admin"),
+        )
+    except services_broker_orders.DeclineNotAllowedError:
+        raise HTTPException(status_code=403, detail="this order cannot be declined")
+    except services_broker_orders.OrderNotFoundError:
+        raise HTTPException(status_code=404, detail="order not found")
+    target = _fees_safe_next(next_url)
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
+
+
+@router.post("/fees/orders/{order_id}/undo")
+async def agent_undo_decline(
+    order_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    next_url: str = Form("/agent/fees", alias="next"),
+):
+    """Reverse a decline on one of the agent's own customers' orders."""
+    _require_agent_or_admin(user)
+    await _agent_order_or_404(db, user, order_id)
+    await services_broker_orders.undo_decline(db, order_id, actor_id=user.id)
+    target = _fees_safe_next(next_url)
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
 
 
 # ---------------------------------------------------------------------------
