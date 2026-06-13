@@ -88,6 +88,7 @@
   {% if not stack_runs %}
     <p class="text-muted text-small">No runs yet for this stack.</p>
   {% else %}
+  <div class="table-scroll">
   <table class="table">
     <thead><tr>
       <th>Started</th>
@@ -122,6 +123,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% endif %}
 </section>
 {% endblock %}

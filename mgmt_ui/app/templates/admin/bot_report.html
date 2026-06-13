@@ -178,6 +178,7 @@
   {% else %}
     {# Per-customer: owed (computed) − paid (ledger) = remaining. Every customer
        with orders shows, so each is reachable for fee-% config + payment. #}
+    <div class="table-scroll">
     <table class="table" style="margin-bottom: 16px;">
       <thead>
         <tr><th>Customer</th><th>Agent</th><th># buys</th><th>Realized profit</th><th>Owed</th><th>Paid</th><th>Remaining</th><th></th></tr>
@@ -207,8 +208,10 @@
         </tr>
       </tbody>
     </table>
+    </div>
 
     {# Per-agent totals #}
+    <div class="table-scroll">
     <table class="table" style="margin-bottom: 16px;">
       <thead>
         <tr><th>Agent</th><th># buys</th><th>Matched buy value</th><th>Realized profit</th><th>Fee due</th><th>Open vol</th></tr>
@@ -233,8 +236,10 @@
         </tr>
       </tbody>
     </table>
+    </div>
 
     {# Per-buy detail #}
+    <div class="table-scroll">
     <table class="table">
       <thead>
         <tr>
@@ -273,6 +278,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
     {% if fr.unmatched_sell_qty %}
       <p class="text-small text-muted">
         {{ '{:,}'.format(fr.unmatched_sell_qty) }} sold share(s) had no matching bot buy in
@@ -289,6 +295,7 @@
       → the fixed per-agent loss fee. Recomputed live: a later real sell moves
       quantity from here into the FIFO fee.
     </p>
+    <div class="table-scroll">
     <table class="table">
       <thead>
         <tr><th>Customer</th><th>Symbol / ISIN</th><th>Open qty</th><th>Oldest buy</th><th>Avg buy</th><th>Price</th><th>Status</th><th>Fee</th></tr>
@@ -315,6 +322,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
     {% endif %}
   {% endif %}
 
@@ -330,6 +338,7 @@
       </p>
     </div>
   {% else %}
+  <div class="table-scroll">
   <table class="table">
     <thead>
       <tr>
@@ -370,6 +379,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% endif %}
 {% endif %}
 {% endblock %}

@@ -303,3 +303,122 @@ button { font: inherit; }
   color: var(--fg-muted);
   font-style: italic;
 }
+
+/* ==========================================================================
+   Responsive / mobile support. Additive, desktop-first.
+   Breakpoints: 800px (shell; matches .server-detail-grid query) and 600px.
+   ========================================================================== */
+
+/* Table scroll wrapper — wrap every <table class="table"> in
+   <div class="table-scroll">. Desktop no-op (table is width:100%; nowrap
+   applies only <=800px). */
+.table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain; /* don't trigger back-swipe nav mid-table */
+}
+
+/* Filter bar — children become flex items with a uniform 8px gap (the class
+   previously had no rule; children flowed as inline-blocks). No margin here
+   on purpose — templates carry their own. */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+/* Replaces inline style="min-width:220px" on customer-search inputs so the
+   600px query below can override it (inline styles can't be). */
+.input--wide { min-width: 220px; }
+
+/* Long unbreakable .kv values (URLs/tokens) blow the 1fr grid track past the
+   viewport (grid items default min-width:auto). */
+.kv dd { min-width: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 800px) {
+  /* Shell: drop the sidebar; the horizontal .tabs strip is the sole nav. */
+  .app-shell { display: block; }
+  .sidebar { display: none; }
+
+  .app-main { padding: var(--s4); }
+  .flash-region { padding: 0 var(--s4); }
+  .nav { padding: var(--s3) var(--s4); }
+  .app-footer { padding: var(--s3) var(--s4); }
+
+  /* Tabs: swipeable strip; hidden scrollbar; 24px right edge-fade via mask
+     (mask alpha is theme-independent, works in dark mode too). */
+  .tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    scroll-snap-type: x proximity;
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  }
+  .tabs::-webkit-scrollbar { display: none; height: 0; }
+  .tab {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: var(--s2);
+    scroll-snap-align: start;
+  }
+
+  /* Tables: natural cell width + scroll instead of crushing 8-12 columns
+     into 375px. Scoped to .table-scroll so a forgotten wrapper degrades to
+     today's crush, not page-level horizontal scroll. Stacked symbol/ISIN
+     cells keep their 2 lines (the inner div is block-level). */
+  .table-scroll .table th,
+  .table-scroll .table td { white-space: nowrap; }
+  /* Escape hatch for genuinely long free-text columns. */
+  .table-scroll .table .td-wrap { white-space: normal; min-width: 16rem; }
+
+  /* iOS Safari zooms the page when a focused control's font-size < 16px
+     (base html font-size is 14px). */
+  .input { font-size: 16px; }
+}
+
+@media (max-width: 600px) {
+  .app-main { padding: var(--s3); }
+  .flash-region { padding: 0 var(--s3); }
+
+  /* Header: brand on line 1; the role/user/actions group may wrap to line 2,
+     kept right-aligned. Long (incl. Persian) usernames ellipsis-truncate;
+     "Act as agent…" and Sign out always stay visible (dir="auto" on the
+     username element handles bidi ellipsis). */
+  .nav { flex-wrap: wrap; row-gap: var(--s1); }
+  .nav-right { flex-wrap: wrap; margin-left: auto; min-width: 0; }
+  .nav-user {
+    min-width: 0;
+    max-width: 45vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .page-header { flex-wrap: wrap; }
+  .header-actions { flex-wrap: wrap; }
+  .run-now-strip { flex-wrap: wrap; }
+  .form-actions { flex-wrap: wrap; }
+
+  /* Form rows stack. gap:0 because .field already has margin-bottom.
+     .field--narrow MUST reset flex-basis or 120px becomes a HEIGHT. */
+  .field-row { flex-direction: column; gap: 0; }
+  .field--narrow { flex: 0 0 auto; }
+
+  /* Filter inputs share rows flexibly (9-control bars become ~4 rows).
+     Direct children only — descendant .inputs inside column-flex .fields
+     would turn flex-basis into height. */
+  .filter-bar > .input { flex: 1 1 140px; min-width: 0; }
+  .filter-bar > .input--wide { flex: 1 1 220px; min-width: 0; }
+}
+
+@media (pointer: coarse) {
+  .btn { min-height: 40px; }
+  .btn--sm { min-height: 32px; }
+  .input { min-height: 40px; }
+  /* Touch tablets >800px still show the sidebar. */
+  .sidebar-link { padding-top: var(--s3); padding-bottom: var(--s3); }
+}

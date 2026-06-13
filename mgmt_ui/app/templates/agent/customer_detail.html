@@ -76,6 +76,7 @@
   {% if not trade_instructions %}
     <p class="text-muted">No trades yet. Click <strong>+ Add trade</strong> to register one.</p>
   {% else %}
+  <div class="table-scroll">
   <table class="table">
     <thead>
       <tr>
@@ -110,6 +111,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% endif %}
 </section>
 {% endblock %}

@@ -75,6 +75,7 @@
         {% endif %}
       </span>
     </div>
+    <div class="table-scroll">
     <table class="table">
       <thead>
         <tr>
@@ -100,6 +101,7 @@
       {% endfor %}
       </tbody>
     </table>
+    </div>
   </div>
   {% endif %}
 {% else %}
@@ -107,6 +109,7 @@
 {% endfor %}
 
 <h2 class="h2">Recent auto-balance actions</h2>
+<div class="table-scroll">
 <table class="table">
   <thead>
     <tr><th>When</th><th>Agent</th><th>Trigger</th><th>Customers moved</th></tr>
@@ -130,4 +133,5 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% endblock %}

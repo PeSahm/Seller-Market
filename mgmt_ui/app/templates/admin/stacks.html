@@ -19,7 +19,7 @@
    stacks (e.g. "force kill all of hamid's"). Auto-submits on change; the
    noscript button keeps it usable without JS. #}
 <form method="get" action="/admin/stacks"
-      style="display:flex; gap:8px; align-items:center; margin: 4px 0 10px;">
+      style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin: 4px 0 10px;">
   <label class="text-small text-muted" for="agent-filter">Agent</label>
   <select id="agent-filter" name="agent_id" onchange="this.form.submit()">
     <option value="">All agents</option>
@@ -75,6 +75,7 @@
     <button type="submit" class="btn btn--danger btn--sm">Force kill — all</button>
   </form>
 </div>
+<div class="table-scroll">
 <table class="table">
   <thead>
     <tr>
@@ -122,5 +123,6 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 {% endif %}
 {% endblock %}
