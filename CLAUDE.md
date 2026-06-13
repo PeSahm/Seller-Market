@@ -1123,3 +1123,37 @@ Drove the actual form POST flow against `uvicorn` + the dev Postgres (S17 recipe
 | — | Operator smoke of the live page | Open `/agent/bulk-trade-instructions` (and `/admin/...`), pick an ISIN, tick a few customers, Save → confirm the flash counts + the instructions land + each affected stack's config.ini re-pushed. Hard-refresh once if the nav tab is cached. |
 | — | `copy_customer_to_agent` multi-TI section_name | Same ""-placeholder-then-flush shape as the bug fixed here — would collide if a source customer has 2+ TIs whose names all start ""; harden by minting ids up front when convenient. |
 | — | Bulk page filter loses ticks on GET re-filter | The admin filter bar is a GET `<form>` (reloads, dropping ticks) — by design for v1; the in-page client-side quick-filter preserves ticks. Promote to client-side or carry selection if it bites. |
+
+---
+
+## Session 19 — per-order fee DECLINE (#149) + fee-detail UX polish (#150), both merged + deployed
+
+Operator: agents want to **see the orders behind each fee** and **decline a customer's own manual trades** (mis-attributed to the bot → inflating the fee). Shipped the decline feature (#149, `89f8fd4`, migration **0016**) then a UX polish pass (#150, `e8df2fb`) after the operator flagged the live page. **mgmt-UI on `e8df2fb`, alembic `0016_bo_fee_decline`, bots/trading hosts untouched.**
+
+### #149 — per-order fee decline + orders sub-grid (the feature)
+On both the agent **Fees** page and admin **Bot-report → Fees** tab: an expandable sub-grid per fee row (the bot buy + the sells that realized it) + a **Decline** action that excludes an order from the fee (recomputes live), reversible via a **Declined orders** panel (Undo). Operator decisions (confirmed via AskUserQuestion): **immediate + audited**, **agents (own) + admins**, **agents may decline ONLY a time-window-guess buy** (`order_side==1 AND is_bot==False`) — a manual order can never carry the bot's fire-log tag, so confirmed buys stay **locked** for agents; admins decline anything.
+- **Migration 0016** — `broker_orders.fee_excluded_at` (TIMESTAMPTZ) + `fee_excluded_by` (UUID FK users), nullable + partial index. **Kept OUT of `_MUTABLE_ON_CONFLICT`** so a GetOrders re-fetch never clears a decline and re-bills it (live-verified: a re-fetch upsert preserved the decline while updating `state_desc`).
+- **`build_fee_report`** filters declined orders in SQL (`WHERE fee_excluded_at IS NULL`) → totals auto-adjust; each `BuyFeeRow` enriched with `MatchedSell` details via a **group-local** `sells_by_tracking` (NOT the global `by_tracking` — `tracking_number` is a broker-DAY sequence, not globally unique, so the global map could attach a foreign group's sell).
+- **`services/broker_orders`** — `decline_order`/`undo_decline` (audited, idempotent, guardrail) + `list_declined_orders` (the report filters declined orders OUT, so the Undo panel needs its own query). Agent routes scope ownership via the order's customer (`_can_access_customer` → 404), guardrail → 403.
+- **CodeRabbit** (re-reviewed clean after fixes): added `"\r"` to `_fees_safe_next`/`_bot_report_safe_next` (CR-in-redirect-header), and a test asserting the SELECT carries `fee_excluded_at IS NULL` (pin the contract, not just the consequence). It declined-then-**cleared** its CHANGES_REQUESTED after the push → clean squash merge.
+
+### #150 — fee-detail UX polish (operator flagged the live page)
+Three issues: Decline was a faint `.btn--ghost` (looked like text); the orders rendered as a **nested `<table>` inside one cell** → forced the wide fee row far past the viewport (huge horizontal scroll); no customer filter for the agent. Fixes (CSS/JS/templates + one agent route param, **no migration, no service change**):
+- **Visible affordances:** Decline → `.btn--danger` (red, bordered); Undo → `.btn--primary`; locked → a `🔒 locked` chip.
+- **Master-detail layout:** split the sub-grid into `fee_row_actions.html` (main-row Decline/locked + an "orders" toggle) and `fee_order_legs.html` (a compact **wrapping leg list** — buy + matched sells, NOT a nested table), rendered in a full-colspan `<tr class="fee-detail" hidden>` beneath each fee. A small **delegated** `app.js` toggle reveals/hides it. Expanding no longer widens the page.
+- **Agent customer filter** on `/agent/fees` (`?customer_id=…`) scoping summary + detail + declined panel; ownership inherent (report pinned to the agent's id).
+
+### Learnings (Session 19)
+- **A nested `<table>` inside a table cell is a width anti-pattern** — it forces that column (and the whole row) as wide as the nested grid → runaway horizontal scroll. Move row-detail to a **full-colspan master-detail `<tr>`** with content that WRAPS; the detail then fills the existing table width instead of adding to it.
+- **Horizontal-scroll claims need a real browser to verify** — measured `document.documentElement.scrollWidth` before/after expanding via headless **msedge** (Playwright `channel="msedge"`; the Chromium CDN is geo-blocked): scrollWidth stayed at the viewport (1280→1280), proving the expand adds no width. Compile/render checks can't catch a layout-width regression.
+- **A UNIQUE-column durability claim (re-fetch preserves a decline) is only catchable with a real DB** — proven by calling the real `_upsert_order` against Postgres and asserting `fee_excluded_at` survived while a mutable column changed; the mocked unit tests can't enforce `ON CONFLICT`.
+- **`tracking_number` is a broker-DAY sequence** (not globally unique) — never key a cross-group lookup on it; build a group-local map (same trap surfaced in S16's corruption fix).
+- **The `gh pr merge` local-resync footgun re-hit** (S14/S17): the merge landed remotely (`merged:true`) but a GitHub connection blip failed the post-merge fast-forward, leaving the **local working tree on a stale ref** (files reverted to pre-PR content). Always re-`git fetch origin main && git reset --hard origin/main` and verify `git log -1` shows the merge commit; trust the API `merged` boolean, not the local state.
+- **CodeRabbit CAN clear its own CHANGES_REQUESTED** after you push fixes + tag `@coderabbitai review` (happened on #148 and #149) → a normal squash merge, no `--admin` needed.
+
+### Open follow-ups (Session 19)
+| # | Title | Why |
+|---|---|---|
+| — | **Cache-bust static assets** (re-flagged) | `app.css`/`app.js` are linked with no `?v=`; #150 changed both, so a browser that cached the old assets must **hard-refresh once** or the page looks unstyled / the orders toggle won't fire. A build-hash query or `Cache-Control: must-revalidate` kills this class. |
+| — | Net-basis fee toggle | If losses should offset gains: `fee_on_net` already computed by the matcher; report/UI switch only (carried from S16). |
+| — | `copy_customer_to_agent` multi-TI section_name | Same `""`-placeholder-then-flush collision shape; harden by minting ids up front (carried from S18). |
