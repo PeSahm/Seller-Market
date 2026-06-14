@@ -1205,3 +1205,63 @@ For each stack: DB-expected = active customers bound to it WITH ≥1 instruction
 | — | Prod Fernet `key.part2` missing | The prod mgmt container logs `Fernet key part2 not found at /etc/sm/key.part2 — using part1 alone (INSECURE for production)` on every customer op. Pre-existing, unrelated to this fix — worth a dedicated look (provision the part2 key file). |
 | — | 0-instruction active customers | ~16 fleet-wide are bound but have no trade instructions (agents add them in the morning — confirmed expected). Not a bug; surface a count if it ever masks a real omission. |
 | — | Auto-heal / alert on orphans | #151 surfaces orphans in the inbox; a proactive alert (health signal) when `active + stack_id NULL` appears would catch them without waiting for an operator to look. |
+
+---
+
+## Session 21 — auto-sell SPURIOUS SELL root-caused + fixed (#152 sustained-confirmation); disarm-then-patch; Actions-billing block; fleet rolled to `cfd8e31`
+
+Operator: *"You triggered the sell for one of auto sell but it was not true. I added another auto sell and I think something happened."* A REAL wrong SELL fired. Root-caused, fixed (PR **#152**, merged `72b68c9`), and after a GitHub-Actions billing block, rolled the **fixed image (`cfd8e31`) to all 15 stacks / 5 hosts** (verified). **Bot-only change; no mgmt/migration.** Operator manages re-arming the disarmed watch.
+
+### The bug (root cause) — fire-on-first-reading + a feed rebuild's junk value
+`auto_sell_monitor.on_buy_volume` SOLD on the **very first** sub-threshold reading. When the operator **added a second auto-sell**, the monitor did an **ISIN-set change → feed REBUILD** (the S14 reload semantics), and the rebuild delivered a **junk `buy_volume` (≈400)** as its first frame → instantly below threshold → **whole position sold at the floor**. A transient blip or a rebuild artifact could trigger a real liquidation. (The original سورنافود `IRT3SORF0001` wrong sell; operator still holds ~318,900 of the original ~1.3M — a trading decision left to them.)
+
+### The fix (PR #152, `auto_sell_monitor.py`) — SUSTAINED confirmation, push-evaluated
+- New module helper `_confirm_seconds()` = `float(os.environ["AUTO_SELL_CONFIRM_SECONDS"] or 5)` (clamped ≥0). `__init__` takes `mono_fn=time.monotonic` (injectable for tests), holds `_below_since: dict[(account,isin), float]` under `_below_lock`.
+- `on_buy_volume` rewrite: `buy_volume is None or > threshold` ⇒ `_clear_below(key)` + HOLD. `<= threshold` ⇒ `since = _below_since.setdefault(key, now)`; if `now - since < _confirm_seconds` ⇒ log **ARMING** + continue (NO fire); else ⇒ **TRIGGER** (sustained ≥ Ns) + `_trigger`. So a single sub-threshold frame NEVER fires — the queue must STAY thin for the window.
+- **`_rebuild_feed` clears `_below_since`** (the incident's exact disruption point) — a rebuild's first junk frame just (re)starts the timer; it can't fire.
+- Tests (`test_auto_sell_monitor.py`): `_Clock` (`.mono()`/`.advance()`), `_drive_fire` helper (push → advance 10s → push → fires). Regressions incl. **`test_transient_blip_then_recovery_does_not_fire`** (the verbatim incident: blip 400 then healthy 76M → NO sell) + `test_feed_rebuild_clears_confirm_timer`. Bot suite **203 passed**.
+
+### THE OPERATIONAL PLAYBOOK — "disarm, then patch" (deploy an auto-sell fix safely mid-market)
+The live-patch/redeploy of a bot **restarts it → re-establishes the feed**, which can fire a *legitimate* sell if the armed watch's queue is genuinely below threshold. Before touching an armed stack:
+1. **Read the live queue first** (`curl http://localhost:8077/queue?isin=<ISIN>` on the sidecar host) and compare to the armed threshold. Here `IRT1PLSH0001` live buy-queue was **64.6M, already BELOW its 95.97M trigger** — so a restart would have SOLD the position (correct per the arming, but a real trade the operator hadn't asked for in that moment). **Surfaced it via AskUserQuestion; never trigger an unannounced real-money trade.**
+2. **Disarm via a threshold-only change = ATOMIC SWAP (no feed rebuild, safe on the buggy code).** Lower the threshold *below* the current queue (set it to **1**, NOT 0/None — removing the target is an ISIN-set change ⇒ feed rebuild ⇒ the bug). Done through `update_trade_instruction(version, auto_sell_threshold=1)` + `push_config_ini_for_stack` (in the api container, `warm_family_cache` first). Bot log confirms **`armed N (feed kept) … changed=['<ISIN> 95971694->1']`** — "feed kept" = atomic swap, no rebuild, no fire. (Comparison is `fire when buy_volume <= threshold`, so threshold=1 with a 64.6M queue can never fire.)
+3. **Then live-patch + restart** — now safe (window may also be closed; threshold=1 anyway).
+
+### Live-patch (S13 pattern, used while the image build was blocked)
+`scp` the fixed `auto_sell_monitor.py` to the host → `docker cp <file> <container>:/app/auto_sell_monitor.py` → `docker restart <container>`. **The `docker cp` alone does nothing** — Python caches the imported module; the **restart** is what reloads it. Verify with `docker exec <c> grep -c _confirm_seconds /app/auto_sell_monitor.py` (0 before → 7 after) + the monitor boot log. Patched all 3 Mostafa stacks (the only auto-sell-capable/at-risk ones) as the interim fix.
+
+### GitHub Actions BILLING BLOCK — `startup_failure` on EVERY push workflow (new failure mode)
+The #152 merge's bot-image build hit **`startup_failure`** — and so did the next 4 push attempts (empty re-trigger commits). Diagnosis that nailed it as account-level (not my code, not a GH outage):
+- **ALL push workflows** (Docker Publish + Tests + market-data) `startup_failure` *simultaneously* starting exactly at the merge; every earlier push + the PR runs were fine.
+- `githubstatus.com` API: **all components operational, no incidents.**
+- `git diff <last-good>..HEAD -- .github/workflows/` = **empty** (workflows byte-identical); the merge never touched `.github/`; `gh api .../actions/permissions` ⇒ `enabled:true`.
+- ⇒ **Actions minutes/spending limit exhausted on the (private) repo.** `startup_failure` = the run can't even be *created* (no jobs), and the run **can't be re-run** (`gh run rerun` ⇒ "cannot be retried"). **The only re-trigger is a new push** (docker-publish.yml has no `workflow_dispatch`). Operator cleared billing → the *next* push (`cfd8e31`) **built green** (billing changes take a few minutes to propagate — the push right after "i fixed that" still failed; the one ~minutes later worked).
+- **Lesson: a private-repo build that `startup_failure`s on every push while GitHub is green = Actions billing/minutes. Operator-only fix; don't chase the workflow YAML.**
+
+### Fleet rollout to `cfd8e31` (the durable fix) — all 15 verified
+- **Image digest** `sha256:f4f12c49…`. ghcr was reachable from PouyanIt this time (bare `/v2/` curl returned 000 but the authenticated `docker pull` worked — intermittent, as always); the other 4 hosts staged via **mirror-by-digest** (`docker pull ghcr-mirror.liara.ir/pesahm/seller-market@sha256:…` then retag `ghcr.io/…:latest`). Pull-by-DIGEST sidesteps the stale-`:latest` mirror trap; verified `revision==cfd8e31` AND `grep -c _confirm_seconds /app/auto_sell_monitor.py == 7` **in the image** on every host.
+- **`redeploy_stack` ×15** (api container, `warm_family_cache` first, autobalance left ON — the standard S12–15 path). All `ok=True`.
+- **Verification (every container, all clean):** `rev=cfd8e31`, `running:healthy`, `fix=7`, `sentinel=1` (config.ini hot-reload sentinel), `trig=0` (no spurious sell), armed counts correct. The redeploy **superseded the live-patch** (fix now image-based, survives recreates).
+
+### CURRENT FLEET (re-derived from `agent_stacks`/`servers` — changed AGAIN since S20) — 15 stacks / 5 hosts
+| Host | Name | ssh_user | Stacks |
+|---|---|---|---|
+| `5.10.248.55` | PouyanIt-linux | root | Mostafa `83619dcd`, Saeed `c13868e6`, Sase `6b577238`, amin `6cca9219`, hamid `2f139b2b`, hamid2 `e1788af3` (6) |
+| `185.232.152.246` | Tebyan-Saeed | user17290985243902 | Mostafa `c6f3b84a`, Saeed `0fceec29`, amin `7bd17604`, hamid `724a310a` (4) |
+| `185.232.152.177` | Tebyan2 | user17290985243902 | Mostafa `221318e3`, hamid `faf2d8f1` (2) |
+| `185.232.152.189` | Tebyan3 | user17290985243902 | hamid `4ec045d9` (1) |
+| `45.139.10.192` | ParsPack01 | root | Sase `145b1e37`, amin `d5b28c3c` (2) |
+
+**`185.232.152.180` (Tebyan4) is GONE** (deprovisioned, per S20). Server NAMES remap hosts constantly — `Tebyan2`=`.177`, `Tebyan3`=`.189`, `Tebyan-Saeed`=`.246`. **Always re-derive from the DB.** Agent→dir(uuid): Mostafa `89bb891e`, hamid `ca0a9617`, Saeed `222fd535`, amin `5a625231`, Sase `05684fc8`, hamid2 `e0bdfd4d` → container `sm-agent-<uuid>-bot`.
+
+### State left for the operator
+- **`IRT1PLSH0001` (Mostafa/ayandeh, stack `83619dcd`) is DISARMED at threshold=1** (auto_sell_only=True; shows "armed 1" but can't fire). **Re-arming is now safe** (the fixed code can't junk-fire) — but its live queue was 64.6M < 95.97M, so restoring threshold `95,971,694` WILL sell that position at the next open (the configured intent). Operator re-arms deliberately via the trade-instruction form. **Operator said they manage the remaining auto-sell.**
+
+### Learnings (Session 21)
+- **An auto-sell deploy is a potential live trade.** Restart/redeploy re-establishes the feed; an armed watch already below threshold fires on restart. ALWAYS read the live queue vs threshold first, and **disarm via a threshold-only atomic-swap (set to 1) — never remove the target (rebuild ⇒ the very bug you're fixing)** — before touching an armed stack mid-market.
+- **`docker cp` a `.py` into a running bot is a no-op without `docker restart`** (module already imported). The S13 live-patch is cp **and** restart.
+- **`startup_failure` on all push workflows + GitHub green + unchanged workflow YAML = Actions billing/minutes.** Can't `gh run rerun` it; re-trigger only via a new push; billing fixes take minutes to propagate.
+- **Empty commits (`git commit --allow-empty`) are the clean re-trigger** for a push-only workflow — never force-push `main`.
+- **Mirror-by-digest + verify `revision==<sha>` AND the fix-marker IN THE IMAGE** before redeploy; "deployed/up" is not proof — verify the running container's `rev` + `grep` of the live file (got all 15: `rev=cfd8e31`, `fix=7`).
+- **The fleet keeps reshuffling** — 15/5 now (was 14/6 in S13/S15, "6 hosts" in S20). Re-derive host/stack/dir from `agent_stacks`/`servers` every time; trust no prose or server NAME.
+- This Windows host's **github API connectivity flaps** (gh `run view`/`api` intermittently "connection refused" while `run list`/`git push` work) — retry; the build state is still readable via `gh run list`.
