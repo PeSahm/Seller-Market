@@ -124,6 +124,21 @@ def parse_window(window: str) -> tuple[dtime, dtime]:
         return dtime(sh, sm), dtime(eh, em)
 
 
+# Seconds the buy-queue must stay <= threshold (confirmed by a LATER push) before
+# a sell fires. A genuine thinning queue holds below the threshold for a sustained
+# window; a transient junk reading from a feed rebuild / WS reconnect / sidecar
+# calibration lag is a sub-second blip (e.g. buy_volume=400 when the real queue is
+# 76M — the live incident). Requiring persistence kills the blip without missing a
+# real thinning. Env-overridable (AUTO_SELL_CONFIRM_SECONDS); 0 disables (legacy
+# fire-on-first-reading) for emergencies only.
+def _confirm_seconds() -> float:
+    try:
+        v = float(os.environ.get("AUTO_SELL_CONFIRM_SECONDS", "5"))
+        return v if v >= 0 else 5.0
+    except (TypeError, ValueError):
+        return 5.0
+
+
 class DayState:
     """Idempotent per-day ``(account, isin) → done`` latch, persisted to JSONL.
 
@@ -194,6 +209,7 @@ class AutoSellMonitor:
         day_state: Optional[DayState] = None,
         sleep: Callable[[float], None] = time.sleep,
         status_dir: str = _RUN_RESULTS_DIR,
+        mono_fn: Callable[[], float] = time.monotonic,
     ):
         self.targets = targets
         self.market_data_url = market_data_url
@@ -201,6 +217,14 @@ class AutoSellMonitor:
         self._now = now_fn
         self._start, self._end = parse_window(window or os.environ.get("AUTO_SELL_WINDOW", ""))
         self._sleep = sleep
+        # Sustained-below confirmation (incident fix): a single sub-threshold push
+        # must NOT fire — the queue has to STAY <= threshold for _confirm_seconds.
+        # ``_mono`` is a monotonic clock (injected in tests) independent of the
+        # wall-clock ``now_fn`` (which only gates market hours).
+        self._mono = mono_fn
+        self._confirm_seconds = _confirm_seconds()
+        self._below_since: dict[tuple[str, str], float] = {}
+        self._below_lock = threading.Lock()
         # Rotate the per-day latch when the calendar day changes (the monitor
         # process stays up across midnight). An injected day_state (tests) is
         # used as-is and never rotated.
@@ -241,20 +265,48 @@ class AutoSellMonitor:
         t = self._now().time()
         return self._start <= t <= self._end
 
+    def _clear_below(self, key: tuple[str, str]) -> None:
+        """Forget any in-progress sub-threshold confirmation for ``key``."""
+        with self._below_lock:
+            self._below_since.pop(key, None)
+
     def on_buy_volume(self, isin: str, buy_volume: Optional[int]) -> None:
-        """Handle one pushed buy-queue update for ``isin`` (None ⇒ feed down → HOLD)."""
+        """Handle one pushed buy-queue update for ``isin`` (None ⇒ feed down → HOLD).
+
+        A sell fires ONLY when ``buy_volume <= threshold`` has PERSISTED for
+        ``_confirm_seconds`` (confirmed by a later push). A single sub-threshold
+        reading — e.g. a junk value delivered mid feed-rebuild — arms the timer
+        but cannot fire; the next healthy reading clears it. This is the fix for
+        the spurious sell where a feed rebuild handed the monitor buy_volume=400
+        and it sold instantly while the real queue was 76M.
+        """
         for tgt in self._by_isin.get(isin, []):
+            key = (tgt.account, tgt.isin)
             if not self.market_open():
+                self._clear_below(key)
                 continue
             if self._ds().is_done(tgt.account, tgt.isin):
                 continue
-            if buy_volume is None:
-                # Fail-safe: a missing / stale feed must NEVER trigger a sell.
+            if buy_volume is None or buy_volume > tgt.threshold:
+                # Feed down/stale (None) OR queue healthy → reset the confirm
+                # timer. The condition must be CONTINUOUSLY met to fire.
+                self._clear_below(key)
                 continue
-            if buy_volume <= tgt.threshold:
-                logger.info("auto-sell TRIGGER %s %s@%s: buy_volume=%s <= threshold=%s",
-                            tgt.isin, tgt.account, tgt.broker_code, buy_volume, tgt.threshold)
-                self._trigger(tgt)
+            # buy_volume <= threshold — start (or continue) the confirmation timer.
+            now = self._mono()
+            with self._below_lock:
+                since = self._below_since.setdefault(key, now)
+            elapsed = now - since
+            if elapsed < self._confirm_seconds:
+                logger.info("auto-sell ARMING %s %s@%s: buy_volume=%s <= threshold=%s "
+                            "(confirming %.1f/%.0fs — not selling yet)",
+                            tgt.isin, tgt.account, tgt.broker_code, buy_volume,
+                            tgt.threshold, elapsed, self._confirm_seconds)
+                continue
+            logger.info("auto-sell TRIGGER %s %s@%s: buy_volume=%s <= threshold=%s "
+                        "(sustained >= %.0fs)", tgt.isin, tgt.account, tgt.broker_code,
+                        buy_volume, tgt.threshold, self._confirm_seconds)
+            self._trigger(tgt)
 
     def _trigger(self, tgt: AutoSellTarget) -> None:
         # One ladder per (account, isin) at a time. A feed rebuild can briefly
@@ -314,6 +366,11 @@ class AutoSellMonitor:
 
     def _rebuild_feed(self, isins: list[str]) -> None:
         """Stop the current feed and start a fresh one for ``isins`` (new gen)."""
+        # A rebuild is the exact disruption that delivered the junk value in the
+        # incident — drop any in-progress confirmation so the fresh feed must
+        # re-establish a SUSTAINED sub-threshold reading from scratch.
+        with self._below_lock:
+            self._below_since.clear()
         new_gen = self._current_gen + 1
         feed = None
         if self.market_data_url and isins:

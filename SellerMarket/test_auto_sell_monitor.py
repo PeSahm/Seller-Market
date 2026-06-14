@@ -15,6 +15,26 @@ from auto_sell_monitor import AutoSellMonitor, AutoSellTarget, DayState, load_au
 TEHRAN = timezone(timedelta(hours=3, minutes=30))
 
 
+class _Clock:
+    """Injectable monotonic clock for the sustained-confirmation timer."""
+    def __init__(self, t: float = 1000.0):
+        self.t = t
+
+    def mono(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+def _drive_fire(mon, isin, vol):
+    """Push a sub-threshold reading, let the confirm window elapse, push again →
+    the monitor confirms a SUSTAINED thinning and fires."""
+    mon.on_buy_volume(isin, vol)          # arms the confirm timer (no sell)
+    mon._test_clock.advance(10)           # past _confirm_seconds
+    mon.on_buy_volume(isin, vol)          # still <= threshold → confirmed → fires
+
+
 # ---------------------------------------------------------------------------
 # helpers: ws_base / parse_buy_volume / fire-log
 # ---------------------------------------------------------------------------
@@ -126,6 +146,7 @@ def _monitor(targets, ctx, *, hour=10, day_state=None, send_status=200):
     direct_sell.send_prepared_order = fake_send
 
     adapter = _FakeAdapter(ctx)
+    clock = _Clock()
     mon = AutoSellMonitor(
         targets,
         build_adapter=lambda _t: adapter,
@@ -133,7 +154,9 @@ def _monitor(targets, ctx, *, hour=10, day_state=None, send_status=200):
         window="09:00-12:30",
         day_state=day_state or DayState("test", directory=tempfile.mkdtemp()),
         sleep=lambda _s: None,
+        mono_fn=clock.mono,
     )
+    mon._test_clock = clock
     return mon, adapter, sends, (direct_sell, _orig)
 
 
@@ -147,12 +170,66 @@ def test_trigger_sells_when_below_threshold_and_marks_done(tmp_path, monkeypatch
     ds = DayState("t", directory=str(tmp_path))
     mon, adapter, sends, (ds_mod, orig) = _monitor([_TGT], ctx, day_state=ds)
     try:
-        mon.on_buy_volume("IRO1X", 400)   # 400 <= 500 → trigger
+        _drive_fire(mon, "IRO1X", 400)    # 400 <= 500 SUSTAINED → trigger
         assert ctx.prepared == [100] * 10 + [1]   # full ladder
         assert len(sends) == 11
         assert ds.is_done("u", "IRO1X") is True    # latched done after flat
     finally:
         ds_mod.send_prepared_order = orig
+
+
+def test_single_sub_threshold_reading_does_not_fire(tmp_path, monkeypatch):
+    # A lone sub-threshold push must NOT sell — it only arms the confirm timer.
+    ctx = _FakeCtx([1001, 0])
+    monkeypatch.setattr(order_fire_log, "emit_order_fire", lambda *a, **k: None)
+    mon, adapter, sends, (ds_mod, orig) = _monitor([_TGT], ctx)
+    try:
+        mon.on_buy_volume("IRO1X", 400)            # 400 <= 500 but first reading
+        assert sends == [] and adapter.opened == 0  # no sell yet
+    finally:
+        ds_mod.send_prepared_order = orig
+
+
+def test_transient_blip_then_recovery_does_not_fire(tmp_path, monkeypatch):
+    # THE incident regression: a feed rebuild delivered buy_volume=400 (junk) for
+    # the watch while the REAL queue was ~76M. A sub-threshold blip immediately
+    # followed by a healthy reading must NEVER sell — even after time passes.
+    ctx = _FakeCtx([1318900, 0])
+    monkeypatch.setattr(order_fire_log, "emit_order_fire", lambda *a, **k: None)
+    mon, adapter, sends, (ds_mod, orig) = _monitor([_TGT], ctx)
+    try:
+        mon.on_buy_volume("IRO1X", 400)            # junk blip <= 500 → arms timer
+        mon._test_clock.advance(10)                # time passes
+        mon.on_buy_volume("IRO1X", 76_000_000)     # real, healthy queue → clears timer
+        assert sends == [] and adapter.opened == 0  # NO sell
+        mon._test_clock.advance(10)
+        mon.on_buy_volume("IRO1X", 400)            # a fresh lone blip re-arms only
+        assert sends == [] and adapter.opened == 0  # still no sell
+    finally:
+        ds_mod.send_prepared_order = orig
+
+
+def test_sustained_below_fires_after_confirm_window(tmp_path, monkeypatch):
+    # A genuine thinning: <= threshold held across the confirm window → sells.
+    ctx = _FakeCtx([1001, 0])
+    monkeypatch.setattr(order_fire_log, "emit_order_fire", lambda *a, **k: None)
+    mon, adapter, sends, (ds_mod, orig) = _monitor([_TGT], ctx)
+    try:
+        mon.on_buy_volume("IRO1X", 400)            # arms
+        assert sends == []                          # not yet
+        mon._test_clock.advance(6)                  # past the 5s window
+        mon.on_buy_volume("IRO1X", 450)            # still <= 500 → confirmed → fires
+        assert adapter.opened == 1 and len(sends) == 11
+    finally:
+        ds_mod.send_prepared_order = orig
+
+
+def test_feed_rebuild_clears_confirm_timer(tmp_path):
+    mon, cfg = _sup_monitor(tmp_path, _cfg_text(_armed_section("s", "IRO1A", 500)))
+    mon.on_buy_volume("IRO1A", 100)                 # arm the confirm timer
+    assert ("u", "IRO1A") in mon._below_since
+    mon._rebuild_feed(["IRO1A"])                     # a rebuild (the incident trigger)
+    assert mon._below_since == {}                    # timer dropped → re-confirm from scratch
 
 
 def test_no_trigger_above_threshold(tmp_path, monkeypatch):
@@ -251,6 +328,7 @@ def _sup_monitor(tmp_path, content):
     _FakeFeed.instances.clear()
     cfg = tmp_path / "config.ini"
     cfg.write_text(content, encoding="utf-8")
+    clock = _Clock()
     mon = AutoSellMonitor(
         [],
         market_data_url="http://md:8077",
@@ -260,7 +338,9 @@ def _sup_monitor(tmp_path, content):
         day_state=DayState("t", directory=str(tmp_path)),
         sleep=lambda _s: None,
         status_dir=str(tmp_path),
+        mono_fn=clock.mono,
     )
+    mon._test_clock = clock
     mon._feed_factory = _FakeFeed
     # mirror run_supervised's initial establishment without the infinite loop
     c = mon._read_content(str(cfg))
@@ -370,7 +450,7 @@ def test_daystate_preserved_no_refire_after_threshold_raise(tmp_path, monkeypatc
     monkeypatch.setattr(order_fire_log, "emit_order_fire", lambda *a, **k: None)
     mon, cfg = _sup_monitor(tmp_path, _cfg_text(_armed_section("s", "IRO1A", 500)))
     ds_before = mon._day_state
-    mon.on_buy_volume("IRO1A", 400)                    # fires → latches done
+    _drive_fire(mon, "IRO1A", 400)                     # sustained → fires → latches done
     assert mon._day_state.is_done("u", "IRO1A")
     cfg.write_text(_cfg_text(_armed_section("s", "IRO1A", 9000)), encoding="utf-8")
     assert mon._tick(str(cfg)) == "applied"
