@@ -3687,6 +3687,7 @@ async def admin_trades(
     Same defensive parse — non-numeric input is dropped rather than
     surfaced as a 422.
     """
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     from datetime import datetime
 
     def _parse_date_or_none(s):
@@ -3783,6 +3784,7 @@ async def admin_trade_detail(
     template can render it in a ``<pre class="log-viewer">``. ``run_id``
     can be null (legacy / out-of-band trades) so the run lookup is gated.
     """
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     trade = await services_trades.get_trade(db, trade_id)
     if trade is None:
         raise HTTPException(status_code=404, detail="trade not found")
@@ -3913,6 +3915,7 @@ async def admin_bot_report(
     "fees" (per-buy profit/fee). Defensive param parsing mirrors admin_trades:
     garbage degrades to "no filter", never 422.
     """
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     p_agent = _bot_report_parse_uuid(agent_id)
     p_customer = _bot_report_parse_uuid(customer_id)
     p_since, p_until, p_ws, p_we, exclude_set, exclude_raw = await _bot_report_filters(

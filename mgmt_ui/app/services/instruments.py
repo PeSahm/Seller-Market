@@ -26,6 +26,7 @@ the app's startup lifespan and at the top of the ISIN-grid routes via
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Optional
@@ -38,6 +39,10 @@ logger = logging.getLogger(__name__)
 # None == never loaded. A dict (possibly empty) == loaded.
 _CACHE: Optional[dict[str, dict]] = None
 _LOADED_AT: float = 0.0
+# Serialises the (stale/cold → re-warm) path so a burst of concurrent requests
+# at cache-expiry doesn't fire N parallel sidecar+DB warms (the auto-sell page
+# polls every 3s, possibly from several sessions). Recreated by _reset() in tests.
+_WARM_LOCK = asyncio.Lock()
 
 _TTL_SECONDS = 6 * 3600          # a populated cache refreshes every 6h
 _EMPTY_RETRY_SECONDS = 300       # an empty/failed cache retries sooner (recover fast)
@@ -51,10 +56,16 @@ def set_instruments_map(mapping: dict[str, dict]) -> None:
 
 
 def _reset() -> None:
-    """Drop the cache back to the cold state (test isolation)."""
-    global _CACHE, _LOADED_AT
+    """Drop the cache back to the cold state (test isolation).
+
+    Also recreates ``_WARM_LOCK`` so each test binds a fresh lock to its own
+    event loop (a module-level ``asyncio.Lock`` reused across per-test loops
+    raises "bound to a different event loop").
+    """
+    global _CACHE, _LOADED_AT, _WARM_LOCK
     _CACHE = None
     _LOADED_AT = 0.0
+    _WARM_LOCK = asyncio.Lock()
 
 
 def _is_loaded() -> bool:
@@ -134,9 +145,15 @@ async def warm_instruments(db=None) -> dict[str, dict]:
 
 
 async def ensure_instruments(db=None) -> dict[str, dict]:
-    """Warm on first use; re-warm if stale. Cheap no-op when warm + fresh."""
+    """Warm on first use; re-warm if stale. Cheap no-op when warm + fresh.
+
+    The re-warm is serialised under ``_WARM_LOCK`` with a double-check so a burst
+    of concurrent requests at expiry triggers exactly one warm, not N.
+    """
     if not _is_loaded() or _is_stale():
-        await warm_instruments(db)
+        async with _WARM_LOCK:
+            if not _is_loaded() or _is_stale():   # re-check: another caller may have warmed
+                await warm_instruments(db)
     assert _CACHE is not None
     return _CACHE
 

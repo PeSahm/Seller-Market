@@ -1302,6 +1302,7 @@ async def agent_fees(
     the whole fleet. Optional ``customer_id`` filter narrows to one customer.
     Recording payments stays admin-only (#116)."""
     _require_agent_or_admin(user)
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     own_agent_id = None if user.role == "admin" else user.id
 
     # Lenient: a bad UUID in the query string → "no filter" (never 422). Ownership
@@ -2387,6 +2388,7 @@ async def agent_trades(
     agent_runs route.
     """
     _require_agent_or_admin(user)
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     from datetime import datetime
 
     def _parse_date_or_none(s: Optional[str]):
@@ -2490,6 +2492,7 @@ async def agent_trade_detail(
     UUID cannot tell whether it exists.
     """
     _require_agent_or_admin(user)
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     trade = await services_trades.get_trade(db, trade_id)
     if trade is None:
         raise HTTPException(status_code=404, detail="trade not found")

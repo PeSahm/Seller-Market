@@ -11,6 +11,8 @@ the `broker_orders` supplement rows. The contracts under test:
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from markupsafe import Markup
 
@@ -128,6 +130,24 @@ async def test_ensure_rewarms_only_when_stale(monkeypatch):
     clock["t"] += instruments._TTL_SECONDS + 1        # age past TTL
     await instruments.ensure_instruments(_FakeDB())   # stale → re-warm
     assert calls["n"] == 2
+
+
+async def test_concurrent_ensure_warms_once(monkeypatch):
+    # Two concurrent ensures on a cold cache must trigger exactly ONE warm
+    # (the _WARM_LOCK + double-check), not a thundering herd.
+    calls = {"n": 0}
+
+    async def _fake(_session):
+        calls["n"] += 1
+        await asyncio.sleep(0)   # yield so the second ensure reaches the lock
+        return [{"isin": "AAA", "symbol": "س", "name": "n"}]
+
+    monkeypatch.setattr(mdc, "get_instruments", _fake)
+    await asyncio.gather(
+        instruments.ensure_instruments(_FakeDB()),
+        instruments.ensure_instruments(_FakeDB()),
+    )
+    assert calls["n"] == 1
 
 
 # --------------------------------------------------------------------------- #
