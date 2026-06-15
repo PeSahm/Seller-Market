@@ -83,9 +83,7 @@
     {% set cust = customers_by_id.get(o.customer_id) %}
     <tr>
       <td class="text-small" dir="auto">{{ cust.display_name if cust else o.account_username }}</td>
-      <td>
-        {% if o.symbol %}<code class="text-small" dir="auto">{{ o.symbol }}</code> {% endif %}<code class="text-small">{{ o.isin }}</code>
-      </td>
+      <td>{{ symbol_label(o.isin, symbol=o.symbol, title=o.symbol_title) }}</td>
       <td class="text-small text-muted">{{ o.placed_at.strftime('%Y-%m-%d %H:%M:%S') if o.placed_at else '—' }}</td>
       <td class="text-small">{{ '{:,}'.format(o.executed_volume) }}</td>
       <td class="text-small">{{ '{:,.0f}'.format(o.price) if o.price is not none else '—' }}</td>

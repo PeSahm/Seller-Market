@@ -260,10 +260,7 @@
         <tr>
           <td dir="auto" class="text-small">{{ ag.username if ag else '—' }}</td>
           <td class="text-small" dir="auto">{{ cust.display_name if cust else o.account_username }}</td>
-          <td>
-            {% if o.symbol %}<code class="text-small" dir="auto">{{ o.symbol }}</code><div class="text-small text-muted"><code>{{ o.isin }}</code></div>
-            {% else %}<code class="text-small">{{ o.isin }}</code>{% endif %}
-          </td>
+          <td>{{ symbol_label(o.isin, symbol=o.symbol, title=o.symbol_title) }}</td>
           <td class="text-small text-muted">{{ o.placed_at.strftime('%Y-%m-%d %H:%M:%S') if o.placed_at else '—' }}</td>
           <td class="text-small">{{ '{:,}'.format(o.executed_volume) }}</td>
           <td class="text-small">{{ '{:,.0f}'.format(o.price) if o.price is not none else '—' }}</td>
@@ -310,10 +307,7 @@
         {% set cust = customers_by_id.get(v.customer_id) %}
         <tr>
           <td dir="auto" class="text-small">{{ cust.display_name if cust else '—' }}</td>
-          <td>
-            {% if v.symbol %}<code class="text-small" dir="auto">{{ v.symbol }}</code><div class="text-small text-muted"><code>{{ v.isin }}</code></div>
-            {% else %}<code class="text-small">{{ v.isin }}</code>{% endif %}
-          </td>
+          <td>{{ symbol_label(v.isin, symbol=v.symbol) }}</td>
           <td class="text-small">{{ '{:,}'.format(v.open_qty) }}</td>
           <td class="text-small text-muted">{{ v.oldest_buy_date.isoformat() if v.oldest_buy_date else '—' }}</td>
           <td class="text-small">{{ '{:,.0f}'.format(v.avg_buy_price) }}</td>
@@ -365,10 +359,7 @@
           {% if cust %}{{ cust.display_name }}{% else %}{{ o.account_username }}{% endif %}
           {% if o.is_bot %}<span class="badge badge--up" title="bot-fired">bot</span>{% endif %}
         </td>
-        <td>
-          {% if o.symbol %}<code class="text-small" dir="auto">{{ o.symbol }}</code><div class="text-small text-muted"><code>{{ o.isin }}</code></div>
-          {% else %}<code class="text-small">{{ o.isin }}</code>{% endif %}
-        </td>
+        <td>{{ symbol_label(o.isin, symbol=o.symbol, title=o.symbol_title) }}</td>
         <td>
           {% if o.order_side == 1 %}<span class="badge badge--up">Buy</span>
           {% elif o.order_side == 2 %}<span class="badge badge--down">Sell</span>

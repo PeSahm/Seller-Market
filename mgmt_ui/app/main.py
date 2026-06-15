@@ -127,6 +127,15 @@ def create_app() -> FastAPI:
         except Exception:
             logger.exception("failed to warm broker family cache at startup")
 
+    @app.on_event("startup")
+    async def _warm_instrument_cache() -> None:
+        from app.services.instruments import warm_instruments
+
+        try:
+            await warm_instruments()
+        except Exception:
+            logger.exception("failed to warm instrument cache at startup")
+
     # --------------------------------------------------------------
     # Background workers
     # --------------------------------------------------------------

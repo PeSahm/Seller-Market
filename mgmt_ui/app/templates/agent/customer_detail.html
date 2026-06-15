@@ -89,7 +89,7 @@
     <tbody>
       {% for ti in trade_instructions %}
       <tr>
-        <td><code>{{ ti.isin }}</code></td>
+        <td>{{ symbol_label(ti.isin) }}</td>
         <td>
           {% if ti.side == 1 and ti.auto_sell_only %}<span class="badge badge--pending" title="watch-only — no order at market open">Auto-sell only</span>
           {% elif ti.side == 1 %}<span class="badge badge--up">Buy</span>

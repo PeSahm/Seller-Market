@@ -26,7 +26,7 @@
       {% if trade.is_done %}<span class="badge badge--up">done</span>
       {% else %}<span class="badge badge--pending">pending</span>{% endif %}
       &middot;
-      <code class="text-small" dir="auto">{{ trade.symbol or trade.isin }}</code>
+      <code class="text-small" dir="auto">{{ symbol_text(trade.isin, symbol=trade.symbol) or trade.isin }}</code>
     </p>
   </div>
   <div class="header-actions">
@@ -96,8 +96,9 @@
   <dl class="kv">
     <dt>Symbol</dt>
     <dd>
-      {% if trade.symbol %}
-        <code dir="auto">{{ trade.symbol }}</code>
+      {% set _sym = symbol_text(trade.isin, symbol=trade.symbol) %}
+      {% if _sym %}
+        <code dir="auto">{{ _sym }}</code>
       {% else %}
         <span class="text-muted">&mdash;</span>
       {% endif %}
