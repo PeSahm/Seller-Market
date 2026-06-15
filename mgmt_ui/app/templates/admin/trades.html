@@ -171,14 +171,7 @@
         {% endif %}
       </td>
       <td><code class="text-small" dir="ltr">{{ t.tracking_number }}</code></td>
-      <td>
-        {% if t.symbol %}
-          <code class="text-small" dir="auto">{{ t.symbol }}</code>
-          <div class="text-small text-muted"><code>{{ t.isin }}</code></div>
-        {% else %}
-          <code class="text-small">{{ t.isin }}</code>
-        {% endif %}
-      </td>
+      <td>{{ symbol_label(t.isin, symbol=t.symbol) }}</td>
       <td>
         {% if t.side == 1 %}<span class="badge badge--up">Buy</span>
         {% elif t.side == 2 %}<span class="badge badge--down">Sell</span>

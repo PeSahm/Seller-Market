@@ -16,6 +16,20 @@ templates = Jinja2Templates(
     directory=str(Path(__file__).resolve().parent.parent / "templates")
 )
 
+# `symbol_label(isin, symbol=None, title=None)` — resolves an ISIN to a friendly
+# symbol/name (warm in-memory cache) and renders "symbol + muted ISIN". Registered
+# once here so every template rendered through this shared engine (admin.py,
+# agent.py, brokers_admin.py and all their partials) can call it. Sync + graceful
+# (falls back to the bare ISIN); the cache is warmed at startup and refreshed via
+# `ensure_instruments` at the top of the ISIN-grid routes.
+from app.services.instruments import render_symbol_label, symbol_text  # noqa: E402
+
+templates.env.globals["symbol_label"] = render_symbol_label
+# `symbol_text(isin, symbol=None, title=None)` — the same resolution as
+# `symbol_label` but returns a plain label string (no HTML) for inline/header
+# contexts where the block "symbol + muted ISIN" layout doesn't fit.
+templates.env.globals["symbol_text"] = symbol_text
+
 
 def _ctx(request: Request, user: User, *, current_tab: str = "") -> dict:
     """Build the standard template context.

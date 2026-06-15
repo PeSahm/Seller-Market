@@ -58,6 +58,7 @@ from app.services import broker_client
 from app.services import brokers_admin
 from app.services import customers as services_customers
 from app.services import health_signals as services_health
+from app.services import instruments as services_instruments
 from app.services import broker_orders as services_broker_orders
 from app.services import locust_configs as services_locust
 from app.services import market_data_client
@@ -324,6 +325,7 @@ async def agent_auto_sell(
     Live buy-queue refreshes every 3s via the rows partial (HTMX poll).
     """
     _require_agent_or_admin(user)
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     own_agent_id = None if user.role == "admin" else user.id
     rows = await services_auto_sell_view.build_auto_sell_rows(db, agent_id=own_agent_id)
     ctx = _ctx(request, user, current_tab="/agent/auto-sell")
@@ -340,6 +342,7 @@ async def agent_auto_sell_rows(
 ):
     """HTMX-polled table body for the agent Active auto-sell page."""
     _require_agent_or_admin(user)
+    await services_instruments.ensure_instruments(db)  # 3s poll also keeps the global cache fresh
     own_agent_id = None if user.role == "admin" else user.id
     rows = await services_auto_sell_view.build_auto_sell_rows(db, agent_id=own_agent_id)
     ctx = _ctx(request, user, current_tab="/agent/auto-sell")
@@ -540,6 +543,7 @@ async def agent_customer_detail(
     404 (NOT 403). We do NOT want to leak existence of other tenants' rows.
     """
     _require_agent_or_admin(user)
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     customer = await services_customers.get_customer(db, customer_id)
     if customer is None or not _can_access_customer(user, customer):
         raise HTTPException(status_code=404, detail="customer not found")
@@ -1298,6 +1302,7 @@ async def agent_fees(
     the whole fleet. Optional ``customer_id`` filter narrows to one customer.
     Recording payments stays admin-only (#116)."""
     _require_agent_or_admin(user)
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     own_agent_id = None if user.role == "admin" else user.id
 
     # Lenient: a bad UUID in the query string → "no filter" (never 422). Ownership
@@ -2383,6 +2388,7 @@ async def agent_trades(
     agent_runs route.
     """
     _require_agent_or_admin(user)
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     from datetime import datetime
 
     def _parse_date_or_none(s: Optional[str]):
@@ -2486,6 +2492,7 @@ async def agent_trade_detail(
     UUID cannot tell whether it exists.
     """
     _require_agent_or_admin(user)
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     trade = await services_trades.get_trade(db, trade_id)
     if trade is None:
         raise HTTPException(status_code=404, detail="trade not found")

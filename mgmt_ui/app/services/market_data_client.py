@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 # Short timeouts — these are local, fast calls; we never want them to stall a
 # request-handling coroutine.
 _TIMEOUT = httpx.Timeout(5.0, connect=3.0)
+# The whole-market list can be large and a cold sidecar may fetch ALL21 from RLC
+# on the first hit, so give /instruments more headroom (it's a startup/6h call,
+# not a hot path).
+_INSTRUMENTS_TIMEOUT = httpx.Timeout(20.0, connect=3.0)
 _DEFAULT_BASE = "http://market-data:8077"
 
 
@@ -103,9 +107,28 @@ async def get_queue(db: AsyncSession, isin: str) -> Optional[dict]:
         return None
 
 
+async def get_instruments(db: AsyncSession) -> list[dict]:
+    """Whole-market instrument list ``[{isin, symbol, name}, ...]`` from the
+    sidecar ``/instruments`` — used to warm the ISIN→name cache.
+
+    Returns ``[]`` on any failure (graceful; the resolver then falls back to the
+    ``broker_orders`` supplement / bare ISIN).
+    """
+    base = await _base_url(db)
+    try:
+        async with httpx.AsyncClient(timeout=_INSTRUMENTS_TIMEOUT) as client:
+            r = await client.get(f"{base}/instruments")
+            r.raise_for_status()
+            return (r.json() or {}).get("instruments") or []
+    except Exception as exc:  # noqa: BLE001 — graceful: no names
+        logger.warning("market-data instruments failed: %s", exc)
+        return []
+
+
 __all__ = [
     "search_instruments",
     "get_last_price",
     "get_price_band",
     "get_queue",
+    "get_instruments",
 ]

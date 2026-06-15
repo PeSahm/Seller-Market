@@ -124,9 +124,7 @@
         {% endif %}
       </td>
       <td><code class="text-small" dir="ltr">{{ t.tracking_number }}</code></td>
-      <td class="text-small">
-        {% if t.symbol %}<code dir="auto">{{ t.symbol }}</code>{% else %}<code>{{ t.isin }}</code>{% endif %}
-      </td>
+      <td class="text-small">{{ symbol_label(t.isin, symbol=t.symbol) }}</td>
       <td>
         {% if t.side == 1 %}
           <span class="badge badge--up">Buy</span>

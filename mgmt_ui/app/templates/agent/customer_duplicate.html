@@ -36,7 +36,7 @@
     <dt>Side</dt>
     <dd>{{ "Buy" if source.side == 1 else "Sell" }}</dd>
     <dt>Current ISIN</dt>
-    <dd><code class="text-small">{{ source.isin }}</code></dd>
+    <dd>{{ symbol_label(source.isin) }}</dd>
   </dl>
 </section>
 

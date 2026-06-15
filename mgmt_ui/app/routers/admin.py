@@ -59,6 +59,7 @@ from app.services import fee_payments as services_fee_payments
 from app.services import profit_report as services_profit_report
 from app.services import distribution as services_distribution
 from app.services import health_signals as services_health
+from app.services import instruments as services_instruments
 from app.services import locust_configs as services_locust
 from app.services import market_data_client
 from app.services import run_executor
@@ -1037,6 +1038,7 @@ async def admin_customer_detail(
     card up top, list of trade instructions below with edit/delete + an
     "+ Add trade" button.
     """
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     customer = await services_customers.get_customer(db, customer_id)
     if customer is None:
         raise HTTPException(status_code=404, detail="customer not found")
@@ -2139,6 +2141,7 @@ async def admin_auto_sell(
     The table body auto-refreshes every 3s (HTMX) against the rows partial below,
     so the buy-queue column tracks the market without a page reload.
     """
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     rows = await services_auto_sell_view.build_auto_sell_rows(db, agent_id=None)
     ctx = _ctx(request, user, current_tab="/admin/auto-sell")
     ctx["rows"] = rows
@@ -2153,6 +2156,7 @@ async def admin_auto_sell_rows(
     db: AsyncSession = Depends(get_db),
 ):
     """HTMX-polled table body for the Active auto-sell page (live queue refresh)."""
+    await services_instruments.ensure_instruments(db)  # 3s poll also keeps the global cache fresh
     rows = await services_auto_sell_view.build_auto_sell_rows(db, agent_id=None)
     ctx = _ctx(request, user, current_tab="/admin/auto-sell")
     ctx["rows"] = rows
@@ -3683,6 +3687,7 @@ async def admin_trades(
     Same defensive parse — non-numeric input is dropped rather than
     surfaced as a 422.
     """
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     from datetime import datetime
 
     def _parse_date_or_none(s):
@@ -3779,6 +3784,7 @@ async def admin_trade_detail(
     template can render it in a ``<pre class="log-viewer">``. ``run_id``
     can be null (legacy / out-of-band trades) so the run lookup is gated.
     """
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     trade = await services_trades.get_trade(db, trade_id)
     if trade is None:
         raise HTTPException(status_code=404, detail="trade not found")
@@ -3909,6 +3915,7 @@ async def admin_bot_report(
     "fees" (per-buy profit/fee). Defensive param parsing mirrors admin_trades:
     garbage degrades to "no filter", never 422.
     """
+    await services_instruments.ensure_instruments(db)  # warm/refresh ISIN→symbol cache
     p_agent = _bot_report_parse_uuid(agent_id)
     p_customer = _bot_report_parse_uuid(customer_id)
     p_since, p_until, p_ws, p_we, exclude_set, exclude_raw = await _bot_report_filters(

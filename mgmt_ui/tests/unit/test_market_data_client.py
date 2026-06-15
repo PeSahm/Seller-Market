@@ -99,3 +99,16 @@ async def test_queue_ok(monkeypatch):
     _patch_client(monkeypatch, _FakeResp({"buy_volume": 100, "sell_volume": 50}))
     q = await mdc.get_queue(MagicMock(), "IRO1SROD0001")
     assert q["buy_volume"] == 100
+
+
+async def test_instruments_ok(monkeypatch):
+    _patch_client(monkeypatch, _FakeResp(
+        {"instruments": [{"isin": "IRO3SMBZ0001", "symbol": "سرود", "name": "سیمان شاهرود"}]}
+    ))
+    out = await mdc.get_instruments(MagicMock())
+    assert out == [{"isin": "IRO3SMBZ0001", "symbol": "سرود", "name": "سیمان شاهرود"}]
+
+
+async def test_instruments_swallows_errors(monkeypatch):
+    _patch_client(monkeypatch, exc=RuntimeError("sidecar down"))
+    assert await mdc.get_instruments(MagicMock()) == []

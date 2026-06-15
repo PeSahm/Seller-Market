@@ -12,7 +12,7 @@
     {% if r.sell_only %}<span class="badge badge--pending" title="Auto-sell only — no order at market open">watch-only</span>{% endif %}
   </td>
   <td><code class="text-small">{{ r.broker }}</code></td>
-  <td><code class="text-small">{{ r.isin }}</code></td>
+  <td>{{ symbol_label(r.isin) }}</td>
   <td>{{ "{:,}".format(r.threshold) }}</td>
   <td>
     {% if r.applied %}

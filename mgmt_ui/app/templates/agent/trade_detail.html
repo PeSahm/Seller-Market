@@ -30,7 +30,7 @@
         <a href="/agent/customers/{{ customer.id }}" dir="auto">{{ customer.display_name }}</a>
         &middot;
       {% endif %}
-      {% if trade.symbol %}<code dir="auto">{{ trade.symbol }}</code>{% else %}<code>{{ trade.isin }}</code>{% endif %}
+      <code dir="auto">{{ symbol_text(trade.isin, symbol=trade.symbol) or trade.isin }}</code>
       &middot;
       {% if trade.side == 1 %}<span class="badge badge--up">Buy</span>
       {% elif trade.side == 2 %}<span class="badge badge--down">Sell</span>
@@ -62,7 +62,8 @@
 
     <dt>Symbol</dt>
     <dd>
-      {% if trade.symbol %}<code dir="auto">{{ trade.symbol }}</code>
+      {% set _sym = symbol_text(trade.isin, symbol=trade.symbol) %}
+      {% if _sym %}<code dir="auto">{{ _sym }}</code>
       {% else %}<span class="text-muted">—</span>{% endif %}
     </dd>
 
