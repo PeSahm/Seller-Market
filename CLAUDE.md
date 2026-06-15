@@ -1265,3 +1265,39 @@ The #152 merge's bot-image build hit **`startup_failure`** — and so did the ne
 - **Mirror-by-digest + verify `revision==<sha>` AND the fix-marker IN THE IMAGE** before redeploy; "deployed/up" is not proof — verify the running container's `rev` + `grep` of the live file (got all 15: `rev=cfd8e31`, `fix=7`).
 - **The fleet keeps reshuffling** — 15/5 now (was 14/6 in S13/S15, "6 hosts" in S20). Re-derive host/stack/dir from `agent_stacks`/`servers` every time; trust no prose or server NAME.
 - This Windows host's **github API connectivity flaps** (gh `run view`/`api` intermittently "connection refused" while `run list`/`git push` work) — retry; the build state is still readable via `gh run list`.
+
+---
+
+## Session 22 — symbol NAMES shown wherever ISINs appear (#153), merged + deployed
+
+Operator: *"now we have search by symbol name (سرود) → ISIN; I need in every grid and data we show that symbol name — when an agent sees the customer page it sees an ISIN, it's not meaningful."* Shipped the reverse (ISIN→name) everywhere. PR **#153** (`192363e`) merged + deployed. **mgmt-UI only — no migration, no bot change.**
+
+### The split that shaped the design
+- **`TradeInstruction`-backed grids store ISIN ONLY** (no name) — THE gap: admin/agent **customer detail** + **auto-sell** rows (`partials/auto_sell_rows.html`, row dict from `auto_sell_view.build_auto_sell_rows`).
+- **`BrokerOrder`/`TradeResult`-backed grids already carry `symbol`/`symbol_title`** (Trades, Fees, Bot-report) and mostly rendered them.
+- Name source already existed: the market-data **sidecar `/instruments`** (full ALL21 list `{isin,symbol,name}`, 6h-cached on the sidecar) + `broker_orders.symbol_title` (our DB, traded ISINs only). NO reverse ISIN→name endpoint, but `/instruments` IS the whole map.
+
+### Architecture (cache + one Jinja global — operator chose "Symbol + muted ISIN", "every grid")
+- **new `services/instruments.py`** — a warm in-memory `{isin:{symbol,name}}` cache **mirroring `brokers/registry.py`** (`warm_instruments`/`ensure_instruments`/sync `lookup`), with two deliberate differences: `lookup` returns **`None` (never raises)** on cold/unknown → template shows bare ISIN (graceful); a **TTL** (6h; empty-cache retries every 5min) drives re-warming since the source is remote. Sidecar `/instruments` is authoritative; `broker_orders.symbol_title` fills only the gaps (sidecar wins). `warm` never raises (keeps previous map on failure).
+- **`market_data_client.get_instruments(db)`** wrapper (graceful `[]`; 20s timeout — the full list is large / a cold sidecar fetches ALL21 from RLC).
+- **one shared Jinja global `symbol_label(isin, symbol=None, title=None)`** (+ inline `symbol_text()` for headers/`<dd>` where the block layout doesn't fit), registered ONCE on the shared `templates.env.globals` in `routers/dashboard.py` → available in EVERY template rendered by admin.py/agent.py/brokers_admin.py + all partials. Resolution order: caller `symbol` → caller `title` → cache symbol → cache name → bare ISIN (so rows that already carry a symbol never regress). Renders the **S15 trades.html pattern**: `<code dir="auto">symbol</code>` + muted `<code>ISIN</code>` below. HTML-escaped.
+- **lifecycle**: warmed in the app **startup lifespan** (next to `warm_family_cache`); `await ensure_instruments(db)` at the top of EVERY ISIN-grid route (cheap no-op when warm; the 3s auto-sell poll keeps the GLOBAL cache fresh for all pages). **No background worker** (startup-warm + lazy TTL = the `family_of` precedent).
+- **templates**: customer_detail ×2 + auto_sell_rows (the gap) + unified trades/trade_detail/bot_report/fees/fee_declined_panel/customer_duplicate onto the same global. Left raw: form inputs, the dedicated "ISIN" `<dd>` fields, the verify-ISIN echo, the typeahead JS.
+
+### CodeRabbit (2 findings, both fixed in `d5943a4` before merge)
+- **🟠 Major — race in `ensure_instruments`**: concurrent requests at expiry could fire N parallel sidecar+DB warms (auto-sell polls every 3s × sessions). Fixed with a module-level **`asyncio.Lock` + double-check** (one warm under a burst). **Gotcha: a module-level `asyncio.Lock` reused across pytest's per-function event loops raises "bound to a different loop"** → `_reset()` recreates the lock per test (the autouse fixture calls it). New `test_concurrent_ensure_warms_once`.
+- **Nitpick — cache consistency**: only some ISIN-grid routes refreshed the cache → added `ensure_instruments(db)` to the unified routes too (admin trades/trade_detail/bot_report + agent trades/trade_detail/fees), so every symbol page refreshes the 6h cache. CodeRabbit re-reviewed → downgraded CHANGES_REQUESTED → COMMENTED (never APPROVES) → **admin-squash-merged** past the stale review (the S6/S2 pattern).
+
+### Deploy + live verification (`192363e`, mgmt-UI only)
+ghcr was directly reachable from PouyanIt this time (revision verified attempt 1) → retag → `compose up -d api`. `/health=200`, **alembic stays `0016` (no migration)**, Postgres untouched. **Cache live: 1,980 ISINs warmed from the sidecar; `IRO1SROD0001 → {symbol:"سرود", name:"سیمان‌شاهرود"}`.** (The bots/trading hosts were untouched — this is a pure mgmt-UI display change.)
+
+### Verification method (reusable — display features)
+- 578 unit tests (resolver cache hit/miss/cold/supplement/sidecar-wins/TTL + renderer escaping + a **real-template render smoke** through the actual Jinja engine + the concurrent-warm test).
+- **In-process ASGI drive** (httpx `ASGITransport` against `create_app()` + the dev `mgmt_ui-postgres-1`): override `get_current_user` (`app.security.deps`) via `app.dependency_overrides` to skip the login/CSRF dance; `set_instruments_map(...)` to inject a known symbol (fresh map → the route's `ensure_instruments` no-ops, so the injection survives); GET the real customer + auto-sell pages → asserted the symbol + muted-ISIN HTML AND the graceful bare-ISIN for an unknown one, HTTP 200. This is the lightest way to drive a real authed page end-to-end.
+
+### Learnings (Session 22)
+- **A module-level `asyncio.Lock` is a test footgun** — pytest-asyncio (mode=auto) runs each test in its own loop, and a Lock first-acquired in one loop then used in another raises "bound to a different event loop". Recreate it in the test-reset path (`_reset()` in the autouse fixture).
+- **One Jinja global on the shared `templates.env.globals` reaches every template** (admin/agent/brokers_admin all import the one `dashboard.templates`) — the clean "touch every grid once" hook; no per-template `{% import %}`.
+- **Resolve-at-render-via-warm-cache beats persisting a column** for reference data (symbols): no migration, no backfill, always-fresh, one map shared by all grids, graceful bare-ISIN fallback = the status quo. Mirrors `warm_family_cache`.
+- **`get_current_user` override + `set_instruments_map` injection** is the recipe to drive an authed page in-process without seeding/login — and a fresh injected cache survives the route's `ensure_instruments` (it no-ops when fresh).
+- **CodeRabbit CAN re-review + downgrade** (CHANGES_REQUESTED → COMMENTED) after you push fixes + tag `@coderabbitai review`; it still won't APPROVE, so `--admin --squash` past the stale review (verify `merged:true` via the API, not the local state).
