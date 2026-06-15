@@ -89,6 +89,11 @@ DEFAULTS: dict[str, str] = {
     # bot stacks keep the byte-identical scheduler-only command. Setting it makes
     # the next redeploy switch each stack to bot_entrypoint.py + MARKET_DATA_URL.
     "bot_market_data_url": "",
+    # --- Exir order-timing gate ---
+    # Tehran wall-clock instant the BOT holds every Exir order POST until, then
+    # races. Exir penalises early orders; ephoenix is unaffected. Rendered into
+    # each Exir config.ini section as `fire_at`. "HH:MM:SS" or "HH:MM:SS.fff".
+    "exir_fire_at": "08:44:59.000",
     # --- 20-day mark-to-market loss fee (#111 follow-up) ---
     # When a bot-bought position is still unsold after 20 days and is in LOSS at
     # today's price, bill this FIXED fee per losing position (customer × stock).

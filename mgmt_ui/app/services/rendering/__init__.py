@@ -98,6 +98,10 @@ class StackRenderContext:
     # the bot keeps the byte-identical scheduler-only command. Set it to switch the
     # container to bot_entrypoint.py (scheduler + monitor) with MARKET_DATA_URL.
     bot_market_data_url: str = ""
+    # Exir order-timing gate: the bot holds every Exir order POST until this
+    # Tehran wall-clock instant, then races. Emitted as `fire_at` in Exir
+    # config.ini sections only; ephoenix renders byte-identically.
+    exir_fire_at: str = "08:44:59.000"
 
 
 # Re-exports so callers can do

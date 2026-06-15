@@ -2910,6 +2910,7 @@ async def admin_settings_save(
     agent_image_tag: str = Form(...),
     agent_locust_processes_cap: int = Form(...),
     bot_market_data_url: str = Form(""),
+    exir_fire_at: str = Form("08:44:59.000"),
 ):
     """Persist the admin Settings form.
 
@@ -2934,6 +2935,7 @@ async def admin_settings_save(
             agent_image_tag=agent_image_tag,
             agent_locust_processes_cap=agent_locust_processes_cap,
             bot_market_data_url=bot_market_data_url,
+            exir_fire_at=exir_fire_at,
         )
     except (ValidationError, ValueError) as exc:
         ctx = _ctx(request, user, current_tab="/admin/settings")
@@ -2944,6 +2946,7 @@ async def admin_settings_save(
             "agent_image_tag": agent_image_tag,
             "agent_locust_processes_cap": agent_locust_processes_cap,
             "bot_market_data_url": bot_market_data_url,
+            "exir_fire_at": exir_fire_at,
         }
         if isinstance(exc, ValidationError):
             ctx["form_error"] = (
@@ -2971,6 +2974,9 @@ async def admin_settings_save(
     )
     await settings_store.set_setting(
         db, "bot_market_data_url", validated.bot_market_data_url, updated_by=user.id
+    )
+    await settings_store.set_setting(
+        db, "exir_fire_at", validated.exir_fire_at, updated_by=user.id
     )
     await db.commit()
 

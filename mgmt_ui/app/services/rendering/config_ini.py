@@ -61,6 +61,12 @@ def render_config_ini(ctx: StackRenderContext) -> str:
         except UnknownBrokerError:
             family = "ephoenix"
         lines.append(f"broker_family = {family}")
+        # Exir-only order-timing gate: the bot holds Exir POSTs until this Tehran
+        # instant, then races (Exir penalises early sends). Emitted ONLY for exir
+        # sections so ephoenix renders byte-identically. Additive — old bots
+        # ignore it; a new bot with no key uses its own 08:44:59.000 default.
+        if family == "exir" and ctx.exir_fire_at:
+            lines.append(f"fire_at = {ctx.exir_fire_at}")
         lines.append(f"isin = {c.isin}")
         lines.append(f"side = {c.side}")
         # #110 auto-sell: emit only when armed. None AND 0 both mean "disabled"

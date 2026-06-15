@@ -10,6 +10,7 @@ Features:
 """
 
 from locust import HttpUser, task, events
+import gevent  # locust's runtime; gevent.sleep yields the greenlet (cooperative)
 import json
 import requests
 import configparser
@@ -276,7 +277,7 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
         logger.info(f"{'='*80}\n")
         OrderData = namedtuple(
             'OrderData',
-            'order_url token data username broker_code isin side api_client signer cookies',
+            'order_url token data username broker_code isin side api_client signer cookies fire_at',
         )
         return OrderData(
             order_url=prepared.order_url,
@@ -289,6 +290,9 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
             api_client=None,
             signer=prepared.signer,
             cookies=prepared.cookies,
+            # Exir-only fire gate: hold the POST until this instant (config
+            # override or the module default). Read by TradingUser.on_start.
+            fire_at=(config_section.get('fire_at') or EXIR_DEFAULT_FIRE_AT),
         )
 
     # ephoenix family — endpoints are DATA-DRIVEN from the broker code (no
@@ -413,7 +417,7 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
 
     OrderData = namedtuple(
         'OrderData',
-        'order_url token data username broker_code isin side api_client signer cookies',
+        'order_url token data username broker_code isin side api_client signer cookies fire_at',
     )
     return OrderData(
         order_url=endpoints['order'],
@@ -426,10 +430,23 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
         api_client=api_client,
         signer=None,    # ephoenix uses a static Bearer header (no per-request signer)
         cookies=None,
+        fire_at=None,   # ephoenix never gates — fires at the run start as before
     )
 
-# Market open timing threshold (parsed once at module level)
-MARKET_OPEN_THRESHOLD = datetime.strptime('08:44:58.500', '%H:%M:%S.%f').time()
+# --- Exir-only order-fire gate ---------------------------------------------
+# Exir brokers penalise orders sent too early. The bot holds every Exir order
+# POST until a Tehran wall-clock instant (see TradingUser.on_start), then runs
+# the normal head-of-queue race. ephoenix is UNAFFECTED. The decision logic
+# lives in exir_gate (unit-testable without importing this module); on_start
+# calls gate_delay() then gevent.sleep().
+from exir_gate import EXIR_DEFAULT_FIRE_AT, gate_delay
+
+# Indirection so tests can inject a fixed clock. The gate compares against the
+# SAME naive local wall-clock the scheduler uses (container TZ=Asia/Tehran), so
+# "08:44:59" means the same instant for both.
+_now = datetime.now
+
+
 class TradingUser(HttpUser):
     """Base Locust user for trading operations."""
 
@@ -440,14 +457,40 @@ class TradingUser(HttpUser):
     # them with a per-request X-App-N signer + the login cookies.
     signer = None
     exir_cookies = None
+    fire_at = None   # exir: "HH:MM:SS[.fff]" gate; ephoenix: None (no gate)
 
     def on_start(self):
         """Carry the exir login cookies onto the locust HTTP client once, off the
-        hot path. No-op for ephoenix (exir_cookies is None)."""
+        hot path (no-op for ephoenix), then run the EXIR-ONLY fire gate.
+
+        The gate holds this greenlet (cooperatively, no CPU spin) until the
+        configured wall-clock instant before the task loop starts POSTing — Exir
+        penalises early sends. ephoenix (signer None) returns immediately and
+        fires as before. Past the fire-time (e.g. a manual mid-day re-run) the
+        gate is a no-op: fire now, never wait for the next day.
+        """
         cookies = getattr(self, "exir_cookies", None)
         if cookies:
             for _k, _v in cookies.items():
                 self.client.cookies.set(_k, _v)
+
+        if getattr(self, "signer", None) is None:
+            return  # ephoenix — no gate
+        delay = gate_delay(getattr(self, "fire_at", None), _now())
+        if delay is None:
+            return  # blank/invalid fire_at — already warned; don't gate
+        if delay <= 0:
+            logger.info(
+                f"Exir gate: {self.username}@{self.broker_code} already past the "
+                f"fire-time ({-delay:.1f}s) — firing immediately"
+            )
+            return
+        logger.info(
+            f"Exir gate: holding {self.username}@{self.broker_code} {delay:.3f}s "
+            f"before firing"
+        )
+        gevent.sleep(delay)
+        logger.info(f"Exir gate released for {self.username}@{self.broker_code}")
 
     def populate(self, order_data: namedtuple):
         """
@@ -466,17 +509,22 @@ class TradingUser(HttpUser):
         self.api_client = order_data.api_client
         self.signer = getattr(order_data, "signer", None)
         self.exir_cookies = getattr(order_data, "cookies", None)
+        self.fire_at = getattr(order_data, "fire_at", None)
 
     @task
     def place_order(self):
         """
         Place the prepared order with the broker API.
 
-        If the current local time is before 08:44:58.500, the task returns immediately without sending a request. Otherwise, it sends a POST request using the instance's order URL, JSON payload, and authorization token, and records the outcome to the configured logger. Exceptions raised during request submission are caught and logged.
+        Sends a POST using the instance's order URL, JSON payload, and auth
+        (ephoenix: static Bearer; exir: cookies + a fresh per-request X-App-N),
+        and records the outcome. Exceptions during submission are caught/logged.
 
-        Performance note: this is the hot path — runs 1000+ times per dispatch
-        in the head-of-queue race. Keep it lean. Diagnostic logging belongs in
-        cache_warmup or prepare_order_data, not here.
+        The Exir fire-time gate is NOT here — it lives in ``on_start`` (Exir
+        only), which holds the greenlet until the configured instant before the
+        task loop begins. ``place_order`` is the gate-free hot path: it runs
+        1000+ times per dispatch in the head-of-queue race, so keep it lean —
+        diagnostic logging belongs in cache_warmup / prepare_order_data.
         """
 
         # Get logger with file handler for this task
@@ -848,6 +896,7 @@ def _create_user_classes():
                     if order_data.signer is not None else None
                 ),
                 'exir_cookies': order_data.cookies,  # set onto self.client in on_start
+                'fire_at': order_data.fire_at,  # exir gate instant; None for ephoenix
                 '__module__': __name__,  # Explicitly set module
                 '__qualname__': unique_class_name,  # Explicitly set qualified name
             })

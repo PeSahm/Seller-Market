@@ -73,6 +73,22 @@
     </p>
   </div>
 
+  <div class="field">
+    <label class="label" for="exir_fire_at">Exir fire-time (order gate)</label>
+    <input class="input" id="exir_fire_at" name="exir_fire_at"
+           value="{{ settings_values.exir_fire_at }}"
+           placeholder="08:44:59.000" maxlength="16" required>
+    <p class="text-small text-muted">
+      <strong>Exir brokers only.</strong> The bot holds every Exir order POST
+      until this <strong>Tehran wall-clock instant</strong>, then runs the normal
+      head-of-queue race — Exir penalises orders sent too early.
+      <strong>ephoenix is unaffected</strong> (fires at the run start as before).
+      Format <code>HH:MM:SS</code> or <code>HH:MM:SS.fff</code> (e.g.
+      <code>08:44:59.000</code>). Applies to a stack on its next
+      <strong>Redeploy / config push</strong>.
+    </p>
+  </div>
+
   <div class="form-actions">
     <button class="btn btn--primary" type="submit">Save</button>
   </div>

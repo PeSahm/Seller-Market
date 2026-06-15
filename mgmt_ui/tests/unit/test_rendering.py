@@ -206,6 +206,48 @@ def test_config_ini_renders_multiple_customers() -> None:
     assert out.index("[sec_one]") < out.index("[sec_two]")
 
 
+def test_config_ini_emits_fire_at_for_exir() -> None:
+    # Mark the broker exir in the warm family cache, then the renderer must emit
+    # the Exir-only `fire_at` gate key.
+    from app.services.brokers import registry
+
+    registry.set_family_map({"khobregan": "exir"})
+    try:
+        cust = CustomerRow("a1_exir", "u", "p", "khobregan", "IRO1SROD0001", 1)
+        out = render_config_ini(_ctx(customers=(cust,), exir_fire_at="08:44:59.000"))
+        assert "broker_family = exir" in out
+        assert "fire_at = 08:44:59.000" in out
+    finally:
+        registry.set_family_map({})
+
+
+def test_config_ini_no_fire_at_for_ephoenix() -> None:
+    # ephoenix sections must render byte-identically — NO `fire_at` key.
+    from app.services.brokers import registry
+
+    registry.set_family_map({"bbi": "ephoenix"})
+    try:
+        cust = CustomerRow("a1_eph", "u", "p", "bbi", "IRO1A", 1)
+        out = render_config_ini(_ctx(customers=(cust,), exir_fire_at="08:44:59.000"))
+        assert "broker_family = ephoenix" in out
+        assert "fire_at = " not in out
+    finally:
+        registry.set_family_map({})
+
+
+def test_config_ini_fire_at_uses_ctx_value() -> None:
+    # The rendered instant follows ctx.exir_fire_at (the tunable setting).
+    from app.services.brokers import registry
+
+    registry.set_family_map({"khobregan": "exir"})
+    try:
+        cust = CustomerRow("a1_exir", "u", "p", "khobregan", "IRO1SROD0001", 1)
+        out = render_config_ini(_ctx(customers=(cust,), exir_fire_at="08:50:00"))
+        assert "fire_at = 08:50:00" in out
+    finally:
+        registry.set_family_map({})
+
+
 # ---------------------------------------------------------------------------
 # scheduler_config
 # ---------------------------------------------------------------------------

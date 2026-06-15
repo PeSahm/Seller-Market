@@ -35,6 +35,9 @@ class SettingsUpdate(BaseModel):
     # (stacks keep the scheduler-only command). Setting it flips each stack to
     # bot_entrypoint.py + MARKET_DATA_URL on the next Redeploy.
     bot_market_data_url: str = Field(default="", max_length=512)
+    # Exir order-timing gate: the bot holds Exir order POSTs until this Tehran
+    # wall-clock instant, then races (ephoenix unaffected). "HH:MM:SS[.fff]".
+    exir_fire_at: str = Field(default="08:44:59.000", max_length=16)
 
     @field_validator("ocr_service_url")
     @classmethod
@@ -60,6 +63,22 @@ class SettingsUpdate(BaseModel):
         if not parsed.netloc:
             raise ValueError("bot_market_data_url is missing host")
         return v
+
+    @field_validator("exir_fire_at")
+    @classmethod
+    def _check_exir_fire_at(cls, v: str) -> str:
+        from datetime import datetime as _dt
+
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("exir_fire_at is required (HH:MM:SS or HH:MM:SS.fff)")
+        for fmt in ("%H:%M:%S.%f", "%H:%M:%S"):
+            try:
+                _dt.strptime(v, fmt)
+                return v
+            except ValueError:
+                continue
+        raise ValueError("exir_fire_at must be HH:MM:SS or HH:MM:SS.fff (24h)")
 
     @field_validator("agent_image_tag")
     @classmethod

@@ -147,6 +147,7 @@ def _make_db(customer_rows: list[SimpleNamespace] | None = None) -> MagicMock:
             settings_result,   # agent_image_tag
             settings_result,   # ocr_service_url
             settings_result,   # bot_market_data_url (#110)
+            settings_result,   # exir_fire_at (Exir gate)
             customers_result,
             autoscale_off,     # enable_locust_autoscale
             settings_result,   # autobalance_users_multiplier
