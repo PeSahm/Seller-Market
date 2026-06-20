@@ -42,8 +42,42 @@ def _wants_html(request: Request) -> bool:
     return "text/html" in accept.lower()
 
 
+def _create_recovery_app(settings) -> FastAPI:
+    """DB-independent recovery app (#156).
+
+    When ``MGMT_RECOVERY_MODE=true`` we serve ONLY the ``/recovery`` console —
+    no database engine use, no migrations, no background workers, no CSRF
+    middleware (the recovery router is token-authed). This is what makes mgmt
+    usable to restore a backup + come back up when the main DB is down.
+    """
+    from app.routers import recovery as recovery_router
+
+    app = FastAPI(title=f"{settings.app_name} (RECOVERY)", version="0.1.0")
+    static_dir = Path(__file__).resolve().parent / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    app.include_router(recovery_router.router)
+
+    @app.get("/health", include_in_schema=False)
+    async def _rec_health() -> dict:
+        return {"status": "recovery"}
+
+    @app.get("/", include_in_schema=False)
+    async def _rec_root() -> RedirectResponse:
+        return RedirectResponse(url="/recovery")
+
+    logger.warning(
+        "MGMT_RECOVERY_MODE=true: serving the DB-independent /recovery console "
+        "ONLY (no database, no workers)"
+    )
+    return app
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
+    # DB-HA (#156): boot WITHOUT the database when in recovery mode.
+    if settings.recovery_mode:
+        return _create_recovery_app(settings)
     app = FastAPI(title=settings.app_name, version="0.1.0")
 
     # CSRF protection (Phase 10). Registered BEFORE routers so the middleware
