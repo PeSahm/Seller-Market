@@ -54,6 +54,14 @@ def _pw_fingerprint(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()[:16]
 
 
+def _ocr_base_urls(ocr_service_url: str) -> list[str]:
+    """Comma/space-separated OCR endpoints -> ordered list (trailing ``/``
+    stripped). Reimplemented locally to keep the exir family independent of
+    ``broker_client`` (HA plan WS1: client-side OCR pool with failover)."""
+    raw = (ocr_service_url or "").replace(",", " ")
+    return [part.rstrip("/") for part in raw.split() if part.strip()]
+
+
 class ExirAdapter:
     """Adapter for the Exir / Rayan HamAfza broker family."""
 
@@ -69,16 +77,31 @@ class ExirAdapter:
         self, client: httpx.AsyncClient, ocr_service_url: str, b64: str
     ) -> str:
         """POST a base64 captcha image to the OCR microservice; return the
-        decoded text (quotes peeled). Mirrors the shared OCR wire contract."""
-        url = ocr_service_url.rstrip("/") + "/ocr/captcha-easy-base64"
-        resp = await client.post(
-            url,
-            json={"base64": b64},
-            headers={"accept": "text/plain", "Content-Type": "application/json"},
-            timeout=_HTTP_TIMEOUT_S,
-        )
-        resp.raise_for_status()
-        return (resp.text or "").strip().strip('"')
+        decoded text (quotes peeled). ``ocr_service_url`` may list several
+        endpoints (comma/space-separated) — we fail over between them on a
+        transport error. Mirrors the shared OCR wire contract."""
+        bases = _ocr_base_urls(ocr_service_url)
+        if not bases:
+            raise httpx.HTTPError("no OCR endpoints configured")
+        last_error: Optional[Exception] = None
+        for base in bases:
+            try:
+                resp = await client.post(
+                    base + "/ocr/captcha-easy-base64",
+                    json={"base64": b64},
+                    headers={"accept": "text/plain", "Content-Type": "application/json"},
+                    timeout=_HTTP_TIMEOUT_S,
+                )
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                last_error = exc
+                logger.warning(
+                    "exir OCR endpoint %s failed, trying next: %s", base, exc
+                )
+                continue
+            return (resp.text or "").strip().strip('"')
+        assert last_error is not None
+        raise last_error
 
     async def _login(
         self,

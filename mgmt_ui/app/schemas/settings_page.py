@@ -39,13 +39,20 @@ class SettingsUpdate(BaseModel):
     @field_validator("ocr_service_url")
     @classmethod
     def _check_url(cls, v: str) -> str:
-        v = v.strip()
-        parsed = urlparse(v)
-        if parsed.scheme not in ("http", "https"):
-            raise ValueError("ocr_service_url must be http:// or https://")
-        if not parsed.netloc:
-            raise ValueError("ocr_service_url is missing host")
-        return v
+        # One OR MORE endpoints, comma/space-separated (client-side OCR pool —
+        # bots/mgmt try them in order with failover). A single URL round-trips
+        # unchanged. Each token must be a valid http(s) URL with a host.
+        tokens = [t.strip() for t in (v or "").replace(",", " ").split()]
+        tokens = [t for t in tokens if t]
+        if not tokens:
+            raise ValueError("ocr_service_url requires at least one http(s) URL")
+        for t in tokens:
+            parsed = urlparse(t)
+            if parsed.scheme not in ("http", "https"):
+                raise ValueError("ocr_service_url must be http:// or https://")
+            if not parsed.netloc:
+                raise ValueError("ocr_service_url is missing host")
+        return ", ".join(tokens)
 
     @field_validator("bot_market_data_url")
     @classmethod
