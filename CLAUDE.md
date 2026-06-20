@@ -1347,3 +1347,47 @@ Operator decided: move the DB OFF the mgmt hosts to a **dedicated Windows Postgr
 - **OCR:** failover deployed; PouyanIt is the only working OCR; **operator buying an AVX2 server** → then deploy OCR there + add its address (per the runbook) → full OCR HA. Securing the DB link also deferred per operator.
 - **DB:** externalized to Windows PG18, mgmt cut over + verified, backups cron'd. `db.py` already has `try_acquire_session_lock`/`hash_lock_key` (for the upcoming leader election).
 - **In flight (operator said go):** (1) deploy the **recovery container** (the new mgmt-UI image with `MGMT_RECOVERY_MODE`, now in main after #157) + a warm spare DB for it; (2) **WS3** multi-instance mgmt + **leader-elected workers** (advisory lock in `db.py`); (3) **WS4** consolidated `/admin/ha` status page.
+
+---
+
+## Session 24 — WS3 leader election + WS4 /admin/ha + app-level DB AUTO-FAILOVER to a warm spare (PR #158, NOT yet deployed)
+
+Built the multi-instance + auto-failover half of the HA plan. **All in PR #158 (`feat/db-ha-multi`), NOT merged/deployed** — `ENABLE_DB_AUTO_FAILOVER` defaults OFF, so merging is inert until the spare is wired per the runbook. Operator wants to review. (PR #157 recovery console = the COLD path; this session = the WARM auto-failover everyday path.)
+
+### Operator's end-state (this session's target)
+DB on **Windows PG18** (main) · **warm `postgres:18` spare on PouyanIt** kept current by the dump/restore cron · **mgmt on PouyanIt + ParsPack** (2 instances) · **backups visible on `/admin/ha`, retention = keep 4** · main dies → mgmt **auto-switches to the spare in seconds** (no slow restore — the spare is already a live copy) → **never auto-fails-back** (split-brain).
+
+### THE failover mechanism (the linchpin — verified empirically)
+`AsyncSessionLocal` is imported at module-top in **20+ modules**, so swapping a global wouldn't reach them. Instead failover **rebinds the ONE shared `async_sessionmaker`'s engine IN PLACE** via `AsyncSessionLocal.configure(bind=spare_engine)` — **verified live: same object identity, `.begin()` preserved, new sessions use the spare**. Every importer sees the spare on its next `AsyncSessionLocal()` call without any of them changing. The module `engine` (main) is **never reassigned** → the supervisor keeps probing it to know when the main returns.
+
+### What shipped (mgmt-UI only, NO migration; suite 623 green)
+- **WS3 leader election** (`services/leader.py`): a Postgres session-scoped advisory lock (`hash_lock_key("mgmt","worker-leader")`) held for the app's lifetime on a dedicated session; all 8 worker startup handlers gate on `app.state.is_worker_leader`. Fail-open (a single instance never loses workers). `ENABLE_WORKER_LEADER_ELECTION` default on. **Startup-time election only** (a standby takes over on its next restart).
+- **WS4 `/admin/ha`** (`services/ha_status.py` + `admin/ha.html` + nav tab): probe-on-load (graceful, never 500s) — main+spare DB, OCR pool (`host.docker.internal` labelled host-local since the api container can't resolve it), server/stack rollups, unacked alerts, worker-leader, a loud **"running on SPARE"** banner, and a **Backups** card (latest/restored_ok/count/retention).
+- **DB auto-failover** (`db.py` `activate_spare()`/`active_db()`/lazy `spare_engine` + `services/db_failover.py` supervisor): runs on **EVERY** instance (not leader-gated — each fails itself over). Probes the main; after `db_probe_failure_threshold` (2) consecutive failures it `activate_spare()`s, writes a **FAILOVER marker** file, raises a `critical` health signal; once on the spare it alerts when the main is back but **never auto-fails-back**.
+- **Backups + retention** (`db_backup.py`): `run_backup()` **skips the whole tick while the marker exists** (so the cron can't clobber live spare writes), `--keep`/`BACKUP_RETENTION` default → **4**.
+- Settings: `ENABLE_DB_AUTO_FAILOVER` (off), `DB_PROBE_INTERVAL_SECONDS`(5)/`_FAILURE_THRESHOLD`(2)/`_TIMEOUT_SECONDS`(3), `FAILOVER_MARKER_PATH` (default `<backup_dir>/FAILOVER_ACTIVE`), `BACKUP_RETENTION`(4). Prod compose gained the `/var/lib/sm-mgmt/backups` bind mount.
+- Runbook **`deploy/RUNBOOK-db-failover.md`** (spare + cron + 2nd mgmt + failback + v1 limits).
+
+### Adversarial review (50 agents / 5 lenses / 3-vote verify) → 8 confirmed, ALL fixed
+The review earned its keep — it found real **data-loss** bugs. Fixes were mostly REMOVING unsafe cleverness:
+- **CLOBBER (critical):** the supervisor auto-cleared the marker on any healthy-main probe → a restart while the main was briefly up (or a sibling still on main) re-enabled the cron → `pg_restore --clean` a stale dump OVER the live spare. **Fix:** the marker is **durable failover state** — on boot, if it exists, **rehydrate to the spare** (don't serve the stale main); **NEVER auto-clear**; the operator removes it during the deliberate resync+restart failback.
+- **WORKER BLACKOUT (critical):** runtime re-election promoted a standby whose **one-shot** `@app.on_event("startup")` worker handlers had already run → leader flag True, **zero workers**. **Fix:** dropped runtime re-election; the boot leader keeps its workers on the rebound spare. **v1 limits** (documented): boot-with-main-down → both fail-open to leader → double workers (wasted SSH/captcha, **never double trades** — mgmt workers don't place orders); leader-death-during-outage needs a restart to re-elect.
+- **HANG (high):** `_do_failover` closed the dead-main leader session with an **unbounded** `await session.close()` (blocks the full TCP timeout). **Fix:** `leader._safe_close` bounds it with `asyncio.wait_for(3s)`; `_do_failover` no longer closes it inline.
+- **SILENT DEATH (high):** an exception in `_do_failover` (e.g. malformed `SPARE_DSN`) killed the supervisor task → no failover ever. **Fix:** wrapped the call + **validate `SPARE_DSN` eagerly at startup** (`create_async_engine` raises synchronously on a bad DSN).
+- **LOST MARKER (high):** marker lived on the container's writable layer → a redeploy wiped it + the host cron never saw it. **Fix:** the prod-compose backups bind mount.
+- 7 findings correctly **refuted** (old-main-pool "leak" = fine, threshold-mutation, flapping-reset, etc.).
+
+### Learnings (Session 24)
+- **In-place `async_sessionmaker.configure(bind=...)` is the clean way to live-swap the DB engine** when the sessionmaker is imported widely — same object → all importers follow. The main engine stays put for probing.
+- **Failover state must be DURABLE, not in-memory** — `_active_db` resets to "main" on restart, so a restart during an outage would serve the stale main + let the cron clobber the spare. The on-disk marker IS the state: rehydrate from it on boot, never auto-clear.
+- **"No auto-fail-back" must extend to the marker** — auto-clearing a marker is itself a form of auto-failback. Clearing is an operator action (resync → `rm marker` → restart).
+- **One-shot `@app.on_event("startup")` handlers can't model runtime leadership changes** — a flag flipped at runtime starts/stops nothing. Either make worker lifecycle reconcilable (bigger) or keep boot leadership (v1, chosen) and document the limits.
+- **Bound every `await` that can touch a dead DB** (`session.close()` on a down main blocks for the TCP timeout) and **wrap the supervisor loop body** so one failure can't kill the only recovery task.
+- **A 50-agent adversarial review with 3-vote verify is worth it for data-loss-critical infra** — it found a real clobber-the-spare path the design missed, and correctly refuted 7 plausible-but-not-real findings. Background workflows return via `TaskOutput`/task-notification.
+
+### Resume here / next steps
+1. **Operator reviews + merges PR #158.** Then deploy: stage the mgmt image fleet-wide (mirror-by-digest), `compose up -d api` on PouyanIt (+ stand up the 2nd mgmt on ParsPack with matching secrets + `SPARE_DSN`).
+2. **Stand up the warm spare** (`postgres:18` on PouyanIt) + point the `*/2–5min` cron at restore-into-spare with `--keep 4 --marker-path <backup_dir>/FAILOVER_ACTIVE` (Option B — the cron execs the spare container for the PG18 client). Seed the spare once from the main.
+3. **Set `ENABLE_DB_AUTO_FAILOVER=true` + `SPARE_DSN`** on both instances; verify `/admin/ha` (Active=main, auto-failover on, Backups Kept 4), then rehearse a failover on a quiet day.
+4. **Recovery container** (cold path, PR #157) + **secure the DB link** (plaintext now) remain deferred per operator.
+5. Still-open from S23: **AVX2 OCR server** (operator buying) for full OCR HA.
