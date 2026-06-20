@@ -8,8 +8,9 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, Request, status
 from fastapi.exceptions import HTTPException
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import InterfaceError, OperationalError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.models.users import User
@@ -136,6 +137,37 @@ def create_app() -> FastAPI:
             status_code=exc.status_code,
             content={"detail": exc.detail},
             headers=getattr(exc, "headers", None) or {},
+        )
+
+    # DB-HA (#156): when the main database is unreachable, serve a friendly
+    # "database unavailable -> open the recovery console" page instead of a raw
+    # 500 stack trace. ``pool_pre_ping`` surfaces a dead DB as OperationalError
+    # on the first query; InterfaceError covers mid-request disconnects.
+    @app.exception_handler(OperationalError)
+    @app.exception_handler(InterfaceError)
+    async def _db_unavailable_handler(
+        request: Request, exc: Exception
+    ) -> HTMLResponse | JSONResponse:
+        logger.error("database unavailable (%s)", exc.__class__.__name__)
+        if _wants_html(request):
+            html = (
+                "<!doctype html><html><head><meta charset='utf-8'>"
+                "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                "<title>Database unavailable</title>"
+                "<link rel='stylesheet' href='/static/css/app.css'></head>"
+                "<body style='max-width:640px;margin:3rem auto;padding:0 1rem;"
+                "font-family:system-ui,sans-serif'>"
+                "<h1>Database unavailable</h1>"
+                "<p>The management database can't be reached right now. If this "
+                "persists, open the <strong>recovery console</strong> on the "
+                "standby host to restore the latest backup and bring mgmt back up.</p>"
+                "<p style='color:#777'>(standby with <code>MGMT_RECOVERY_MODE=true</code> "
+                "&rarr; <code>/recovery</code>)</p></body></html>"
+            )
+            return HTMLResponse(html, status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "database unavailable"},
         )
 
     @app.on_event("startup")
