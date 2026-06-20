@@ -1,0 +1,196 @@
+{#
+  Consolidated HA status (#156 WS4).
+
+  A probe-on-load snapshot of the shared-service SPOFs the HA plan addresses:
+  the external main DB + warm spare, the OCR failover pool, server/stack
+  rollups, unacked alerts, and which mgmt instance holds the worker-leader
+  lease. Graceful — a down target shows a red badge, never a 500.
+#}
+{% extends "partials/page_shell.html" %}
+{% block page_title %}HA status{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">High-availability status</h1>
+    <p class="text-muted text-small">
+      Live probe of the shared services (DB, OCR pool) + fleet rollups. Probed
+      on page load.
+    </p>
+  </div>
+  <div>
+    <a class="btn btn--ghost btn--sm" href="/admin/ha">Re-check ↻</a>
+  </div>
+</div>
+
+<div class="card-grid">
+
+  {# ---- Database (main + warm spare) ---- #}
+  <article class="card">
+    <div class="card-header"><h2 class="h3">Database</h2></div>
+    <dl class="kv">
+      <dt>Main</dt>
+      <dd>
+        {% if ha.main_db.reachable %}
+          <span class="badge badge--up">up</span>
+        {% else %}
+          <span class="badge badge--down">down</span>
+        {% endif %}
+        <code dir="ltr">{{ ha.main_db.host }}{% if ha.main_db.port %}:{{ ha.main_db.port }}{% endif %}</code>
+        {% if ha.main_db.latency_ms is not none %}
+          <span class="text-muted text-small">{{ ha.main_db.latency_ms }} ms</span>
+        {% endif %}
+      </dd>
+
+      <dt>Warm spare</dt>
+      <dd>
+        {% if ha.spare_db is none %}
+          <span class="badge badge--pending">not configured</span>
+          <span class="text-muted text-small">set <code>SPARE_DSN</code> for the recovery target</span>
+        {% elif ha.spare_db.reachable %}
+          <span class="badge badge--up">up</span>
+          <code dir="ltr">{{ ha.spare_db.host }}{% if ha.spare_db.port %}:{{ ha.spare_db.port }}{% endif %}</code>
+          {% if ha.spare_db.latency_ms is not none %}
+            <span class="text-muted text-small">{{ ha.spare_db.latency_ms }} ms</span>
+          {% endif %}
+        {% else %}
+          <span class="badge badge--down">down</span>
+          <code dir="ltr">{{ ha.spare_db.host }}{% if ha.spare_db.port %}:{{ ha.spare_db.port }}{% endif %}</code>
+        {% endif %}
+      </dd>
+    </dl>
+  </article>
+
+  {# ---- Workers / leader lease (WS3) ---- #}
+  <article class="card">
+    <div class="card-header"><h2 class="h3">Background workers</h2></div>
+    <dl class="kv">
+      <dt>This instance</dt>
+      <dd>
+        {% if ha.is_worker_leader %}
+          <span class="badge badge--up">worker leader</span>
+          <span class="text-muted text-small">runs the fleet workers</span>
+        {% else %}
+          <span class="badge badge--pending">UI-only</span>
+          <span class="text-muted text-small">another instance holds the lease</span>
+        {% endif %}
+      </dd>
+    </dl>
+  </article>
+
+  {# ---- Servers rollup ---- #}
+  <article class="card">
+    <div class="card-header">
+      <h2 class="h3">Servers</h2>
+      <a class="btn btn--ghost btn--sm" href="/admin/servers">view all →</a>
+    </div>
+    <div class="metric-row">
+      <div class="metric">
+        <div class="metric-value">{{ ha.servers_total }}</div>
+        <div class="metric-label text-muted text-small">total</div>
+      </div>
+      {% for status, count in ha.servers.items() %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge {{ 'badge--up' if status == 'online' else ('badge--down' if status == 'offline' else 'badge--pending') }}">{{ count }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">{{ status }}</div>
+        </div>
+      {% endfor %}
+    </div>
+  </article>
+
+  {# ---- Stacks rollup ---- #}
+  <article class="card">
+    <div class="card-header">
+      <h2 class="h3">Bot stacks</h2>
+      <a class="btn btn--ghost btn--sm" href="/admin/stacks">view all →</a>
+    </div>
+    <div class="metric-row">
+      <div class="metric">
+        <div class="metric-value">{{ ha.stacks_total }}</div>
+        <div class="metric-label text-muted text-small">total</div>
+      </div>
+      {% for status, count in ha.stacks.items() %}
+        <div class="metric">
+          <div class="metric-value">
+            <span class="badge {{ 'badge--up' if status == 'up' else ('badge--down' if status == 'down' else 'badge--pending') }}">{{ count }}</span>
+          </div>
+          <div class="metric-label text-muted text-small">{{ status }}</div>
+        </div>
+      {% endfor %}
+    </div>
+  </article>
+
+  {# ---- Alerts ---- #}
+  <article class="card">
+    <div class="card-header">
+      <h2 class="h3">Alerts</h2>
+      <a class="btn btn--ghost btn--sm" href="/admin/health">view all →</a>
+    </div>
+    <div class="metric-row">
+      <div class="metric">
+        <div class="metric-value">
+          <span class="badge {{ 'badge--down' if ha.alerts_attention else 'badge--up' }}">{{ ha.alerts_attention }}</span>
+        </div>
+        <div class="metric-label text-muted text-small">need attention</div>
+      </div>
+      <div class="metric">
+        <div class="metric-value">{{ ha.alerts.get('critical', 0) }}</div>
+        <div class="metric-label text-muted text-small">critical</div>
+      </div>
+      <div class="metric">
+        <div class="metric-value">{{ ha.alerts.get('error', 0) }}</div>
+        <div class="metric-label text-muted text-small">error</div>
+      </div>
+      <div class="metric">
+        <div class="metric-value">{{ ha.alerts.get('warning', 0) }}</div>
+        <div class="metric-label text-muted text-small">warning</div>
+      </div>
+    </div>
+  </article>
+
+</div>
+
+{# ---- OCR failover pool ---- #}
+<article class="card" style="margin-top:16px;">
+  <div class="card-header">
+    <h2 class="h3">OCR pool</h2>
+    <a class="btn btn--ghost btn--sm" href="/admin/settings">configure →</a>
+  </div>
+  <p class="text-muted text-small">
+    Bots try these in order, failing over on any transport error.
+    <code>host.docker.internal</code> is each bot host's own local OCR (not
+    reachable from mgmt — shown for reference).
+  </p>
+  <div class="table-scroll">
+    <table class="table">
+      <thead>
+        <tr><th>Endpoint</th><th>Status</th><th>Latency</th></tr>
+      </thead>
+      <tbody>
+        {% for o in ha.ocr %}
+          <tr>
+            <td><code dir="ltr">{{ o.url }}</code></td>
+            <td>
+              {% if o.host_local %}
+                <span class="badge badge--pending">host-local</span>
+              {% elif o.reachable %}
+                <span class="badge badge--up">up</span>
+              {% else %}
+                <span class="badge badge--down">down</span>
+              {% endif %}
+            </td>
+            <td class="text-muted text-small">
+              {% if o.latency_ms is not none %}{{ o.latency_ms }} ms{% else %}—{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        {% if not ha.ocr %}
+          <tr><td colspan="3" class="text-muted text-small">No OCR endpoints configured.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</article>
+{% endblock %}
