@@ -276,6 +276,7 @@ async def admin_ha(
     ha = await build_ha_status(
         db,
         is_worker_leader=bool(getattr(request.app.state, "is_worker_leader", True)),
+        failed_over_at=getattr(request.app.state, "failed_over_at", None),
     )
     ctx = _ctx(request, user, current_tab="/admin/ha")
     ctx["ha"] = ha

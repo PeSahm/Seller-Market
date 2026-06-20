@@ -29,6 +29,74 @@ AsyncSessionLocal = async_sessionmaker(
     class_=AsyncSession,
 )
 
+# ---------------------------------------------------------------------------
+# App-level DB failover (#156).
+#
+# ``AsyncSessionLocal`` is imported at module top in 20+ modules (workers,
+# services, routers, leader election). Swapping a *global* would not reach
+# those already-bound references — so failover instead REBINDS this one shared
+# sessionmaker's engine IN PLACE via ``.configure(bind=...)``. Because every
+# importer shares the same object, they all see the new engine on their next
+# ``AsyncSessionLocal()`` call (verified: same object identity, ``.begin()``
+# preserved). ``engine`` (the main) is never reassigned, so the failover
+# supervisor can keep probing it to detect when the main comes back.
+# ---------------------------------------------------------------------------
+
+_active_db = "main"
+spare_engine = None  # built lazily on first failover
+
+
+def _build_engine(dsn: str):
+    return create_async_engine(dsn, pool_pre_ping=True, future=True)
+
+
+def active_db() -> str:
+    """Which database the shared sessionmaker is currently bound to.
+
+    ``"main"`` (the configured ``DATABASE_URL``) or ``"spare"`` (the warm
+    standby) after a failover.
+    """
+    return _active_db
+
+
+def get_spare_engine():
+    """Return the spare engine (built lazily from ``spare_dsn``), or ``None``
+    when no spare is configured."""
+    global spare_engine
+    if spare_engine is None:
+        dsn = get_settings().spare_dsn
+        if not dsn:
+            return None
+        spare_engine = _build_engine(dsn)
+    return spare_engine
+
+
+async def activate_spare() -> bool:
+    """Rebind the shared sessionmaker to the warm spare. Idempotent.
+
+    Returns ``True`` once bound to the spare, ``False`` if no spare DSN is
+    configured (caller stays on the dead main → 503s). Does NOT auto-fail-back
+    — returning to the main is a deliberate restart after a resync, to avoid
+    split-brain writes against two diverging databases.
+    """
+    global _active_db
+    eng = get_spare_engine()
+    if eng is None:
+        logger.error("DB failover requested but no spare_dsn configured — staying on main")
+        return False
+    AsyncSessionLocal.configure(bind=eng)
+    _active_db = "spare"
+    logger.warning("DB FAILOVER: shared sessionmaker rebound to the SPARE database")
+    return True
+
+
+def _reset_to_main_for_tests() -> None:
+    """Test-only: restore the sessionmaker to the main engine + clear state."""
+    global _active_db, spare_engine
+    AsyncSessionLocal.configure(bind=engine)
+    _active_db = "main"
+    spare_engine = None
+
 
 async def get_db() -> AsyncIterator[AsyncSession]:
     """FastAPI dependency yielding an AsyncSession."""

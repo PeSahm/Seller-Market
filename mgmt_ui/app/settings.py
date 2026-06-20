@@ -156,6 +156,36 @@ class Settings(BaseSettings):
         default=True, alias="ENABLE_WORKER_LEADER_ELECTION"
     )
 
+    # WS2/HA: app-level DB auto-failover to the warm spare. When the main DB
+    # (the external Windows Postgres) is unreachable, a supervisor rebinds the
+    # shared sessionmaker to ``spare_dsn`` so mgmt keeps serving within seconds.
+    # It NEVER fails back automatically (split-brain) — returning to the main is
+    # a deliberate restart after a resync. Default OFF until a spare is wired.
+    enable_db_auto_failover: bool = Field(
+        default=False, alias="ENABLE_DB_AUTO_FAILOVER"
+    )
+    db_probe_interval_seconds: float = Field(
+        default=5.0, alias="DB_PROBE_INTERVAL_SECONDS", gt=0
+    )
+    db_probe_failure_threshold: int = Field(
+        default=2, alias="DB_PROBE_FAILURE_THRESHOLD", ge=1
+    )
+    db_probe_timeout_seconds: float = Field(
+        default=3.0, alias="DB_PROBE_TIMEOUT_SECONDS", gt=0
+    )
+    # Marker file written on failover; the backup cron skips its dump/restore
+    # while it exists so it can't clobber live writes on the spare. Empty =
+    # derive ``<backup_dir>/FAILOVER_ACTIVE``.
+    failover_marker_path: str = Field(default="", alias="FAILOVER_MARKER_PATH")
+    # Warm-spare backup retention — keep only the newest N dumps + manifest rows.
+    backup_retention: int = Field(default=4, alias="BACKUP_RETENTION", ge=1)
+
+    def resolved_failover_marker_path(self) -> str:
+        """The failover marker path, derived from ``backup_dir`` when unset."""
+        if self.failover_marker_path:
+            return self.failover_marker_path
+        return f"{self.backup_dir.rstrip('/')}/FAILOVER_ACTIVE"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

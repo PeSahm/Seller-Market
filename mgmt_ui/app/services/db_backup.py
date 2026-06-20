@@ -138,6 +138,7 @@ def run_backup(
     dump_dir: str | os.PathLike,
     keep: int,
     now: Optional[datetime] = None,
+    marker_path: Optional[str] = None,
     dump_fn: DumpFn = _default_dump,
     restore_fn: RestoreFn = _default_restore,
 ) -> dict:
@@ -145,7 +146,18 @@ def run_backup(
 
     Returns the manifest entry. ``restored_ok`` is ``False`` (the dump still
     kept as a valid backup) if the restore into the spare failed.
+
+    Cron-clobber safety: when ``marker_path`` exists, mgmt is FAILED OVER and the
+    spare is the LIVE database — the tick is skipped entirely (no dump, no
+    restore) so a stale dump can never overwrite live writes on the spare. The
+    returned dict carries ``{"skipped": "failover_active"}`` in that case.
     """
+    if marker_path and os.path.exists(marker_path):
+        logger.warning(
+            "failover marker present (%s) — skipping backup tick to protect the live spare",
+            marker_path,
+        )
+        return {"skipped": "failover_active", "marker": marker_path}
     now = now or datetime.now(timezone.utc)
     d = Path(dump_dir)
     d.mkdir(parents=True, exist_ok=True)
@@ -180,7 +192,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--main-dsn", default=os.environ.get("MAIN_DSN", ""))
     ap.add_argument("--spare-dsn", default=os.environ.get("SPARE_DSN", ""))
     ap.add_argument("--dump-dir", default=os.environ.get("DUMP_DIR", "/var/lib/sm-mgmt/backups"))
-    ap.add_argument("--keep", type=int, default=int(os.environ.get("KEEP", "48")))
+    ap.add_argument("--keep", type=int, default=int(os.environ.get("KEEP", "4")))
+    ap.add_argument("--marker-path", default=os.environ.get("MARKER_PATH", ""))
     args = ap.parse_args(argv)
     if not args.main_dsn or not args.spare_dsn:
         ap.error("--main-dsn and --spare-dsn (or MAIN_DSN/SPARE_DSN env) are required")
@@ -188,10 +201,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         entry = run_backup(
             main_dsn=args.main_dsn, spare_dsn=args.spare_dsn,
             dump_dir=args.dump_dir, keep=args.keep,
+            marker_path=args.marker_path or None,
         )
     except subprocess.CalledProcessError as exc:
         logger.error("backup tick failed: %s", exc)
         return 1
+    if entry.get("skipped"):
+        logger.warning("backup tick skipped: %s", entry["skipped"])
+        return 0
     logger.info("backup ok: %s (%d bytes, restored_ok=%s)",
                 entry["file"], entry["size"], entry["restored_ok"])
     return 0

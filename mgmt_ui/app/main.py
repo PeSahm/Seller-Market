@@ -35,6 +35,7 @@ from app.services.leader import (
     acquire_worker_leadership,
     release_worker_leadership,
 )
+from app.services.db_failover import run_failover_supervisor
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +254,13 @@ def create_app() -> FastAPI:
     # reconciles broker_orders.is_bot. Internal SSH only — default on.
     app.state.fire_log_ingest_stop = asyncio.Event()
     app.state.fire_log_ingest_task = None  # type: Optional[asyncio.Task[None]]
+    # WS2/HA: app-level DB auto-failover supervisor. Probes the main DB and
+    # rebinds the shared sessionmaker to the warm spare on a sustained outage.
+    # Runs on EVERY instance (NOT leader-gated — each fails itself over).
+    app.state.active_db = "main"
+    app.state.failed_over_at = None
+    app.state.failover_stop = asyncio.Event()
+    app.state.failover_task = None  # type: Optional[asyncio.Task[None]]
 
     @app.on_event("startup")
     async def _elect_worker_leader() -> None:
@@ -267,6 +275,39 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     async def _release_worker_leader() -> None:
         await release_worker_leadership(app)
+
+    @app.on_event("startup")
+    async def _start_failover_supervisor() -> None:
+        # NOT leader-gated: every instance must detect the main going down and
+        # rebind ITS OWN sessionmaker to the spare to keep serving.
+        if not settings.enable_db_auto_failover:
+            logger.info("db auto-failover disabled via settings")
+            return
+        if not settings.spare_dsn:
+            logger.warning(
+                "db auto-failover enabled but no spare_dsn set — supervisor not started"
+            )
+            return
+        app.state.failover_task = asyncio.create_task(
+            run_failover_supervisor(app, app.state.failover_stop),
+            name="db-failover-supervisor",
+        )
+
+    @app.on_event("shutdown")
+    async def _stop_failover_supervisor() -> None:
+        task: Optional[asyncio.Task[None]] = app.state.failover_task
+        if task is None:
+            return
+        app.state.failover_stop.set()
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("db-failover supervisor did not stop in 5s; cancelling")
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
 
     @app.on_event("startup")
     async def _start_health_worker() -> None:

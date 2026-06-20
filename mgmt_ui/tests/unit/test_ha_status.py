@@ -129,3 +129,24 @@ async def test_build_ha_status_graceful_when_setting_errors(monkeypatch):
     assert snap["recovery_configured"] is False
     # fell back to the default OCR url (non-empty)
     assert captured["urls"]
+
+
+@pytest.mark.asyncio
+async def test_build_ha_status_includes_active_db_and_backups(monkeypatch):
+    from app import db as db_mod
+
+    db_mod._reset_to_main_for_tests()
+    monkeypatch.setattr(ha_status, "_probe_main_db", AsyncMock(return_value=_ok("win", 65444, 2.2)))
+    monkeypatch.setattr(ha_status, "_probe_spare_db", AsyncMock(return_value=None))
+    monkeypatch.setattr(ha_status, "_probe_ocr", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        ha_status.settings_store, "get_setting", AsyncMock(return_value="http://o:18080")
+    )
+
+    db = _FakeDB([_FakeResult([]), _FakeResult([]), _FakeResult([])])
+    snap = await ha_status.build_ha_status(db)
+
+    assert snap["active_db"] == "main"
+    assert snap["on_spare"] is False
+    assert snap["backups"]["count"] == 0  # no manifest on disk in tests
+    assert snap["backups"]["retention"] == 4  # the operator's "keep 4"

@@ -23,12 +23,31 @@
   </div>
 </div>
 
+{% if ha.on_spare %}
+<div class="flash flash--error" role="alert" style="margin-bottom:16px;">
+  <strong>⚠ Running on the SPARE database.</strong>
+  The main database was unreachable, so mgmt failed over to the warm spare and is
+  serving from it now{% if ha.failed_over_at %} (since {{ ha.failed_over_at.strftime('%Y-%m-%d %H:%M') }} UTC){% endif %}.
+  Fail-back is deliberate: re-sync the main from the spare, then restart mgmt to return.
+</div>
+{% endif %}
+
 <div class="card-grid">
 
   {# ---- Database (main + warm spare) ---- #}
   <article class="card">
     <div class="card-header"><h2 class="h3">Database</h2></div>
     <dl class="kv">
+      <dt>Active</dt>
+      <dd>
+        {% if ha.on_spare %}
+          <span class="badge badge--down">SPARE</span>
+        {% else %}
+          <span class="badge badge--up">main</span>
+        {% endif %}
+        <span class="text-muted text-small">auto-failover {{ 'on' if ha.auto_failover_enabled else 'off' }}</span>
+      </dd>
+
       <dt>Main</dt>
       <dd>
         {% if ha.main_db.reachable %}
@@ -148,6 +167,31 @@
         <div class="metric-label text-muted text-small">warning</div>
       </div>
     </div>
+  </article>
+
+  {# ---- Backups (warm spare) ---- #}
+  <article class="card">
+    <div class="card-header"><h2 class="h3">Backups</h2></div>
+    {% if ha.backups.count == 0 %}
+      <p class="text-muted text-small">
+        No backups found in <code dir="ltr">{{ ha.backups.dir }}</code>.
+        {% if not ha.recovery_configured %}Set <code>SPARE_DSN</code> + run the backup cron.{% endif %}
+      </p>
+    {% else %}
+      <dl class="kv">
+        <dt>Latest</dt>
+        <dd>
+          {% if ha.backups.latest.restored_ok %}
+            <span class="badge badge--up">restored</span>
+          {% else %}
+            <span class="badge badge--down">dump only</span>
+          {% endif %}
+          <span class="text-muted text-small" dir="ltr">{{ ha.backups.latest.taken_at }}</span>
+        </dd>
+        <dt>Kept</dt>
+        <dd>{{ ha.backups.count }} <span class="text-muted text-small">(retention {{ ha.backups.retention }})</span></dd>
+      </dl>
+    {% endif %}
   </article>
 
 </div>

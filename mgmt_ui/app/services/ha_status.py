@@ -22,11 +22,13 @@ import httpx
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import db as db_mod
 from app.models.health import HealthSignal
 from app.models.servers import Server
 from app.models.stacks import AgentStack
 from app.services import settings_store
 from app.services.broker_client import _ocr_base_urls
+from app.services.db_backup import MANIFEST_NAME, load_manifest
 from app.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -126,10 +128,42 @@ async def _probe_ocr(urls: list[str]) -> list[dict]:
     return out
 
 
-async def build_ha_status(db: AsyncSession, *, is_worker_leader: bool = True) -> dict:
+def _backups_summary(settings) -> dict:
+    """Read the on-disk backup manifest (graceful) for the Backups card.
+
+    The manifest lives in ``backup_dir`` on the spare host and is the same file
+    the recovery console reads — so this works with or without the main DB.
+    """
+    import os
+
+    entries = load_manifest(os.path.join(settings.backup_dir, MANIFEST_NAME))
+    latest = entries[-1] if entries else None
+    return {
+        "count": len(entries),
+        "retention": settings.backup_retention,
+        "dir": settings.backup_dir,
+        "latest": (
+            {
+                "taken_at": latest.get("taken_at"),
+                "restored_ok": latest.get("restored_ok"),
+                "size": latest.get("size"),
+            }
+            if latest
+            else None
+        ),
+    }
+
+
+async def build_ha_status(
+    db: AsyncSession,
+    *,
+    is_worker_leader: bool = True,
+    failed_over_at=None,
+) -> dict:
     """Build the full HA snapshot. Graceful throughout — any single probe
     failing degrades to a red/unknown badge, never raises."""
     settings = get_settings()
+    active_db = db_mod.active_db()
 
     try:
         ocr_setting = await settings_store.get_setting(db, "ocr_service_url")
@@ -182,4 +216,9 @@ async def build_ha_status(db: AsyncSession, *, is_worker_leader: bool = True) ->
         "alerts_attention": alerts.get("critical", 0) + alerts.get("error", 0),
         "is_worker_leader": is_worker_leader,
         "recovery_configured": bool(settings.spare_dsn),
+        "active_db": active_db,
+        "on_spare": active_db != "main",
+        "failed_over_at": failed_over_at,
+        "auto_failover_enabled": settings.enable_db_auto_failover,
+        "backups": _backups_summary(settings),
     }
