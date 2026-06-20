@@ -211,6 +211,90 @@ class TestOCRServiceConnectivity:
             assert result == "", "Should return empty string on error"
 
 
+class TestOCRFailover:
+    """Client-side OCR pool (HA plan WS1): ``OCR_SERVICE_URL`` may hold a
+    comma/space-separated list of endpoints; ``decode_captcha`` fails over
+    between them on transport errors, so one OCR host going down doesn't stop
+    captcha solving."""
+
+    def test_ocr_base_urls_parsing(self):
+        import captcha_utils
+        orig = captcha_utils.OCR_SERVICE_URL
+        try:
+            captcha_utils.OCR_SERVICE_URL = "http://a:1/, http://b:2  http://c:3/"
+            assert captcha_utils._ocr_base_urls() == [
+                "http://a:1", "http://b:2", "http://c:3",
+            ]
+            captcha_utils.OCR_SERVICE_URL = "http://only:8080"
+            assert captcha_utils._ocr_base_urls() == ["http://only:8080"]
+        finally:
+            captcha_utils.OCR_SERVICE_URL = orig
+
+    @patch('requests.post')
+    def test_single_url_calls_once(self, mock_post):
+        """A single URL behaves exactly as before — one POST."""
+        import captcha_utils
+        resp = MagicMock()
+        resp.text = '"abc123"'
+        resp.raise_for_status = MagicMock()
+        mock_post.return_value = resp
+        orig = captcha_utils.OCR_SERVICE_URL
+        try:
+            captcha_utils.OCR_SERVICE_URL = "http://only:8080"
+            assert captcha_utils.decode_captcha("img") == "abc123"
+            mock_post.assert_called_once()
+        finally:
+            captcha_utils.OCR_SERVICE_URL = orig
+
+    @patch('requests.post')
+    def test_failover_to_second_endpoint(self, mock_post):
+        """First endpoint raises a transport error → second is tried and wins."""
+        import requests
+        import captcha_utils
+        good = MagicMock()
+        good.text = "abc123"
+        good.raise_for_status = MagicMock()
+        mock_post.side_effect = [requests.RequestException("host A down"), good]
+        orig = captcha_utils.OCR_SERVICE_URL
+        try:
+            captcha_utils.OCR_SERVICE_URL = "http://a:1, http://b:2"
+            assert captcha_utils.decode_captcha("img") == "abc123"
+            assert mock_post.call_count == 2
+        finally:
+            captcha_utils.OCR_SERVICE_URL = orig
+
+    @patch('requests.post')
+    def test_all_endpoints_fail_returns_empty(self, mock_post):
+        """All endpoints raise → empty string after trying each."""
+        import requests
+        import captcha_utils
+        mock_post.side_effect = requests.RequestException("all down")
+        orig = captcha_utils.OCR_SERVICE_URL
+        try:
+            captcha_utils.OCR_SERVICE_URL = "http://a:1 http://b:2"
+            assert captcha_utils.decode_captcha("img") == ""
+            assert mock_post.call_count == 2
+        finally:
+            captcha_utils.OCR_SERVICE_URL = orig
+
+    @patch('requests.post')
+    def test_empty_healthy_decode_short_circuits(self, mock_post):
+        """An empty decode from a healthy host is the image's fault, not the
+        host's — return "" immediately WITHOUT burning the second endpoint."""
+        import captcha_utils
+        empty = MagicMock()
+        empty.text = ""
+        empty.raise_for_status = MagicMock()
+        mock_post.return_value = empty
+        orig = captcha_utils.OCR_SERVICE_URL
+        try:
+            captcha_utils.OCR_SERVICE_URL = "http://a:1, http://b:2"
+            assert captcha_utils.decode_captcha("img") == ""
+            mock_post.assert_called_once()
+        finally:
+            captcha_utils.OCR_SERVICE_URL = orig
+
+
 class TestEnvExampleFile:
     """Test .env.example file."""
 

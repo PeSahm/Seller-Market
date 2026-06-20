@@ -59,6 +59,13 @@ def test_compose_yaml_shape() -> None:
     assert "ports:" not in out
     assert "TELEGRAM_BOT_TOKEN" not in out
 
+    # HA WS1: host-gateway mapping so a comma-separated OCR_SERVICE_URL can
+    # prefer this host's LOCAL OCR (host.docker.internal:18080) before the
+    # shared fallback.
+    assert "host.docker.internal:host-gateway" in out
+    parsed_eh = yaml.safe_load(out)["services"]["trading-bot"]["extra_hosts"]
+    assert "host.docker.internal:host-gateway" in parsed_eh
+
     # Round-trip parse — the renderer asserts this internally, but we
     # reassert here so a regression in the renderer is also caught here.
     parsed = yaml.safe_load(out)

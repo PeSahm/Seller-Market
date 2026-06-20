@@ -150,6 +150,17 @@ def _endpoints_for(broker_code: str) -> dict[str, str]:
     }
 
 
+def _ocr_base_urls(ocr_service_url: str) -> list[str]:
+    """Parse the ``ocr_service_url`` setting into an ordered list of base URLs.
+
+    Accepts a single URL or a comma/space-separated list (client-side OCR
+    pool — HA plan WS1); trailing slashes are stripped. A single URL yields a
+    one-element list (backward compatible).
+    """
+    raw = (ocr_service_url or "").replace(",", " ")
+    return [part.rstrip("/") for part in raw.split() if part.strip()]
+
+
 async def _solve_captcha(
     client: httpx.AsyncClient,
     ocr_service_url: str,
@@ -157,31 +168,45 @@ async def _solve_captcha(
 ) -> Optional[str]:
     """Send a captcha image to the OCR microservice and return the decoded text.
 
-    Returns ``None`` if the OCR service can't decode this captcha (empty
-    body after stripping).
+    ``ocr_service_url`` may be a single URL or a comma/space-separated list of
+    endpoints; we try them in order and fail over to the next on a transport
+    error (so one OCR host going down doesn't break credential verification).
+    Returns ``None`` if a healthy host decoded to an empty body (ambiguous
+    captcha); raises if every endpoint had a transport/HTTP error.
 
     Mirrors the wire contract in
     ``SellerMarket/captcha_utils.py::decode_captcha``:
 
-    * ``POST {ocr_service_url}/ocr/captcha-easy-base64``
+    * ``POST {base}/ocr/captcha-easy-base64``
     * headers: ``Content-Type: application/json``, ``accept: text/plain``
     * body: ``{"base64": "<base64-image-string>"}``
     * response body is the decoded text in plain text, occasionally wrapped
       in JSON-style double quotes — peel them off.
     """
-    url = ocr_service_url.rstrip("/") + "/ocr/captcha-easy-base64"
-    resp = await client.post(
-        url,
-        json={"base64": captcha_byte_data},
-        headers={"accept": "text/plain", "Content-Type": "application/json"},
-        timeout=_HTTP_TIMEOUT_S,
-    )
-    resp.raise_for_status()
-    text = (resp.text or "").strip()
-    # Some OCR backends return ``"ABCD"`` (quoted) — peel them.
-    if len(text) >= 2 and text.startswith('"') and text.endswith('"'):
-        text = text[1:-1]
-    return text or None
+    bases = _ocr_base_urls(ocr_service_url)
+    if not bases:
+        raise httpx.HTTPError("no OCR endpoints configured")
+    last_error: Optional[Exception] = None
+    for base in bases:
+        try:
+            resp = await client.post(
+                base + "/ocr/captcha-easy-base64",
+                json={"base64": captcha_byte_data},
+                headers={"accept": "text/plain", "Content-Type": "application/json"},
+                timeout=_HTTP_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            last_error = exc
+            logger.warning("OCR endpoint %s failed, trying next: %s", base, exc)
+            continue
+        text = (resp.text or "").strip()
+        # Some OCR backends return ``"ABCD"`` (quoted) — peel them.
+        if len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+            text = text[1:-1]
+        return text or None
+    assert last_error is not None
+    raise last_error
 
 
 async def _login_once(

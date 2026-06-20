@@ -18,13 +18,17 @@
 <form class="server-form" method="post" action="/admin/settings">
   {% include "partials/csrf.html" %}
   <div class="field">
-    <label class="label" for="ocr_service_url">OCR service URL</label>
-    <input class="input" id="ocr_service_url" name="ocr_service_url"
+    <label class="label" for="ocr_service_url">OCR service URL(s)</label>
+    <input class="input input--wide" id="ocr_service_url" name="ocr_service_url"
            value="{{ settings_values.ocr_service_url }}"
-           placeholder="http://5.10.248.55:18080" maxlength="512" required>
+           placeholder="http://5.10.248.55:18080, http://185.232.152.246:18080"
+           maxlength="512" required>
     <p class="text-small text-muted">
-      Shared captcha-decoder for every agent stack. The mgmt UI does not deploy
-      this service &mdash; point at your existing OCR endpoint.
+      Captcha-decoder for every agent stack and the verify-credentials button.
+      Enter one OR MORE endpoints, comma-separated &mdash; bots and the mgmt UI
+      try them in order and fail over to the next if one host is down
+      (client-side OCR pool, no load balancer). The mgmt UI does not deploy this
+      service.
     </p>
   </div>
 

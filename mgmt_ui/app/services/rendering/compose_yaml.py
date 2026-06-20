@@ -77,6 +77,13 @@ services:
     image: {ctx.agent_image_tag}
     container_name: sm-agent-{ctx.agent_id}-bot
     restart: unless-stopped
+    # Lets the bot reach its OWN host's services from inside the container —
+    # specifically a host-local OCR published on the host (HA plan WS1). A
+    # comma-separated OCR_SERVICE_URL can then list ``host.docker.internal:18080``
+    # (this host's local OCR) first and fail over to the shared one. Harmless
+    # when unused. Requires Docker 20.10+ (the whole fleet is well past that).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
 {environment}
     command: {bot_command}

@@ -479,3 +479,46 @@ async def test_token_cache_invalidates_on_401(patch_httpx):
     assert counters.get("login", 0) == 1
     assert counters.get("captcha", 0) == 1
     assert counters.get("customer_info", 0) == 2
+
+
+# --- OCR pool / client-side failover (HA plan WS1) ----------------------------
+
+
+def test_ocr_base_urls_parsing():
+    assert broker_client._ocr_base_urls(
+        "http://a:1/, http://b:2  http://c:3/"
+    ) == ["http://a:1", "http://b:2", "http://c:3"]
+    assert broker_client._ocr_base_urls("http://only:8080") == ["http://only:8080"]
+    assert broker_client._ocr_base_urls("") == []
+
+
+@pytest.mark.asyncio
+async def test_solve_captcha_fails_over_to_second_host():
+    """First OCR endpoint 503s → the second is tried and its decode wins."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "hostA" in str(request.url):
+            return httpx.Response(503, text="down")
+        return httpx.Response(200, text='"WXYZ"')
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        text = await broker_client._solve_captcha(
+            client, "http://hostA:18080, http://hostB:18080", "b64img"
+        )
+    assert text == "WXYZ"
+
+
+@pytest.mark.asyncio
+async def test_solve_captcha_all_hosts_fail_raises():
+    """Every endpoint errors → the last error is raised (caller retries)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="down")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(httpx.HTTPError):
+            await broker_client._solve_captcha(
+                client, "http://a:1, http://b:2", "b64"
+            )
