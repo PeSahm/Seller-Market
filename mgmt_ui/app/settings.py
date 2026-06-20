@@ -128,6 +128,26 @@ class Settings(BaseSettings):
     # that's backed up alongside the database.
     run_logs_dir: str = Field(default="./run_logs", alias="RUN_LOGS_DIR")
 
+    # DB-HA / recovery (#156). When ``MGMT_RECOVERY_MODE=true`` the app boots
+    # WITHOUT the database — no engine use, no migrations, no background
+    # workers — and serves ONLY the ``/recovery`` console, authed by
+    # ``MGMT_RECOVERY_TOKEN`` and reachable over WireGuard/loopback only. It
+    # lists backups from the on-disk manifest (readable with no DB) and can
+    # restore a chosen dump into the local spare and bring mgmt back up — i.e.
+    # "mgmt works even when the database is down".
+    recovery_mode: bool = Field(default=False, alias="MGMT_RECOVERY_MODE")
+    recovery_token: SecretStr = Field(default=SecretStr(""), alias="MGMT_RECOVERY_TOKEN")
+    # Directory holding the backup dumps + ``manifest.json`` (mounted into the
+    # recovery container from the spare host). Shared with the backup cron.
+    backup_dir: str = Field(default="/var/lib/sm-mgmt/backups", alias="BACKUP_DIR")
+    # DSN of the LOCAL warm spare to restore into during recovery.
+    spare_dsn: str = Field(default="", alias="SPARE_DSN")
+    # Optional shell command run AFTER a successful restore to bring mgmt up on
+    # the spare (e.g. "docker compose -f /opt/seller-market-mgmt/docker-compose.yml up -d api").
+    recovery_post_restore_cmd: str = Field(
+        default="", alias="MGMT_RECOVERY_POST_RESTORE_CMD"
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

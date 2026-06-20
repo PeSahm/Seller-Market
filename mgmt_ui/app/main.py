@@ -8,8 +8,9 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, Request, status
 from fastapi.exceptions import HTTPException
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import InterfaceError, OperationalError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.models.users import User
@@ -42,8 +43,42 @@ def _wants_html(request: Request) -> bool:
     return "text/html" in accept.lower()
 
 
+def _create_recovery_app(settings) -> FastAPI:
+    """DB-independent recovery app (#156).
+
+    When ``MGMT_RECOVERY_MODE=true`` we serve ONLY the ``/recovery`` console —
+    no database engine use, no migrations, no background workers, no CSRF
+    middleware (the recovery router is token-authed). This is what makes mgmt
+    usable to restore a backup + come back up when the main DB is down.
+    """
+    from app.routers import recovery as recovery_router
+
+    app = FastAPI(title=f"{settings.app_name} (RECOVERY)", version="0.1.0")
+    static_dir = Path(__file__).resolve().parent / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    app.include_router(recovery_router.router)
+
+    @app.get("/health", include_in_schema=False)
+    async def _rec_health() -> dict:
+        return {"status": "recovery"}
+
+    @app.get("/", include_in_schema=False)
+    async def _rec_root() -> RedirectResponse:
+        return RedirectResponse(url="/recovery")
+
+    logger.warning(
+        "MGMT_RECOVERY_MODE=true: serving the DB-independent /recovery console "
+        "ONLY (no database, no workers)"
+    )
+    return app
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
+    # DB-HA (#156): boot WITHOUT the database when in recovery mode.
+    if settings.recovery_mode:
+        return _create_recovery_app(settings)
     app = FastAPI(title=settings.app_name, version="0.1.0")
 
     # CSRF protection (Phase 10). Registered BEFORE routers so the middleware
@@ -102,6 +137,37 @@ def create_app() -> FastAPI:
             status_code=exc.status_code,
             content={"detail": exc.detail},
             headers=getattr(exc, "headers", None) or {},
+        )
+
+    # DB-HA (#156): when the main database is unreachable, serve a friendly
+    # "database unavailable -> open the recovery console" page instead of a raw
+    # 500 stack trace. ``pool_pre_ping`` surfaces a dead DB as OperationalError
+    # on the first query; InterfaceError covers mid-request disconnects.
+    @app.exception_handler(OperationalError)
+    @app.exception_handler(InterfaceError)
+    async def _db_unavailable_handler(
+        request: Request, exc: Exception
+    ) -> HTMLResponse | JSONResponse:
+        logger.error("database unavailable (%s)", exc.__class__.__name__)
+        if _wants_html(request):
+            html = (
+                "<!doctype html><html><head><meta charset='utf-8'>"
+                "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                "<title>Database unavailable</title>"
+                "<link rel='stylesheet' href='/static/css/app.css'></head>"
+                "<body style='max-width:640px;margin:3rem auto;padding:0 1rem;"
+                "font-family:system-ui,sans-serif'>"
+                "<h1>Database unavailable</h1>"
+                "<p>The management database can't be reached right now. If this "
+                "persists, open the <strong>recovery console</strong> on the "
+                "standby host to restore the latest backup and bring mgmt back up.</p>"
+                "<p style='color:#777'>(standby with <code>MGMT_RECOVERY_MODE=true</code> "
+                "&rarr; <code>/recovery</code>)</p></body></html>"
+            )
+            return HTMLResponse(html, status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "database unavailable"},
         )
 
     @app.on_event("startup")
