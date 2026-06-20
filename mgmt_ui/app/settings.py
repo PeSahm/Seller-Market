@@ -148,6 +148,14 @@ class Settings(BaseSettings):
         default="", alias="MGMT_RECOVERY_POST_RESTORE_CMD"
     )
 
+    # WS3: worker leader election. With the DB external, mgmt can run on
+    # multiple hosts; only the elected leader runs the background workers (they
+    # SSH the whole fleet — two sets would double-fire). Default ON: harmless
+    # for a single instance (it just acquires the lock + runs as before).
+    enable_worker_leader_election: bool = Field(
+        default=True, alias="ENABLE_WORKER_LEADER_ELECTION"
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
