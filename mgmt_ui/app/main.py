@@ -288,6 +288,18 @@ def create_app() -> FastAPI:
                 "db auto-failover enabled but no spare_dsn set — supervisor not started"
             )
             return
+        # Validate the spare DSN eagerly so a malformed value fails LOUD at boot
+        # rather than silently blowing up the supervisor task on the first real
+        # outage (create_async_engine raises synchronously on a bad DSN/driver).
+        try:
+            from app import db as _db
+
+            if _db.get_spare_engine() is None:
+                logger.warning("spare engine unavailable — db auto-failover not started")
+                return
+        except Exception as exc:  # noqa: BLE001
+            logger.error("invalid SPARE_DSN (%s) — db auto-failover NOT started", exc)
+            return
         app.state.failover_task = asyncio.create_task(
             run_failover_supervisor(app, app.state.failover_stop),
             name="db-failover-supervisor",

@@ -89,7 +89,6 @@ async def test_supervisor_healthy_main_never_fails_over(monkeypatch):
     monkeypatch.setattr(db_failover, "_probe", AsyncMock(return_value=True))
     do = AsyncMock()
     monkeypatch.setattr(db_failover, "_do_failover", do)
-    monkeypatch.setattr(db_failover, "_clear_marker", lambda p: None)
     monkeypatch.setattr(db_failover, "get_settings", _supervisor_settings)
 
     stop = asyncio.Event()
@@ -131,20 +130,15 @@ async def test_no_auto_failback_alerts_once(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_do_failover_writes_marker_and_reelects(monkeypatch, tmp_path):
+async def test_do_failover_writes_marker_without_runtime_reelection(monkeypatch, tmp_path):
     app = _app()
+    app.state.is_worker_leader = "SENTINEL"  # must be left untouched
     marker = tmp_path / "FAILOVER_ACTIVE"
     monkeypatch.setattr(db_mod, "activate_spare", AsyncMock(return_value=True))
     monkeypatch.setattr(
         db_failover, "get_settings",
-        lambda: SimpleNamespace(
-            resolved_failover_marker_path=lambda: str(marker),
-            enable_worker_leader_election=True,
-        ),
+        lambda: SimpleNamespace(resolved_failover_marker_path=lambda: str(marker)),
     )
-    acquire = AsyncMock(return_value=True)
-    monkeypatch.setattr(db_failover, "acquire_worker_leadership", acquire)
-    monkeypatch.setattr(db_failover, "release_worker_leadership", AsyncMock())
     monkeypatch.setattr(db_failover, "_raise_signal", AsyncMock())
 
     await db_failover._do_failover(app)
@@ -152,7 +146,54 @@ async def test_do_failover_writes_marker_and_reelects(monkeypatch, tmp_path):
     assert marker.exists()  # cron-clobber guard written
     assert app.state.active_db == "spare"
     assert app.state.failed_over_at is not None
-    assert acquire.await_count == 1  # leadership re-elected on the spare
+    # no runtime re-election (the boot leader keeps its workers on the spare)
+    assert app.state.is_worker_leader == "SENTINEL"
+
+
+@pytest.mark.asyncio
+async def test_supervisor_rehydrates_to_spare_when_marker_present(monkeypatch, tmp_path):
+    marker = tmp_path / "FAILOVER_ACTIVE"
+    marker.write_text("2026-06-21T00:00:00Z\n")
+    app = _app()
+    monkeypatch.setattr(
+        db_mod, "get_settings",
+        lambda: SimpleNamespace(spare_dsn="postgresql+asyncpg://u:p@spare:5432/db"),
+    )
+    monkeypatch.setattr(db_failover, "_probe", AsyncMock(return_value=True))  # main is UP
+    monkeypatch.setattr(db_failover, "_raise_signal", AsyncMock())
+    monkeypatch.setattr(
+        db_failover, "get_settings",
+        lambda: SimpleNamespace(
+            db_probe_interval_seconds=0.01, db_probe_failure_threshold=2,
+            db_probe_timeout_seconds=0.01, resolved_failover_marker_path=lambda: str(marker),
+        ),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(db_failover.run_failover_supervisor(app, stop))
+    await asyncio.sleep(0.05)
+    stop.set()
+    await task
+    # bound to the SPARE despite the main being reachable, and the marker is NOT
+    # auto-cleared — a restart-during-failover can't clobber the live spare.
+    assert db_mod.active_db() == "spare"
+    assert marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_survives_failover_exception(monkeypatch):
+    app = _app()
+    monkeypatch.setattr(db_failover, "_probe", AsyncMock(return_value=False))  # main down
+    boom = AsyncMock(side_effect=RuntimeError("bad spare engine"))
+    monkeypatch.setattr(db_failover, "_do_failover", boom)
+    monkeypatch.setattr(db_failover, "get_settings", _supervisor_settings)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(db_failover.run_failover_supervisor(app, stop))
+    await asyncio.sleep(0.06)
+    assert not task.done()  # an exception in _do_failover must NOT kill the supervisor
+    stop.set()
+    await task
+    assert boom.await_count >= 1
 
 
 @pytest.mark.asyncio

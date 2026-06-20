@@ -113,13 +113,28 @@ cron pauses (marker present). mgmt keeps serving reads+writes from the spare.
 When the Windows main is healthy again:
 1. **Re-sync the main from the spare** (the spare has the newest data):
    `docker exec sm-spare-pg sh -lc 'pg_dump -Fc "$SPARE_LOCAL_DSN" -f /tmp/fb.dump && pg_restore --clean --if-exists --no-owner --no-privileges -d "$MAIN_DSN" /tmp/fb.dump'`
-2. **Restart both mgmt instances** (`docker compose up -d --force-recreate api`). They
-   boot bound to the main again; the supervisor confirms the main is healthy and
-   **clears the FAILOVER marker**, so the backup cron resumes (Windows → spare).
-3. Confirm `/admin/ha` → Active = main, banner gone.
+2. **Remove the failover marker** — this is the ONE thing that authorises the
+   return to the main; while it exists every mgmt (re)start rebinds to the spare:
+   `rm /var/lib/sm-mgmt/backups/FAILOVER_ACTIVE`
+3. **Restart both mgmt instances** (`docker compose up -d --force-recreate api`). With
+   the marker gone they boot bound to the main; the backup cron resumes (Windows → spare).
+4. Confirm `/admin/ha` → Active = main, banner gone.
 
-> Never run both DBs as live at once. The marker + "no auto-failback" enforce this;
-> the only manual rule is **re-sync before you restart on the main**.
+> The marker is **durable failover state**: while it exists, every mgmt (re)start
+> *rebinds to the spare* — so a routine redeploy or an OOM-restart during an outage
+> can never serve a stale main or let the cron clobber the live spare. The
+> supervisor **never auto-clears** it. Returning to the main is exactly:
+> **re-sync → remove the marker → restart.** Never run both DBs as live at once.
+
+## Limitations (v1) — worker leadership
+- Worker leadership is elected at **startup**. After a failover the boot-time
+  leader keeps running the workers (now against the spare); a standby is **not**
+  promoted at runtime. If the leader instance *also* dies during an outage,
+  restart a surviving instance so it re-runs the election and leads on the spare.
+- If **both** instances are (re)started while the main is down, both fail-open to
+  leader and run the workers — wasted SSH/ingestion + extra broker captcha calls,
+  **never double trades** (mgmt workers don't place orders). Restart one once
+  mgmt is back on a single DB to settle to one leader.
 
 ## 7. Cold last-resort (recovery console — Option B)
 If even the spare is gone and you must restore from a dump file: run the mgmt

@@ -27,7 +27,6 @@ from sqlalchemy import text
 from app import db as db_mod
 from app.db import AsyncSessionLocal
 from app.models.health import HealthSignal
-from app.services.leader import acquire_worker_leadership, release_worker_leadership
 from app.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -58,15 +57,6 @@ def _write_marker(path: str) -> None:
         logger.error("db_failover: could not write marker %s: %s", path, exc)
 
 
-def _clear_marker(path: str) -> None:
-    try:
-        if os.path.exists(path):
-            os.remove(path)
-            logger.info("db_failover: cleared marker %s (main healthy)", path)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("db_failover: could not clear marker %s: %s", path, exc)
-
-
 async def _raise_signal(kind: str, severity: str, message: str) -> None:
     """Best-effort health-signal insert on whatever DB is now active."""
     try:
@@ -87,17 +77,15 @@ async def _do_failover(app) -> None:
     app.state.active_db = "spare"
     app.state.failed_over_at = datetime.now(timezone.utc)
 
-    # The old leader lock died with the main connection — re-elect on the spare
-    # so exactly one instance still runs the workers.
-    try:
-        await release_worker_leadership(app)
-    except Exception:  # noqa: BLE001
-        pass
-    if settings.enable_worker_leader_election:
-        app.state.is_worker_leader = await acquire_worker_leadership(app)
-    else:
-        app.state.is_worker_leader = True
-
+    # We intentionally do NOT re-elect leadership or restart workers at runtime.
+    # The boot-time worker-leader keeps running the workers — they each open a
+    # fresh ``AsyncSessionLocal()`` per tick, which is now rebound to the spare,
+    # so they simply continue against it. Runtime promotion of a standby would
+    # require re-running the one-shot worker startup handlers (a v1 limitation;
+    # see RUNBOOK-db-failover.md). The advisory lock held on the dead main is
+    # released by Postgres when that connection drops. We also skip closing the
+    # dead-main leader session here so a blocking close can't stall failover —
+    # it is reaped at shutdown (bounded by leader._safe_close).
     await _raise_signal(
         "db_failover",
         "critical",
@@ -118,8 +106,21 @@ async def run_failover_supervisor(app, stop_event: asyncio.Event) -> None:
     timeout = settings.db_probe_timeout_seconds
     marker_path = settings.resolved_failover_marker_path()
 
+    # Rehydrate: a marker present at startup means we are (still) failed over —
+    # bind to the spare and serve it, NOT the possibly-stale main. The marker is
+    # durable failover state; only the operator removes it (as part of the
+    # deliberate resync + restart fail-back). This is what prevents a restart on
+    # a momentarily-reachable main from clobbering the live spare.
+    if os.path.exists(marker_path):
+        logger.warning(
+            "db_failover: marker present at startup — rehydrating onto the SPARE "
+            "(operator must resync the main + remove %s to return)",
+            marker_path,
+        )
+        if await db_mod.activate_spare():
+            app.state.active_db = "spare"
+
     failures = 0
-    marker_cleared = False
     main_back_alerted = False
 
     logger.info(
@@ -132,28 +133,31 @@ async def run_failover_supervisor(app, stop_event: asyncio.Event) -> None:
         if db_mod.active_db() == "main":
             if await _probe(db_mod.engine, timeout):
                 failures = 0
-                if not marker_cleared:
-                    _clear_marker(marker_path)
-                    marker_cleared = True
             else:
                 failures += 1
                 logger.warning("db_failover: main probe failed (%d/%d)", failures, threshold)
                 if failures >= threshold:
-                    await _do_failover(app)
+                    # Never let an error in failover kill the only recovery task.
+                    try:
+                        await _do_failover(app)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("db_failover: _do_failover errored: %s", exc)
                     # On success active_db()=="spare" → we won't re-enter here.
-                    # If it failed (no spare), reset so we retry after `threshold`
-                    # more failures rather than spamming every tick.
+                    # If it failed (no spare / error), reset so we retry after
+                    # `threshold` more failures rather than spamming every tick.
                     failures = 0
         else:
-            # Already on the spare. Probe the main only to alert when it's back —
-            # we never auto-fail-back (operator resyncs + restarts).
+            # Already on the spare. Probe the main only to ALERT when it's back —
+            # we NEVER auto-fail-back and NEVER auto-clear the marker (operator
+            # resyncs, removes the marker, and restarts).
             if not main_back_alerted and await _probe(db_mod.engine, timeout):
                 main_back_alerted = True
                 await _raise_signal(
                     "db_failback_available",
                     "warning",
                     "Main database is reachable again. mgmt is still on the spare. "
-                    "Resync the main from the spare, then restart mgmt to return.",
+                    "Resync the main from the spare, remove the failover marker, "
+                    "then restart mgmt to return.",
                 )
                 logger.warning("db_failover: main reachable again — resync + restart to return")
 

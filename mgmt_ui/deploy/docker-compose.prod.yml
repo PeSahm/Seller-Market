@@ -57,6 +57,11 @@ services:
       # Archived run logs (Phase 6). The janitor (Phase 8) cleans these up
       # past JANITOR_RUN_LOG_RETENTION_DAYS.
       - /var/lib/sm-mgmt/run_logs:/var/lib/run_logs
+      # DB-HA (#156): backups dir + the FAILOVER marker. SHARED with the host
+      # backup cron so (a) the marker the failover supervisor writes pauses the
+      # cron (it can't clobber the live spare) and survives a container
+      # recreate, and (b) /admin/ha can read the manifest. BACKUP_DIR must match.
+      - /var/lib/sm-mgmt/backups:/var/lib/sm-mgmt/backups
 
   # Per-host market-data sidecar (issue #108). The api reaches it over the
   # compose network at http://market-data:8077 (the `market_data_url` setting

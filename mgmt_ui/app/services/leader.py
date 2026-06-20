@@ -16,6 +16,7 @@ leadership so a single-instance deployment never silently loses its workers.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from app.db import AsyncSessionLocal, hash_lock_key, try_acquire_session_lock
@@ -65,7 +66,11 @@ async def release_worker_leadership(app) -> None:
 
 
 async def _safe_close(session) -> None:
+    # Bounded: this session may be bound to a DEAD main (e.g. closed during a DB
+    # failover), where ``close()`` performs a rollback/return that can block for
+    # the full TCP timeout. A small wait_for keeps shutdown/failover prompt; the
+    # broken connection is then abandoned (the pool reaps it).
     try:
-        await session.close()
-    except Exception:  # noqa: BLE001 — best-effort
+        await asyncio.wait_for(session.close(), timeout=3.0)
+    except Exception:  # noqa: BLE001 — best-effort, never hang
         pass
