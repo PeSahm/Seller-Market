@@ -1471,14 +1471,14 @@ Left the **auto-failover `SPARE_DSN` on BOTH mgmt instances pointing at PouyanIt
 
 ### Still deferred (unchanged)
 - **AVX2 OCR server** — still the gating item for *full* auto-sell HA on a complete PouyanIt-host death (the ParsPack md replica's WS upstream can't captcha-login without reachable OCR).
-- ~~Auto **bot-side** market-data failover~~ — **DONE this session (Session 27, PR pending)**: `MARKET_DATA_URL` is now a comma-separated failover pool.
+- ~~Auto **bot-side** market-data failover~~ — **DONE + DEPLOYED FLEET-WIDE (Session 27, PR #160 `b2f7463`)**: `MARKET_DATA_URL` is a comma-separated failover pool; live on all 19 stacks.
 - Secure the DB link (plaintext) · recovery container (cold path) · stale `postgres:16-alpine` cleanup on PouyanIt.
 
 ---
 
 ## Session 27 — market-data failover POOL (no-redeploy auto-sell HA): `bot_market_data_url` as a comma list, prefer-primary failover with a single-upstream guard
 
-Operator (reacting to Session-26's "flip `bot_market_data_url` + redeploy" runbook): *"that's a bit not good — like OCR, I want to add servers comma-separated and the app should fail over if one doesn't work, because in a harsh time it's tough to redeploy all servers."* Made the bot's market-data endpoint a **comma/space-separated FAILOVER pool** (mirroring the OCR pool), so a sidecar outage needs **NO redeploy** — the bot already carries the backup address and fails over on its own. Branch `feat/market-data-failover` (PR pending). **Bot + mgmt code; no migration.**
+Operator (reacting to Session-26's "flip `bot_market_data_url` + redeploy" runbook): *"that's a bit not good — like OCR, I want to add servers comma-separated and the app should fail over if one doesn't work, because in a harsh time it's tough to redeploy all servers."* Made the bot's market-data endpoint a **comma/space-separated FAILOVER pool** (mirroring the OCR pool), so a sidecar outage needs **NO redeploy** — the bot already carries the backup address and fails over on its own. **PR #160 (`b2f7463`) merged + DEPLOYED FLEET-WIDE this session.** **Bot + mgmt code; no migration.**
 
 ### What changed
 - **Bot `market_data_ws.py`** — `ws_bases()` parses the list; `QueueFeed._run_one` does **ordered, prefer-primary failover**: try index 0 first every cycle, advance only when earlier endpoints are unreachable, HOLD (`on_update(None)`, the existing fail-safe) only after the WHOLE list fails or an established connection drops. Single URL = byte-identical to before.
@@ -1504,3 +1504,15 @@ An OLD bot image has no list parsing → a comma-list `MARKET_DATA_URL` would ma
 
 ### Process note
 Built with two workflows (ultracode): an **Understand** fan-out (mapped the bot WS reconnect loop + the OCR pattern to mirror + the mgmt plumbing) then an **adversarial review** fan-out (5 lenses, 3-vote verify). The review caught the keepalive-defeats-recheck bug that the first implementation + my own reasoning missed — the single-upstream invariant held in my head but not in the code (reconvergence only on disconnect, which a keepalive prevents). Empirical multi-agent verification earned its keep on a money-path concurrency invariant.
+
+### CodeRabbit (PR #160) — 2 valid, 1 declined
+Fixed: `trust_env=False` on `market_data_client._fetch` (belt-and-suspenders proxy bypass, matching rlc_price/rlc_market — the sidecar is local so it's hardening, not a live bug); the prefer-primary test now asserts `primary_i < backup_i` (ORDER, not presence). Declined: CodeRabbit's "add `trust_env=False` to `broker_client.py`" — it **misattributed `broker_client.py` as new in this PR** (it's untouched; `git diff origin/main --stat` confirmed). Verify a reviewer's "this file is new/changed" claim against the actual diff before acting.
+
+### DEPLOYED FLEET-WIDE — the rollout (all verified live, 2026-06-21 ~16:25 Tehran, MARKET CLOSED)
+Operator merged PR #160 then said "go ahead". Ran the full rollout in the gate order:
+1. **Bot image `b2f7463` staged on all 6 hosts** (ghcr DIRECT from PouyanIt this time; the other 5 via mirror-by-digest `@sha256:87ce2e31…` — 4 via direct SSH in parallel, **`.180` via `run_command` through the api container** since my workstation key is absent there). Verified the failover code is IN the image: `docker run --rm <img> grep -c primary_recheck/ws_bases /app/market_data_ws.py` → 5/5 — not just the revision label.
+2. **Set `bot_market_data_url = http://5.10.248.55:8077, http://45.139.10.192:8077`** (PouyanIt primary, ParsPack backup — the Session-26 replica) and **redeployed all 19 stacks** (`redeploy_stack` via the api container, `warm_family_cache` first — the cold-cache Exir-mislabel guard) → **19/19 ok**. Sampled every host: all `rev=b2f7463`, `running`, `MARKET_DATA_URL=` the comma-list, monitor boots `supervisor up … url=…:8077, …:8077 / armed 0`.
+3. **Deployed mgmt `b2f7463` on BOTH instances LAST** (PouyanIt direct, ParsPack by digest) — *after* the in-container redeploy loop finished (never `compose up -d api` mid-loop). Both `healthy`, `/health=200`, **alembic stays `0017_mgmt_instances`** (no migration). `bot_market_data_url` confirmed persisted.
+- **Why fleet-wide activation was safe (not just capability-deploy):** in steady state (primary up) every bot connects to PouyanIt index-0 → the failover/recheck code is **DORMANT** (only engages on a real primary outage, where the worst case is HOLD). So the comma-list is a no-op for current behavior; it only ADDS the ParsPack backup. Market was CLOSED (16:25 > the 12:30 auto-sell window) so no sell could fire on the restart regardless of armed state — the S21 "read live queue vs threshold before restarting an armed stack" caution didn't apply.
+- **Live failover limit (carried from S26):** the ParsPack backup's `/ws/queue` upstream needs OCR to captcha-login to Khobregan, and ParsPack has no local OCR (its `OCR_SERVICE_URL`→PouyanIt). So the backup fully covers "PouyanIt's md container/process died, host+OCR alive"; a TOTAL PouyanIt-host death still blocks the WS upstream until an AVX2 OCR exists (REST endpoints survive regardless). The deferred AVX2-OCR is still the gating item for complete auto-sell HA.
+- **Operating it:** the operator sets/edits the pool in Admin → Settings → "Bot market-data URL" (the field now accepts a comma list + has help text). Adding/removing a sidecar address needs ONE redeploy to push the new `MARKET_DATA_URL`; after that, an outage of any listed sidecar needs **no redeploy** (the bot fails over on its own, reconverging on the primary within 45s of its recovery).
