@@ -186,6 +186,25 @@ class Settings(BaseSettings):
             return self.failover_marker_path
         return f"{self.backup_dir.rstrip('/')}/FAILOVER_ACTIVE"
 
+    # HA visibility (#156): each mgmt instance heartbeats its own row to the
+    # shared DB so /admin/ha can list all instances (PouyanIt, ParsPack, …).
+    enable_instance_heartbeat: bool = Field(
+        default=True, alias="ENABLE_INSTANCE_HEARTBEAT"
+    )
+    instance_heartbeat_interval_seconds: float = Field(
+        default=15.0, alias="INSTANCE_HEARTBEAT_INTERVAL_SECONDS", gt=0
+    )
+    mgmt_instance_name: str = Field(default="", alias="MGMT_INSTANCE_NAME")
+    mgmt_instance_address: str = Field(default="", alias="MGMT_INSTANCE_ADDRESS")
+
+    def resolved_instance_name(self) -> str:
+        """This instance's display name — ``MGMT_INSTANCE_NAME`` or the hostname."""
+        if self.mgmt_instance_name:
+            return self.mgmt_instance_name
+        import socket
+
+        return socket.gethostname()
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

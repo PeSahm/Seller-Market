@@ -36,6 +36,7 @@ from app.services.leader import (
     release_worker_leadership,
 )
 from app.services.db_failover import run_failover_supervisor
+from app.services.instance_heartbeat import run_heartbeat_worker
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +262,10 @@ def create_app() -> FastAPI:
     app.state.failed_over_at = None
     app.state.failover_stop = asyncio.Event()
     app.state.failover_task = None  # type: Optional[asyncio.Task[None]]
+    # HA visibility: each instance heartbeats its own row to the shared DB so
+    # /admin/ha can list all instances. Runs on EVERY instance (not leader-gated).
+    app.state.heartbeat_stop = asyncio.Event()
+    app.state.heartbeat_task = None  # type: Optional[asyncio.Task[None]]
 
     @app.on_event("startup")
     async def _elect_worker_leader() -> None:
@@ -315,6 +320,32 @@ def create_app() -> FastAPI:
             await asyncio.wait_for(task, timeout=5.0)
         except asyncio.TimeoutError:
             logger.warning("db-failover supervisor did not stop in 5s; cancelling")
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    @app.on_event("startup")
+    async def _start_instance_heartbeat() -> None:
+        # NOT leader-gated: every instance reports itself so /admin/ha lists all.
+        if not settings.enable_instance_heartbeat:
+            logger.info("instance heartbeat disabled via settings")
+            return
+        app.state.heartbeat_task = asyncio.create_task(
+            run_heartbeat_worker(app, app.state.heartbeat_stop),
+            name="instance-heartbeat",
+        )
+
+    @app.on_event("shutdown")
+    async def _stop_instance_heartbeat() -> None:
+        task: Optional[asyncio.Task[None]] = app.state.heartbeat_task
+        if task is None:
+            return
+        app.state.heartbeat_stop.set()
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
             task.cancel()
             try:
                 await task

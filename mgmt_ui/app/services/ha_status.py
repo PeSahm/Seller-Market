@@ -29,6 +29,7 @@ from app.models.stacks import AgentStack
 from app.services import settings_store
 from app.services.broker_client import _ocr_base_urls
 from app.services.db_backup import MANIFEST_NAME, load_manifest
+from app.services.instance_heartbeat import list_instances
 from app.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -212,10 +213,17 @@ async def build_ha_status(
         ).all()
     )
 
+    try:
+        instances = await list_instances(db)
+    except Exception:  # noqa: BLE001 — display-only, never 500
+        instances = []
+
     return {
         "main_db": main_db,
         "spare_db": spare_db,
         "ocr": ocr,
+        "instances": instances,
+        "instances_total": len(instances),
         "servers": servers,
         "servers_total": sum(servers.values()),
         "stacks": stacks,
