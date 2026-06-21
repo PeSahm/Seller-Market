@@ -30,10 +30,12 @@ class SettingsUpdate(BaseModel):
     # cap (default 4) is whatever the admin sets; the service layer
     # rejects per-stack values exceeding it.
     agent_locust_processes_cap: int = Field(default=4, ge=1, le=32)
-    # Auto-sell (#110): URL the BOT stacks use to reach the shared market-data WS
+    # Auto-sell (#110): URL(s) the BOT stacks use to reach the market-data WS
     # service (e.g. "http://5.10.248.55:8077"). EMPTY = auto-sell OFF fleet-wide
     # (stacks keep the scheduler-only command). Setting it flips each stack to
-    # bot_entrypoint.py + MARKET_DATA_URL on the next Redeploy.
+    # bot_entrypoint.py + MARKET_DATA_URL on the next Redeploy. May be a
+    # comma/space-separated FAILOVER pool (the bot tries them in order, preferring
+    # the first) so a sidecar outage needs no redeploy.
     bot_market_data_url: str = Field(default="", max_length=512)
 
     @field_validator("ocr_service_url")
@@ -57,16 +59,22 @@ class SettingsUpdate(BaseModel):
     @field_validator("bot_market_data_url")
     @classmethod
     def _check_bot_market_data_url(cls, v: str) -> str:
-        # Empty is valid and means "auto-sell off fleet-wide".
-        v = v.strip()
-        if not v:
+        # Empty is valid and means "auto-sell off fleet-wide". Otherwise one OR
+        # MORE endpoints, comma/space-separated (a failover pool — the bot tries
+        # them in order, preferring the first, so a sidecar outage needs no
+        # redeploy). A single URL round-trips unchanged; the list normalises to a
+        # comma-space-joined form (rendered verbatim into MARKET_DATA_URL).
+        tokens = [t.strip() for t in (v or "").replace(",", " ").split()]
+        tokens = [t for t in tokens if t]
+        if not tokens:
             return ""
-        parsed = urlparse(v)
-        if parsed.scheme not in ("http", "https"):
-            raise ValueError("bot_market_data_url must be http:// or https:// (or empty)")
-        if not parsed.netloc:
-            raise ValueError("bot_market_data_url is missing host")
-        return v
+        for t in tokens:
+            parsed = urlparse(t)
+            if parsed.scheme not in ("http", "https"):
+                raise ValueError("bot_market_data_url must be http:// or https:// (or empty)")
+            if not parsed.netloc:
+                raise ValueError("bot_market_data_url is missing host")
+        return ", ".join(tokens)
 
     @field_validator("agent_image_tag")
     @classmethod
