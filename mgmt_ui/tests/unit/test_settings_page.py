@@ -44,3 +44,34 @@ def test_ocr_url_rejects_missing_host():
 def test_ocr_url_rejects_empty():
     with pytest.raises(ValidationError):
         SettingsUpdate(**_base(ocr_service_url="   "))
+
+
+# --- bot_market_data_url: now a comma/space-separated failover pool (HA) -----
+
+
+def test_bot_market_data_url_empty_is_off():
+    # Empty = auto-sell OFF fleet-wide (NOT a validation error).
+    s = SettingsUpdate(**_base(bot_market_data_url="   "))
+    assert s.bot_market_data_url == ""
+
+
+def test_single_bot_market_data_url_roundtrips_unchanged():
+    s = SettingsUpdate(**_base(bot_market_data_url="http://5.10.248.55:8077"))
+    assert s.bot_market_data_url == "http://5.10.248.55:8077"
+
+
+def test_multiple_bot_market_data_urls_normalized_to_comma_join():
+    s = SettingsUpdate(
+        **_base(bot_market_data_url="http://5.10.248.55:8077 , http://45.139.10.192:8077")
+    )
+    assert s.bot_market_data_url == "http://5.10.248.55:8077, http://45.139.10.192:8077"
+
+
+def test_bot_market_data_url_rejects_bad_scheme():
+    with pytest.raises(ValidationError):
+        SettingsUpdate(**_base(bot_market_data_url="http://ok:1, ftp://bad:1"))
+
+
+def test_bot_market_data_url_rejects_missing_host():
+    with pytest.raises(ValidationError):
+        SettingsUpdate(**_base(bot_market_data_url="http://"))

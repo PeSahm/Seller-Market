@@ -107,6 +107,17 @@ def test_compose_yaml_auto_sell_opt_in() -> None:
     assert "OCR_SERVICE_URL=" + OCR_URL in env  # existing env preserved
 
 
+def test_compose_yaml_auto_sell_failover_pool() -> None:
+    """#110 HA: a comma-separated bot_market_data_url renders verbatim into
+    MARKET_DATA_URL (the bot parses the failover pool itself) and the YAML still
+    parses — the env value carries a comma + space, like OCR_SERVICE_URL does."""
+    pool = "http://5.10.248.55:8077, http://45.139.10.192:8077"
+    out = render_compose_yaml(_ctx(bot_market_data_url=pool))
+    parsed = yaml.safe_load(out)
+    env = parsed["services"]["trading-bot"]["environment"]
+    assert f"MARKET_DATA_URL={pool}" in env
+
+
 def test_compose_yaml_no_telegram_no_ocr_sidecar() -> None:
     """Belt-and-braces: scan for forbidden strings case-insensitively."""
     out = render_compose_yaml(_ctx()).lower()

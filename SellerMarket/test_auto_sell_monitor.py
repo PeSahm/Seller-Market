@@ -5,6 +5,8 @@ injected. Run: ``python -m pytest test_auto_sell_monitor.py -q``.
 """
 from __future__ import annotations
 
+import json
+import sys
 import tempfile
 from datetime import datetime, timezone, timedelta
 
@@ -43,6 +45,174 @@ def test_ws_base_conversion():
     assert mdws.ws_base("http://5.10.248.55:8077") == "ws://5.10.248.55:8077"
     assert mdws.ws_base("https://h:9/") == "wss://h:9"
     assert mdws.ws_base("ws://h:9") == "ws://h:9"
+
+
+def test_ws_bases_parsing():
+    # single URL → one-element list (backward compatible)
+    assert mdws.ws_bases("http://a:8077") == ["ws://a:8077"]
+    # comma-separated failover pool, order preserved, trailing slash stripped
+    assert mdws.ws_bases("http://a:8077, https://b:9/") == ["ws://a:8077", "wss://b:9"]
+    # whitespace + mixed separators + empty tokens are tolerated
+    assert mdws.ws_bases(" http://a:1 ,, http://b:2 ") == ["ws://a:1", "ws://b:2"]
+    assert mdws.ws_bases("") == []
+
+
+# ---------------------------------------------------------------------------
+# QueueFeed failover (#110 HA): ordered, prefer-primary, single upstream
+# ---------------------------------------------------------------------------
+
+class _FakeConn:
+    """A fake websocket-client connection: yields ``frames`` then ends (which the
+    feed treats as a disconnect). ``on_recv_end`` runs when frames are exhausted
+    (a test uses it to stop the feed so ``_run_one`` terminates)."""
+
+    def __init__(self, frames, on_recv_end=None):
+        self._frames = list(frames)
+        self._on_recv_end = on_recv_end
+
+    def settimeout(self, _t):
+        pass
+
+    def recv(self):
+        if self._frames:
+            return self._frames.pop(0)
+        if self._on_recv_end:
+            self._on_recv_end()
+        raise RuntimeError("connection closed")
+
+    def close(self):
+        pass
+
+
+class _FakeWSModule:
+    """Stand-in for the ``websocket`` module. ``behavior(url)`` returns a
+    ``_FakeConn`` or raises (an unreachable endpoint)."""
+
+    def __init__(self, behavior):
+        self._behavior = behavior
+        self.connect_log: list[str] = []
+
+    def create_connection(self, url, timeout=None):
+        self.connect_log.append(url)
+        return self._behavior(url)
+
+
+def _run_feed(monkeypatch, urls, behavior):
+    """Drive ``QueueFeed._run_one`` once with a faked websocket module; return
+    ``(updates, connect_log)``."""
+    updates: list = []
+    feed = mdws.QueueFeed(urls, lambda i, v: updates.append((i, v)),
+                          reconnect_min=0.001, reconnect_max=0.002)
+    fake = _FakeWSModule(behavior)
+    monkeypatch.setitem(sys.modules, "websocket", fake)
+    feed._run_one("IRO1A")
+    return updates, fake.connect_log
+
+
+def test_queuefeed_single_url_unchanged(monkeypatch):
+    # One endpoint behaves exactly as before: connect, deliver, then disconnect.
+    updates = []
+    feed = mdws.QueueFeed("http://only:8077", lambda i, v: updates.append((i, v)),
+                          reconnect_min=0.001)
+    fake = _FakeWSModule(lambda url: _FakeConn(
+        [json.dumps({"buy_volume": 7})], on_recv_end=feed.stop))
+    monkeypatch.setitem(sys.modules, "websocket", fake)
+    feed._run_one("IRO1A")
+    assert ("IRO1A", 7) in updates
+    assert all("only:8077" in u for u in fake.connect_log)
+
+
+def test_queuefeed_fails_over_to_backup_no_premature_hold(monkeypatch):
+    # Primary is unreachable; the feed must reach the BACKUP and deliver its
+    # value WITHOUT first emitting a HOLD (None) for the primary's failure.
+    def behavior(url):
+        if "primary:8077" in url:
+            raise ConnectionError("primary down")
+        feed_stop = getattr(behavior, "_stop", None)
+        return _FakeConn([json.dumps({"buy_volume": 42})], on_recv_end=feed_stop)
+
+    updates = []
+    feed = mdws.QueueFeed("http://primary:8077, http://backup:8077",
+                          lambda i, v: updates.append((i, v)),
+                          reconnect_min=0.001, reconnect_max=0.002)
+    behavior._stop = feed.stop
+    fake = _FakeWSModule(behavior)
+    monkeypatch.setitem(sys.modules, "websocket", fake)
+    feed._run_one("IRO1A")
+    # tried primary FIRST, then backup (prefer-primary ordering)
+    assert "ws://primary:8077/ws/queue?isin=IRO1A" == fake.connect_log[0]
+    assert any("backup:8077" in u for u in fake.connect_log)
+    # the FIRST update is the real value from the backup — NO spurious HOLD
+    # emitted for the primary's connect failure (only the end-of-stream HOLD).
+    assert updates[0] == ("IRO1A", 42)
+
+
+def test_queuefeed_all_endpoints_unreachable_holds(monkeypatch):
+    # Both endpoints down → exactly one HOLD (None) AFTER the whole list is
+    # exhausted, then the feed stops (we set stop on the 2nd connect attempt).
+    calls = {"n": 0}
+    feed = mdws.QueueFeed("http://a:8077, http://b:8077",
+                          lambda i, v: None, reconnect_min=0.001)
+
+    holds = []
+    feed._on_update = lambda i, v: holds.append((i, v))
+
+    def behavior(url):
+        calls["n"] += 1
+        if calls["n"] >= 2:   # after trying BOTH bases, stop the loop
+            feed.stop()
+        raise ConnectionError("down")
+
+    fake = _FakeWSModule(behavior)
+    monkeypatch.setitem(sys.modules, "websocket", fake)
+    feed._run_one("IRO1A")
+    assert any("a:8077" in u for u in fake.connect_log)
+    assert any("b:8077" in u for u in fake.connect_log)
+    # HOLD emitted once, only after BOTH endpoints failed (not after the first)
+    assert holds == [("IRO1A", None)]
+
+
+def test_queuefeed_rechecks_primary_no_permanent_stick(monkeypatch):
+    # The critical single-upstream invariant: a thread on the BACKUP must NOT
+    # stick there forever. The sidecar's keepalive ({"ping": true}, no buy_volume)
+    # keeps recv alive indefinitely, so the wall-time recheck deadline is what
+    # drops the backup and re-attempts the PRIMARY (reconverge → single upstream).
+    updates = []
+    feed = mdws.QueueFeed(
+        "http://primary:8077, http://backup:8077",
+        lambda i, v: updates.append((i, v)),
+        reconnect_min=0.001, primary_recheck=5.0,
+    )
+    clock = {"t": 0.0}
+    monkeypatch.setattr(mdws.time, "monotonic", lambda: clock["t"])
+    primary_attempts = {"n": 0}
+
+    class _KeepaliveConn:
+        def settimeout(self, _t):
+            pass
+
+        def recv(self):
+            clock["t"] += 3.0          # time advances between keepalives
+            return '{"ping": true}'    # non-data frame → parse_buy_volume None
+
+        def close(self):
+            pass
+
+    def behavior(url):
+        if "primary:8077" in url:
+            primary_attempts["n"] += 1
+            if primary_attempts["n"] >= 2:   # primary RE-attempted → end the test
+                feed.stop()
+            raise ConnectionError("primary down")
+        return _KeepaliveConn()
+
+    monkeypatch.setitem(sys.modules, "websocket", _FakeWSModule(behavior))
+    feed._run_one("IRO1A")
+    # the primary was re-attempted (>= 2) → the thread did NOT stick on the backup
+    assert primary_attempts["n"] >= 2
+    # the recheck HOLDs the brief gap (fail-safe), never forwards a stale value
+    assert ("IRO1A", None) in updates
+    assert all(v is None for _, v in updates)  # keepalives forwarded NOTHING
 
 
 def test_parse_buy_volume():

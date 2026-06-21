@@ -64,11 +64,15 @@
     <label class="label" for="bot_market_data_url">Bot market-data URL (auto-sell)</label>
     <input class="input" id="bot_market_data_url" name="bot_market_data_url"
            value="{{ settings_values.bot_market_data_url }}"
-           placeholder="http://5.10.248.55:8077" maxlength="512">
+           placeholder="http://5.10.248.55:8077, http://45.139.10.192:8077" maxlength="512">
     <p class="text-small text-muted">
-      URL the <strong>bot stacks</strong> use to reach the shared market-data
-      WebSocket service for <strong>auto-sell</strong> (#110) — the per-host sidecar
-      published on PouyanIt, e.g. <code>http://5.10.248.55:8077</code>.
+      URL(s) the <strong>bot stacks</strong> use to reach the market-data
+      WebSocket service for <strong>auto-sell</strong> (#110) — a per-host sidecar,
+      e.g. <code>http://5.10.248.55:8077</code>.
+      <strong>Add several comma-separated for a failover pool</strong>
+      (e.g. <code>http://5.10.248.55:8077, http://45.139.10.192:8077</code>): the bot
+      tries them in order, always preferring the first, and fails over on its own —
+      so a sidecar going down needs <em>no redeploy</em>.
       <strong>Leave empty to keep auto-sell OFF</strong> fleet-wide (stacks run the
       byte-identical scheduler-only command). Setting it flips each stack to
       <code>bot_entrypoint.py</code> + <code>MARKET_DATA_URL</code> on the next

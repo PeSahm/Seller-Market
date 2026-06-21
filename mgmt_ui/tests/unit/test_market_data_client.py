@@ -112,3 +112,98 @@ async def test_instruments_ok(monkeypatch):
 async def test_instruments_swallows_errors(monkeypatch):
     _patch_client(monkeypatch, exc=RuntimeError("sidecar down"))
     assert await mdc.get_instruments(MagicMock()) == []
+
+
+# ---------------------------------------------------------------------------
+# Failover pool (HA): comma-separated market_data_url, prefer-primary failover
+# ---------------------------------------------------------------------------
+
+
+class _RouteClient:
+    """AsyncClient stand-in routing by URL substring → ``_FakeResp`` or raises."""
+
+    calls: list[str] = []
+
+    def __init__(self, routes):
+        self._routes = routes
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def get(self, url, params=None):
+        _RouteClient.calls.append(url)
+        for sub, val in self._routes.items():
+            if sub in url:
+                if isinstance(val, Exception):
+                    raise val
+                return val
+        raise AssertionError(f"no route for {url}")
+
+
+def _patch_routed(monkeypatch, routes, setting):
+    _RouteClient.calls = []
+
+    async def _gs(_db, _k):
+        return setting
+
+    monkeypatch.setattr(mdc.settings_store, "get_setting", _gs)
+    monkeypatch.setattr(mdc.httpx, "AsyncClient", lambda *a, **k: _RouteClient(routes))
+
+
+def test_parse_bases():
+    assert mdc._parse_bases("http://a:8077") == ["http://a:8077"]
+    assert mdc._parse_bases("http://a:8077, http://b:8077/") == ["http://a:8077", "http://b:8077"]
+    assert mdc._parse_bases("") == [mdc._DEFAULT_BASE]
+    assert mdc._parse_bases(None) == [mdc._DEFAULT_BASE]
+
+
+async def test_search_fails_over_to_backup(monkeypatch):
+    _patch_routed(
+        monkeypatch,
+        {
+            "primary:8077": mdc.httpx.ConnectError("primary down"),
+            "backup:8077": _FakeResp({"instruments": [{"isin": "X"}]}),
+        },
+        "http://primary:8077, http://backup:8077",
+    )
+    out = await mdc.search_instruments(MagicMock(), "foo")
+    assert out == [{"isin": "X"}]
+    # prefer-primary: the primary is tried BEFORE the backup (order, not presence)
+    primary_i = next(i for i, u in enumerate(_RouteClient.calls) if "primary:8077" in u)
+    backup_i = next(i for i, u in enumerate(_RouteClient.calls) if "backup:8077" in u)
+    assert primary_i < backup_i
+
+
+async def test_all_bases_fail_is_graceful(monkeypatch):
+    _patch_routed(
+        monkeypatch,
+        {
+            "a:8077": mdc.httpx.ConnectError("down"),
+            "b:8077": mdc.httpx.ConnectError("down"),
+        },
+        "http://a:8077, http://b:8077",
+    )
+    assert await mdc.search_instruments(MagicMock(), "foo") == []
+    assert await mdc.get_last_price(MagicMock(), "X") is None
+    assert await mdc.get_price_band(MagicMock(), "X") is None
+    assert await mdc.get_queue(MagicMock(), "X") is None
+    assert await mdc.get_instruments(MagicMock()) == []
+
+
+async def test_404_on_primary_does_not_fail_over(monkeypatch):
+    # A healthy sidecar's 404 ("no data for this ISIN") is definitive — the next
+    # base shares the same RLC source. Failing over would be pointless, and (if a
+    # backup ever DID answer) wrong. So a 404 returns None without touching backup.
+    _patch_routed(
+        monkeypatch,
+        {
+            "primary:8077": _FakeResp({}, status=404),
+            "backup:8077": _FakeResp({"last_price": 999}),
+        },
+        "http://primary:8077, http://backup:8077",
+    )
+    assert await mdc.get_last_price(MagicMock(), "X") is None
+    assert all("backup:8077" not in u for u in _RouteClient.calls)

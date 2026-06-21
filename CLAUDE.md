@@ -1439,3 +1439,68 @@ Took Session 24's code from "merged but off" to **fully deployed + live**. **PR 
 - **Secure the DB link** (Windows main + the cross-host spare are plaintext) → SSL/WireGuard.
 - **Recovery container** (cold path, PR #157) not deployed.
 - The stale local `postgres:16-alpine` (S23 fallback) still runs on PouyanIt — harmless, a separate cleanup.
+
+---
+
+## Session 26 — second backup site + market-data replica on ParsPack (removing the PouyanIt-only SPOFs for backups & auto-sell feed)
+
+Operator, on reviewing `/admin/ha`: *"ensure we have backups also in ParsPack — if PouyanIt dies we have no backup. … those should be identical. And what about the market-data service that's on PouyanIt for auto-sell — it should also be a replica."* Both were PouyanIt-only SPOFs (the warm spare + backup cron lived only on PouyanIt; ParsPack's HA Backups card read "No backups found", and the single market-data sidecar = the only auto-sell queue feed). Stood up **independent replicas of BOTH on ParsPack**, all verified live. **No code/migration — pure ops** (standalone containers + a cron, zero edits to ParsPack's running api compose).
+
+### What's now live on ParsPack (`45.139.10.192`)
+- **Warm spare `sm-spare-pg`** (`postgres:18`) — seeded from the Windows main, **matches exactly** (6 servers / 72 customers / alembic `0017_mgmt_instances`). Volume at `/var/lib/postgresql` (the postgres:18 path gotcha), attached to `seller-market-mgmt_default` (so a future manual promote can reach it by name), `restart unless-stopped`.
+- **Backup cron** `/root/db_ha_backup_cron.sh` (`*/3`, **byte-identical** to PouyanIt's — sha `b6b5512707c7`): dumps the Windows main via the spare container's PG18 client → restores into ParsPack's spare → writes `/var/lib/sm-mgmt/backups/manifest.json`, **keep 4**, marker-aware. The api already bind-mounts `/var/lib/sm-mgmt/backups`, so **`/admin/ha` Backups card now reads count≤4 / restored_ok=true** (was empty). Verified accumulating (`restored=true` each tick).
+- **Market-data replica `seller-market-md`** (image `d67e4dd` — the mirror's `:latest`, a superset of PouyanIt's running `576a35d`: it adds the OCR-pool `decode_captcha`; PouyanIt's md left as-is, NOT upgraded). Host-published `8077`, Khobregan creds copied host-to-host (never printed), `OCR_SERVICE_URL=http://5.10.248.55:18080`, also `--network connect`ed with alias `market-data` so ParsPack's own mgmt typeahead resolves it locally. `/health`→`account_configured:true`, `/price-band` returns live RLC data. RAM after both adds: 688 MB used / **1285 MB available** (comfortable on the 1.97 GB box running mgmt + 2 bots).
+
+### THE KEY SAFETY FACT — why a concurrent market-data replica is safe (single Khobregan account)
+The sidecar opens its **ONE upstream Khobregan WS lazily** — `_QueueHub._ensure_client()` fires only on the first `/ws/queue` **subscriber** ([market_data_app.py:71-97](SellerMarket/market_data_app.py#L71-L97)), NOT at startup. Bots address the feed via the fleet-wide `bot_market_data_url=http://5.10.248.55:8077` (PouyanIt), so **no bot ever subscribes to ParsPack's `/ws/queue` → ParsPack never opens the upstream → no multi-IP login fight** with PouyanIt's session. Verified live: `established_outbound_sockets=0` on the ParsPack md container after hitting `/health` + `/price-band` (REST = public RLC, never touches the upstream). **NEVER curl ParsPack's `/ws/queue` while PouyanIt's feed is live** — that would open a second upstream and trip the single-account lock.
+
+### Failover runbooks (manual — the building blocks are now in place)
+- **Auto-sell feed (market-data) failover** — if PouyanIt's md dies: set the **`bot_market_data_url`** setting → `http://45.139.10.192:8077` and **redeploy the auto-sell stacks** → bots subscribe to ParsPack → ParsPack opens the (now-uncontended) upstream Khobregan WS → auto-sell resumes. ⚠️ **GATED ON OCR**: opening that upstream needs a captcha login (`decode_captcha`), and ParsPack has **no local OCR** (no AVX) — its `OCR_SERVICE_URL` points at PouyanIt's `:18080`. So the WS failover works for *"PouyanIt's md container/process died but the host+OCR live"*, but a **full PouyanIt-host death still blocks the upstream login until an AVX2 OCR exists** (the deferred OCR-HA item). The **REST endpoints** (price-band/queue/instruments/search) need no OCR → those survive a full PouyanIt death regardless.
+- **Backups / DB recovery if PouyanIt is gone** — ParsPack now has its own fresh dumps in `/var/lib/sm-mgmt/backups` (kept current every 3 min straight from the Windows main, independent of PouyanIt) + a warm local spare already restored. Cold-recover by pointing `SPARE_DSN`→ParsPack's `sm-spare-pg` (+ restart) or via the recovery console.
+
+### Failover-topology decision (deliberately UNCHANGED — no split-brain)
+Left the **auto-failover `SPARE_DSN` on BOTH mgmt instances pointing at PouyanIt's shared spare** (`5.10.248.55:5433`) — the S24/S25 design that avoids split-brain when *only the Windows main* dies (both fail over to ONE spare = one writable DB). ParsPack's NEW local spare is an **independent backup/DR site**, NOT its auto-failover target — so it does NOT reintroduce the two-writable-spares split-brain. A compound failure (PouyanIt dead **and** Windows dead) is the only case needing a manual ParsPack-spare promote; documented above.
+
+### Deploy-ops learnings (Session 26)
+- **The liara mirror (`ghcr-mirror.liara.ir`) fronts GHCR ONLY, not docker.io** — `docker pull postgres:18` on ParsPack timed out on `registry-1.docker.io`. Pull docker.io images from an Iranian docker.io mirror: **`docker.arvancloud.ir/library/postgres:18`** worked (then retag `postgres:18`). (hub.focker.ir is a fallback.)
+- **Mirror `:latest` can be NEWER than what a host runs** — PouyanIt's md is `576a35d` but the mirror served `d67e4dd`; verify the revision label and decide (here newer = a safe superset for a dormant standby).
+- **Copy broker secrets host-to-host through a pipe, never via the transcript** — `ssh PouyanIt 'extract' | ssh ParsPack 'cat > env'`; the values ride the pipe (the final command's stdout is empty), then verify only **counts/lengths** (`keys=3`, per-key `len`/`startq`/`endq` via python — confirms no stray surrounding quotes without printing the value). `grep -E "[\x22\x27]"` is NOT a reliable quote check (POSIX bracket has no `\xNN` → it matched a digit; the python per-char check is authoritative).
+- **`_backups_summary(settings)` and `load_manifest(manifest_FILE_path)`** — the latter takes the manifest *file*, not its directory (passing the dir → OSError → `[]`, a misleading "0 entries"). Use the real `ha_status._backups_summary(get_settings())` to verify the HA card.
+- **Standalone `docker run` + `docker network connect … --alias` beats editing a running host's compose** — added the spare + md to ParsPack with zero risk of recreating the live api; the alias still gives local name-resolution (`market-data:8077`) for the mgmt typeahead.
+- Both adds cost ParsPack ~115 MB RAM (573→688 used); fine, but ParsPack is the weakest host (1.97 GB, no AVX, runs mgmt + 2 bots) — watch RAM if more is stacked there.
+
+### Still deferred (unchanged)
+- **AVX2 OCR server** — still the gating item for *full* auto-sell HA on a complete PouyanIt-host death (the ParsPack md replica's WS upstream can't captcha-login without reachable OCR).
+- ~~Auto **bot-side** market-data failover~~ — **DONE this session (Session 27, PR pending)**: `MARKET_DATA_URL` is now a comma-separated failover pool.
+- Secure the DB link (plaintext) · recovery container (cold path) · stale `postgres:16-alpine` cleanup on PouyanIt.
+
+---
+
+## Session 27 — market-data failover POOL (no-redeploy auto-sell HA): `bot_market_data_url` as a comma list, prefer-primary failover with a single-upstream guard
+
+Operator (reacting to Session-26's "flip `bot_market_data_url` + redeploy" runbook): *"that's a bit not good — like OCR, I want to add servers comma-separated and the app should fail over if one doesn't work, because in a harsh time it's tough to redeploy all servers."* Made the bot's market-data endpoint a **comma/space-separated FAILOVER pool** (mirroring the OCR pool), so a sidecar outage needs **NO redeploy** — the bot already carries the backup address and fails over on its own. Branch `feat/market-data-failover` (PR pending). **Bot + mgmt code; no migration.**
+
+### What changed
+- **Bot `market_data_ws.py`** — `ws_bases()` parses the list; `QueueFeed._run_one` does **ordered, prefer-primary failover**: try index 0 first every cycle, advance only when earlier endpoints are unreachable, HOLD (`on_update(None)`, the existing fail-safe) only after the WHOLE list fails or an established connection drops. Single URL = byte-identical to before.
+- **mgmt** — `bot_market_data_url` validator accepts 1..N http(s) URLs (empty still = auto-sell OFF), normalised to comma-joined; `compose_yaml` renders the value verbatim into `MARKET_DATA_URL` (no change — like `OCR_SERVICE_URL`); `market_data_client._fetch` adds the same ordered failover for the mgmt REST calls; settings help text + examples.
+
+### THE single-upstream invariant — why prefer-primary needs a WALL-TIME recheck (the adversarial review's catch)
+The sidecar holds ONE upstream Khobregan Exir WS on a SINGLE account that rejects concurrent multi-IP logins, so at most ONE sidecar may have `/ws/queue` subscribers at a time. Prefer-primary is supposed to reconverge all bots on the primary when it's healthy → one sidecar → one upstream. **The first implementation was WRONG**: prefer-primary only re-evaluated on a *disconnect*, but the sidecar sends a `{"ping": true}` keepalive every ~30s, so a healthy backup connection **never** disconnects (recv never times out) → a thread that failed over to the backup would **stick there forever**. A flap that splits threads (some on primary, some stuck on backup) → **permanent two-sidecar / two-upstream split** → the exact multi-IP login fight the invariant forbids. **Fix:** a **wall-time recheck deadline** (`primary_recheck=45s`, monotonic, independent of recv) — a non-primary connection is dropped + re-attempts the primary every 45s (HOLD during the sub-second gap), so the fleet reconverges on the primary within 45s of recovery. (A recv-timeout-based recheck can't work — the keepalive defeats it.)
+
+### Adversarial review (5 lenses → 3-vote verify, 23 agents) — 6 confirmed, ALL fixed, 0 refuted
+1. **[critical] permanent backup-stick** → wall-time recheck deadline (above).
+2/3. **[high] stick after a flap / scheduled restart** → same recheck fix.
+4. **[high] backoff** → on an established-drop, `wait(backoff)` then grow (byte-identical to the old single-URL path, but a flaky accept-then-drop endpoint now backs off); planned rechecks do NOT grow backoff (fast reconvergence).
+5/6. **[medium/low] `_fetch` only failed over on `httpx.HTTPError`** → a malformed-JSON 200 from base[0] escaped instead of trying base[1]; broadened to `except Exception` (any per-base error → try next; all fail → caller's graceful `[]`/`None`).
+- **Residual (documented, accepted):** a *flapping* primary can still cause brief (≤45s) windows where the fleet is split → transient login churn → both feeds HOLD (no bad sells) until reconvergence. Bounded + fail-safe. Full elimination needs cross-ISIN coordination (a shared connected-index) — deferred as over-engineering for a rare, already-safe transient.
+
+### Safety properties (verified)
+- **No spurious SELL**: every failover gap / recheck / all-fail emits HOLD, which clears the monitor's sustained-below confirm timer → the monitor never sells on a feed transition.
+- **No premature HOLD**: a primary connect-failure does NOT HOLD before the backup is tried (HOLD only after the whole list fails).
+- **Backward-compatible BOTH ways**: a single-URL setting behaves byte-identically (the live fleet runs single-URL today); a comma value renders to valid YAML/env (same as OCR). Tests: bot **213**, mgmt **637**.
+
+### ROLLOUT GATE (critical — same shape as S13)
+An OLD bot image has no list parsing → a comma-list `MARKET_DATA_URL` would make it connect to `ws://urlA,urlB/ws/queue` → fail → auto-sell HOLDs (fail-safe, no bad trades, but auto-sell OFF). So: **(1) deploy the new bot image fleet-wide → (2) redeploy all stacks → (3) deploy mgmt → (4) THEN set `bot_market_data_url` to the comma-list + redeploy once.** After that, a sidecar outage needs NO redeploy. Until step 4, single-URL behaves exactly as today.
+
+### Process note
+Built with two workflows (ultracode): an **Understand** fan-out (mapped the bot WS reconnect loop + the OCR pattern to mirror + the mgmt plumbing) then an **adversarial review** fan-out (5 lenses, 3-vote verify). The review caught the keepalive-defeats-recheck bug that the first implementation + my own reasoning missed — the single-upstream invariant held in my head but not in the code (reconvergence only on disconnect, which a keepalive prevents). Empirical multi-agent verification earned its keep on a money-path concurrency invariant.
