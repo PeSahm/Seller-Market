@@ -171,8 +171,10 @@ async def test_search_fails_over_to_backup(monkeypatch):
     )
     out = await mdc.search_instruments(MagicMock(), "foo")
     assert out == [{"isin": "X"}]
-    assert any("primary:8077" in u for u in _RouteClient.calls)  # tried first
-    assert any("backup:8077" in u for u in _RouteClient.calls)   # then failed over
+    # prefer-primary: the primary is tried BEFORE the backup (order, not presence)
+    primary_i = next(i for i, u in enumerate(_RouteClient.calls) if "primary:8077" in u)
+    backup_i = next(i for i, u in enumerate(_RouteClient.calls) if "backup:8077" in u)
+    assert primary_i < backup_i
 
 
 async def test_all_bases_fail_is_graceful(monkeypatch):

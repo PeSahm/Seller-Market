@@ -71,7 +71,10 @@ async def _fetch(
     last_exc: Optional[Exception] = None
     for base in bases:
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            # trust_env=False: reach the (Iranian-host) sidecar directly, never
+            # via a foreign HTTP proxy that may sit in the container env — the
+            # belt-and-suspenders rule used by rlc_price/rlc_market on the bot.
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
                 r = await client.get(f"{base}{path}", params=params)
             if r.status_code == 404:
                 return None
