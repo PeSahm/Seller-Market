@@ -84,9 +84,9 @@ async def test_agent_set_foreign_isin_404(monkeypatch):
     user = SimpleNamespace(role="agent", id=uuid.uuid4())
 
     async def _open(_db, *, agent_id):
-        return [SimpleNamespace(isin="IRO1OTHER")]  # agent holds a DIFFERENT isin
+        return {"IRO1OTHER"}  # agent holds a DIFFERENT isin open
     monkeypatch.setattr(
-        agent_router.services_close_positions, "build_open_positions", _open
+        agent_router.services_close_positions, "list_open_isins", _open
     )
 
     called = {"set": 0}
@@ -110,9 +110,9 @@ async def test_agent_set_owned_isin_calls_service(monkeypatch):
     user = SimpleNamespace(role="agent", id=uuid.uuid4())
 
     async def _open(_db, *, agent_id):
-        return [SimpleNamespace(isin="IRO1AAA")]
+        return {"IRO1AAA"}
     monkeypatch.setattr(
-        agent_router.services_close_positions, "build_open_positions", _open
+        agent_router.services_close_positions, "list_open_isins", _open
     )
 
     called = {"set": 0, "isin": None, "price": None}
@@ -134,7 +134,7 @@ async def test_agent_set_owned_isin_calls_service(monkeypatch):
 
 async def test_admin_set_bypasses_open_set(monkeypatch):
     # An admin may price any ISIN — _agent_open_isins returns None (no limit), so
-    # build_open_positions must NOT even be consulted on the admin path.
+    # list_open_isins must NOT even be consulted on the admin path.
     from app.routers import agent as agent_router
 
     user = SimpleNamespace(role="admin", id=uuid.uuid4())
@@ -142,7 +142,7 @@ async def test_admin_set_bypasses_open_set(monkeypatch):
     async def _open(_db, *, agent_id):  # pragma: no cover - must not run
         raise AssertionError("admin must bypass the open-set guard")
     monkeypatch.setattr(
-        agent_router.services_close_positions, "build_open_positions", _open
+        agent_router.services_close_positions, "list_open_isins", _open
     )
 
     called = {"set": 0}
@@ -164,9 +164,9 @@ async def test_agent_set_rejects_non_finite_price(monkeypatch):
     user = SimpleNamespace(role="agent", id=uuid.uuid4())
 
     async def _open(_db, *, agent_id):  # pragma: no cover - guard runs after parse
-        return [SimpleNamespace(isin="IRO1AAA")]
+        return {"IRO1AAA"}
     monkeypatch.setattr(
-        agent_router.services_close_positions, "build_open_positions", _open
+        agent_router.services_close_positions, "list_open_isins", _open
     )
 
     called = {"set": 0}
@@ -220,9 +220,12 @@ async def test_agent_close_all_skips_priced_and_falls_back(monkeypatch):
 
     calls = []
 
-    async def _set(_db, isin, price, note, actor_id, *, commit=True):
+    async def _set_if_absent(_db, isin, price, note, actor_id, *, commit=True):
         calls.append((isin, price, commit))
-    monkeypatch.setattr(agent_router.services_close_prices, "set_close_price", _set)
+        return True  # inserted (no concurrent price)
+    monkeypatch.setattr(
+        agent_router.services_close_prices, "set_close_price_if_absent", _set_if_absent
+    )
 
     db = _CommitDB()
     req = SimpleNamespace(headers={})
@@ -256,9 +259,12 @@ async def test_admin_close_all_skips_priced_and_falls_back(monkeypatch):
 
     calls = []
 
-    async def _set(_db, isin, price, note, actor_id, *, commit=True):
+    async def _set_if_absent(_db, isin, price, note, actor_id, *, commit=True):
         calls.append((isin, price, commit))
-    monkeypatch.setattr(admin_router.services_close_prices, "set_close_price", _set)
+        return True
+    monkeypatch.setattr(
+        admin_router.services_close_prices, "set_close_price_if_absent", _set_if_absent
+    )
 
     db = _CommitDB()
     req = SimpleNamespace(headers={})

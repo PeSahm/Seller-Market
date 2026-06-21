@@ -16,6 +16,7 @@ from typing import Optional
 from uuid import UUID
 
 from sqlalchemy import desc, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditLog
@@ -102,6 +103,50 @@ async def set_close_price(
     return row
 
 
+async def set_close_price_if_absent(
+    db: AsyncSession,
+    isin: str,
+    price: Decimal,
+    note: Optional[str],
+    actor_id: UUID,
+    *,
+    commit: bool = True,
+) -> bool:
+    """Insert a close price ONLY if the ISIN has none yet — atomic, race-safe.
+
+    Used by the bulk "Close all" so a manual price set concurrently (between the
+    open-positions snapshot and the loop) is NEVER clobbered. Returns ``True`` if
+    a row was inserted (and audits the set), ``False`` if a price already existed
+    (left as-is, no audit). ``ON CONFLICT (isin) DO NOTHING`` does the check in
+    one statement. Caller validates ``price > 0``.
+    """
+    now = datetime.now(timezone.utc)
+    stmt = (
+        pg_insert(InstrumentClosePrice)
+        .values(
+            isin=isin, close_price=price, note=note, updated_by=actor_id, updated_at=now
+        )
+        .on_conflict_do_nothing(index_elements=["isin"])
+        .returning(InstrumentClosePrice.isin)
+    )
+    res = await db.execute(stmt)
+    inserted = res.scalar_one_or_none() is not None
+    if inserted:
+        db.add(
+            AuditLog(
+                actor_user_id=actor_id,
+                action="instrument_close_price.set",
+                target_type="instrument_close_price",
+                target_id=str(isin),
+                before_json={"close_price": None, "note": None},
+                after_json={"close_price": str(price), "note": note},
+            )
+        )
+    if commit:
+        await db.commit()
+    return inserted
+
+
 async def clear_close_price(
     db: AsyncSession,
     isin: str,
@@ -143,5 +188,6 @@ __all__ = [
     "get_close_prices",
     "list_close_prices",
     "set_close_price",
+    "set_close_price_if_absent",
     "clear_close_price",
 ]

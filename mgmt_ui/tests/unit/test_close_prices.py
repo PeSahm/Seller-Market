@@ -17,11 +17,13 @@ _ISIN = "IRO1XXXX0001"
 
 
 class _FakeDB:
-    def __init__(self, row=None):
+    def __init__(self, row=None, insert_result=None):
         self._row = row
+        self._insert_result = insert_result  # scalar returned by the if-absent INSERT
         self.added: list = []
         self.deleted: list = []
         self.commits = 0
+        self.executed: list = []
 
     async def get(self, _model, _pk):
         return self._row
@@ -34,6 +36,16 @@ class _FakeDB:
 
     async def commit(self):
         self.commits += 1
+
+    async def execute(self, stmt):
+        self.executed.append(stmt)
+        result = self._insert_result
+
+        class _R:
+            def scalar_one_or_none(self):
+                return result
+
+        return _R()
 
 
 def _audits(db):
@@ -79,6 +91,36 @@ async def test_set_no_commit_defers_for_bulk():
     )
     assert db.commits == 0
     assert len(_audits(db)) == 1  # audit still staged
+
+
+async def test_set_if_absent_inserts_and_audits():
+    actor = uuid.uuid4()
+    db = _FakeDB(insert_result=_ISIN)  # ON CONFLICT inserted → RETURNING isin
+    out = await svc.set_close_price_if_absent(db, _ISIN, Decimal("7000"), "n", actor)
+    assert out is True
+    aus = _audits(db)
+    assert len(aus) == 1 and aus[0].action == "instrument_close_price.set"
+    assert aus[0].after_json["close_price"] == "7000"
+    assert db.commits == 1
+
+
+async def test_set_if_absent_skips_when_present():
+    db = _FakeDB(insert_result=None)  # ON CONFLICT DO NOTHING → no row returned
+    out = await svc.set_close_price_if_absent(
+        db, _ISIN, Decimal("7000"), None, uuid.uuid4()
+    )
+    assert out is False
+    assert _audits(db) == []  # no audit when nothing inserted
+    assert db.commits == 1  # commit still fires (default)
+
+
+async def test_set_if_absent_no_commit_defers_for_bulk():
+    db = _FakeDB(insert_result=_ISIN)
+    await svc.set_close_price_if_absent(
+        db, _ISIN, Decimal("7000"), None, uuid.uuid4(), commit=False
+    )
+    assert db.commits == 0
+    assert len(_audits(db)) == 1
 
 
 async def test_clear_deletes_and_audits():

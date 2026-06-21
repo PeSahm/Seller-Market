@@ -46,6 +46,10 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.func.now(),
         ),
+        sa.CheckConstraint(
+            "close_price > 0",
+            name="ck_instrument_close_prices_close_price_positive",
+        ),
     )
     # The 20-day rule is retired; drop any stale saved value so it can't linger.
     op.execute("DELETE FROM settings WHERE key = 'mark_to_market_days'")

@@ -175,7 +175,7 @@ def build_fee_workbook(
                 int(v.open_qty),
                 v.oldest_buy_date,  # real Excel date cell (None → empty)
                 _num(v.avg_buy_price),
-                int(v.price),
+                _num(v.price),
                 v.trigger,
                 ("loss" if v.in_loss else ("profit" if v.fee and v.fee > 0 else "break-even")),
                 _num(v.fee),

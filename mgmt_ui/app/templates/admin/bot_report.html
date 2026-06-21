@@ -304,10 +304,10 @@
           <td class="text-small">{{ '{:,}'.format(v.open_qty) }}</td>
           <td class="text-small text-muted">{{ v.oldest_buy_date.isoformat() if v.oldest_buy_date else '—' }}</td>
           <td class="text-small">{{ '{:,.0f}'.format(v.avg_buy_price) }}</td>
-          <td class="text-small">{{ '{:,}'.format(v.price) }}</td>
+          <td class="text-small">{{ '{:,.0f}'.format(v.price) }}</td>
           <td>
             {% if v.in_loss %}<span class="badge badge--down" title="fixed per-agent loss fee">loss</span>
-            {% elif v.fee and v.fee > 0 %}<span class="badge badge--up">profit</span>
+            {% elif v.price > v.avg_buy_price %}<span class="badge badge--up">profit</span>
             {% else %}<span class="badge">break-even</span>{% endif %}
           </td>
           <td class="text-small"><strong>{{ '{:,.0f}'.format(v.fee) }}</strong></td>

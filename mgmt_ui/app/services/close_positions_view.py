@@ -126,4 +126,38 @@ async def build_open_positions(
     return rows
 
 
-__all__ = ["OpenPositionRow", "build_open_positions"]
+async def list_open_isins(
+    db: AsyncSession,
+    *,
+    agent_id: Optional[UUID] = None,
+    broker: Optional[str] = None,
+) -> set[str]:
+    """The set of ISINs with an OPEN bot-buy remainder in scope.
+
+    A lean variant of :func:`build_open_positions` for the agent authorization
+    guard — it runs the same report but SKIPS the per-ISIN market-price fetch, so
+    a write (price/clear) is never blocked on the sidecar being reachable.
+    """
+    since = _parse_date(await settings_store.get_setting(db, "robot_start_date"))
+    ws = _parse_time(await settings_store.get_setting(db, "bot_window_start"))
+    we = _parse_time(await settings_store.get_setting(db, "bot_window_end"))
+    exclude = parse_exclusions(
+        (await settings_store.get_setting(db, "excluded_instruments")) or ""
+    )
+    report = await build_fee_report(
+        db,
+        agent_id=agent_id,
+        broker=broker or None,
+        since=since,
+        window_start=ws,
+        window_end=we,
+        exclude=exclude,
+    )
+    return {
+        r.buy.isin
+        for r in report.buy_rows
+        if r.open_volume > 0 and r.buy.isin
+    }
+
+
+__all__ = ["OpenPositionRow", "build_open_positions", "list_open_isins"]

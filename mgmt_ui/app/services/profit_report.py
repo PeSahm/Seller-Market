@@ -99,7 +99,7 @@ class VirtualFeeRow:
     symbol: str
     open_qty: int
     avg_buy_price: Decimal
-    price: int          # realization price (the saved close price)
+    price: Decimal      # realization price (the saved close price)
     trigger: str        # "close"
     in_loss: bool
     fee: Decimal
@@ -470,7 +470,7 @@ async def build_fee_report(
                 customer_id=cust_id, agent_id=agent_id_of_group,
                 broker=group[0].broker, isin=_isin, symbol=sym,
                 open_qty=rem_qty, avg_buy_price=avg_buy,
-                price=int(realize_price), trigger="close",
+                price=realize_price, trigger="close",
                 in_loss=in_loss, fee=vfee,
                 oldest_buy_date=oldest,
             ))

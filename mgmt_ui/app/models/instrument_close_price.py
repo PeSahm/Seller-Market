@@ -29,6 +29,12 @@ class InstrumentClosePrice(Base):
     """
 
     __tablename__ = "instrument_close_prices"
+    __table_args__ = (
+        sa.CheckConstraint(
+            "close_price > 0",
+            name="ck_instrument_close_prices_close_price_positive",
+        ),
+    )
 
     isin: Mapped[str] = mapped_column(String(64), primary_key=True)
     close_price: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)

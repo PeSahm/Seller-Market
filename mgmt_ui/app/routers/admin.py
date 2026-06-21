@@ -4369,17 +4369,21 @@ async def admin_close_positions_close_all(
         if r.latest_price and r.latest_price > 0:
             price = Decimal(r.latest_price)
             note = "bulk close at latest price"
+            is_default = False
         else:
             price = r.avg_buy_price
             note = "bulk close (no market price — avg buy)"
+            is_default = True
         if price is None or price <= 0:
             continue
-        if not (r.latest_price and r.latest_price > 0):
-            defaulted += 1
-        await services_close_prices.set_close_price(
+        # Atomic insert-if-absent: never clobber a price set concurrently.
+        inserted = await services_close_prices.set_close_price_if_absent(
             db, r.isin, price, note, user.id, commit=False
         )
-        closed += 1
+        if inserted:
+            closed += 1
+            if is_default:
+                defaulted += 1
     await db.commit()
 
     from urllib.parse import urlencode
