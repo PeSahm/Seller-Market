@@ -89,16 +89,12 @@ DEFAULTS: dict[str, str] = {
     # bot stacks keep the byte-identical scheduler-only command. Setting it makes
     # the next redeploy switch each stack to bot_entrypoint.py + MARKET_DATA_URL.
     "bot_market_data_url": "",
-    # --- 20-day mark-to-market loss fee (#111 follow-up) ---
-    # When a bot-bought position is still unsold after 20 days and is in LOSS at
-    # today's price, bill this FIXED fee per losing position (customer × stock).
-    # GLOBAL default in TOMAN; per-agent override lives in agent_fee_configs.
-    # The report converts ×10 to Rial. "0" = no loss fee.
+    # --- Loss fee on a manual close (#111 follow-up) ---
+    # When a bot-bought position is CLOSED (a saved close price ≤ its avg buy,
+    # i.e. in loss) on the Close-positions page, bill this FIXED fee per losing
+    # position (customer × stock). GLOBAL default in TOMAN; per-agent override
+    # lives in agent_fee_configs. The report converts ×10 to Rial. "0" = none.
     "mark_to_market_loss_fee_toman": "0",
-    # Days a bot-buy lot may sit UNSOLD before the fee report marks the open
-    # remainder to today's market price (applies regardless of partial sells).
-    # Editable from the Profit & fee tab.
-    "mark_to_market_days": "20",
 }
 
 

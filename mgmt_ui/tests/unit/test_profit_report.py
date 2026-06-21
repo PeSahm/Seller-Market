@@ -63,21 +63,17 @@ def _patch(monkeypatch):
         return {}
     monkeypatch.setattr(pr.fee_payments, "total_paid_by_customer", _paid)
 
-    # No live price by default → the 20-day pass is a no-op unless a test opts in.
-    async def _price(_db, _isin):
-        return None
-    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+    # No saved close prices by default → open positions stay open (no fee).
+    # Stubbing this means the real batch query never runs, so _fake_db's
+    # 2-call execute side_effect (orders + cust_agent) is unchanged. Tests that
+    # want a close realized override this with a per-isin dict.
+    async def _close(_db, _isins):
+        return {}
+    monkeypatch.setattr(pr.close_prices_svc, "get_close_prices", _close)
 
     async def _loss(_db, _agent):
         return Decimal("0")
     monkeypatch.setattr(pr, "get_loss_fee_rial", _loss)
-
-    # The mark_to_market_days resolution must not touch the fake db (whose
-    # execute side_effect list is positional) — answer from DEFAULTS.
-    async def _setting(_db, key):
-        from app.services.settings_store import DEFAULTS
-        return DEFAULTS.get(key, "")
-    monkeypatch.setattr(pr.settings_store, "get_setting", _setting)
 
 
 async def test_realized_profit_fee_on_bot_buy():
@@ -124,24 +120,21 @@ async def test_paid_and_remaining(monkeypatch):
     assert ct.paid == Decimal("200") and ct.remaining == Decimal("300")
 
 
-async def test_sell_predating_bot_buy_leaves_buy_open(monkeypatch):
+async def test_sell_predating_bot_buy_leaves_buy_open():
     # Chronological matching: a sell EXECUTED BEFORE the bot buy closes
-    # pre-existing/manual holdings, not the later buy. The buy stays fully
-    # open (and will age toward the 20-day mark), zero realized, zero fee.
-    async def _price(_db, _isin):
-        return 7000
-    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+    # pre-existing/manual holdings, not the later buy. The buy stays fully open,
+    # zero realized, zero fee. With no saved close price it produces no fee.
     sell = _order(2, 100, 6500, is_bot=False,
                   ts=datetime(2026, 6, 20, tzinfo=timezone.utc), tracking=1)
     buy = _order(1, 100, 6000, is_bot=True,
                  ts=datetime(2026, 6, 25, tzinfo=timezone.utc), tracking=2)
-    rep = await pr.build_fee_report(_fake_db([sell, buy], [(_CUST, _AGENT)]), today=_TODAY)
+    rep = await pr.build_fee_report(_fake_db([sell, buy], [(_CUST, _AGENT)]))
     row = rep.buy_rows[0]
     assert row.status == "open"
     assert row.matched_volume == 0 and row.open_volume == 100
     assert row.realized_profit == Decimal("0") and row.fee == Decimal("0")
     assert rep.unmatched_sell_qty == 100
-    assert rep.virtual_rows == []  # only 5 days old — not aged yet
+    assert rep.virtual_rows == []  # no saved close price
 
 
 async def test_loss_lot_earns_no_fee():
@@ -156,213 +149,133 @@ async def test_loss_lot_earns_no_fee():
 
 
 # ---------------------------------------------------------------------------
-# 20-day mark-to-market on unsold positions
+# Manual close of unsold positions (saved global close price)
 # ---------------------------------------------------------------------------
 
-_OLD = datetime(2026, 6, 1, tzinfo=timezone.utc)   # 29 days before _TODAY
-_RECENT = datetime(2026, 6, 25, tzinfo=timezone.utc)  # 5 days before _TODAY
+_OLD = datetime(2026, 6, 1, tzinfo=timezone.utc)
+_RECENT = datetime(2026, 6, 25, tzinfo=timezone.utc)
+_ISIN = "IRO1XXXX0001"  # the _order() default isin
 
 
-async def test_20day_profit_bills_pct_of_paper_gain(monkeypatch):
-    async def _price(_db, _isin):
-        return 7000
-    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
-    # bot buy 100 @ 6000 placed 29d ago, NEVER sold → open 100, today 7000.
+def _close_prices(mapping):
+    async def _close(_db, _isins):
+        return dict(mapping)
+    return _close
+
+
+async def test_close_realizes_open_remainder_at_saved_price(monkeypatch):
+    # bot buy 100 @ 6000, never sold → open 100; saved close price 7000.
+    monkeypatch.setattr(pr.close_prices_svc, "get_close_prices",
+                        _close_prices({_ISIN: Decimal("7000")}))
     buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
-    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
+    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]))
     assert len(rep.virtual_rows) == 1
     v = rep.virtual_rows[0]
-    assert v.trigger == "20d" and v.in_loss is False and v.open_qty == 100
-    assert v.fee == Decimal("1000")  # 1% × (7000-6000) × 100 = 1% × 100000
+    assert v.trigger == "close" and v.in_loss is False and v.open_qty == 100
+    assert v.fee == Decimal("1000")  # 1% × (7000-6000) × 100
     assert rep.per_customer[_CUST].mark_fee == Decimal("1000")
     assert rep.per_customer[_CUST].total_fee == Decimal("1000")
     assert rep.grand_fee == Decimal("1000")
 
 
-async def test_20day_loss_bills_fixed_per_agent_fee(monkeypatch):
-    async def _price(_db, _isin):
-        return 5500  # below the 6000 buy → loss
-    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+async def test_close_loss_bills_fixed_per_agent_fee(monkeypatch):
+    monkeypatch.setattr(pr.close_prices_svc, "get_close_prices",
+                        _close_prices({_ISIN: Decimal("5500")}))  # below 6000 → loss
 
     async def _loss(_db, _agent):
         return Decimal("500000")  # fixed loss fee, in Rial
     monkeypatch.setattr(pr, "get_loss_fee_rial", _loss)
 
     buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
-    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
+    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]))
     assert len(rep.virtual_rows) == 1
     v = rep.virtual_rows[0]
-    assert v.in_loss is True and v.fee == Decimal("500000")
+    assert v.trigger == "close" and v.in_loss is True and v.fee == Decimal("500000")
     assert rep.per_customer[_CUST].total_fee == Decimal("500000")
+    assert rep.per_customer[_CUST].mark_fee == Decimal("500000")
 
 
-async def test_20day_skips_recent_lots(monkeypatch):
-    async def _price(_db, _isin):
-        return 7000
-    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
-    buy = _order(1, 100, 6000, is_bot=True, ts=_RECENT, tracking=1)  # only 5 days old
-    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
-    assert rep.virtual_rows == []
+async def test_close_break_even_bills_no_fee(monkeypatch):
+    # Close price EQUAL to the avg buy → break-even → no fee, even if a loss fee
+    # is configured (the fallback price for a no-market-price symbol relies on
+    # this so a forced break-even close bills nothing).
+    monkeypatch.setattr(pr.close_prices_svc, "get_close_prices",
+                        _close_prices({_ISIN: Decimal("6000")}))
 
+    async def _loss(_db, _agent):
+        return Decimal("500000")
+    monkeypatch.setattr(pr, "get_loss_fee_rial", _loss)
 
-async def test_20day_skips_when_no_price():
-    # fixture's get_last_price returns None → no mark-to-market.
     buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
-    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
+    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]))
+    assert len(rep.virtual_rows) == 1  # still shown (every closed trade visible)
+    v = rep.virtual_rows[0]
+    assert v.in_loss is False and v.fee == Decimal("0")
+    assert rep.per_customer[_CUST].total_fee == Decimal("0")
+    assert rep.per_customer[_CUST].mark_fee == Decimal("0")
+
+
+async def test_no_saved_price_stays_open():
+    # Default fixture get_close_prices → {} → the open lot is never realized.
+    buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
+    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]))
     assert rep.virtual_rows == []
+    assert rep.buy_rows[0].open_volume == 100
 
 
-# ---------------------------------------------------------------------------
-# Plain FIFO + partial sells (the whole-position-on-first-sell trigger is GONE:
-# sold shares bill via FIFO; the remainder waits for its own 20-day clock)
-# ---------------------------------------------------------------------------
-
-
-async def test_partial_sell_remainder_not_realized_before_20d(monkeypatch):
-    # buy 100 @ 6000 (recent), customer sells 60 @ 6500. ONLY the sold 60 bill
-    # via FIFO; the unsold 40 produce NO virtual row (a live price exists, so
-    # the only reason is the age — the core revert pin).
-    async def _price(_db, _isin):
-        return 7000
-    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+async def test_close_has_no_time_gate(monkeypatch):
+    # No aging: a RECENT buy (5 days old) with a saved close price realizes too.
+    monkeypatch.setattr(pr.close_prices_svc, "get_close_prices",
+                        _close_prices({_ISIN: Decimal("7000")}))
     buy = _order(1, 100, 6000, is_bot=True, ts=_RECENT, tracking=1)
-    sell = _order(2, 60, 6500, is_bot=False, ts=_RECENT, tracking=2)
-    rep = await pr.build_fee_report(_fake_db([buy, sell], [(_CUST, _AGENT)]), today=_TODAY)
-    assert rep.buy_rows[0].fee == Decimal("300")  # 1% × (6500-6000) × 60
-    assert rep.virtual_rows == []
-    assert rep.per_customer[_CUST].total_fee == Decimal("300")
+    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]))
+    assert len(rep.virtual_rows) == 1
+    assert rep.virtual_rows[0].fee == Decimal("1000")
 
 
-async def test_partial_sell_aged_remainder_marks_to_market(monkeypatch):
-    # Sells no longer BLOCK the 20-day pass: buy 100 @ 6000 aged 29d, sell 60
-    # @ 6500 → FIFO fee on the 60 + the unsold 40 mark to today's 7000.
-    async def _price(_db, _isin):
-        return 7000
-    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
+async def test_partial_sell_then_close(monkeypatch):
+    # buy 100 @ 6000, sell 60 @ 6500 (FIFO fee 300), close the unsold 40 @ 7000.
+    monkeypatch.setattr(pr.close_prices_svc, "get_close_prices",
+                        _close_prices({_ISIN: Decimal("7000")}))
     buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
     sell = _order(2, 60, 6500, is_bot=False, ts=_OLD, tracking=2)
-    rep = await pr.build_fee_report(_fake_db([buy, sell], [(_CUST, _AGENT)]), today=_TODAY)
+    rep = await pr.build_fee_report(_fake_db([buy, sell], [(_CUST, _AGENT)]))
     assert rep.buy_rows[0].fee == Decimal("300")  # 1% × (6500-6000) × 60
     assert len(rep.virtual_rows) == 1
     v = rep.virtual_rows[0]
-    assert v.trigger == "20d" and v.in_loss is False and v.open_qty == 40
+    assert v.trigger == "close" and v.open_qty == 40
     assert v.fee == Decimal("400")  # 1% × (7000-6000) × 40
     assert v.oldest_buy_date == _OLD.date()
     assert rep.per_customer[_CUST].total_fee == Decimal("700")  # 300 + 400
     assert rep.per_customer[_CUST].mark_fee == Decimal("400")
 
 
-async def test_partial_sell_aged_remainder_loss_uses_fixed_fee(monkeypatch):
-    async def _price(_db, _isin):
-        return 5500  # below the 7000 buy → loss at today's price
-    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
-
-    async def _loss(_db, _agent):
-        return Decimal("300000")  # fixed loss fee (Rial)
-    monkeypatch.setattr(pr, "get_loss_fee_rial", _loss)
-    # buy 100 @ 7000 aged 29d, sells 1 @ 6500 (a loss). Sold 1 realizes nothing
-    # (loss → no positive fee); the aged unsold 99 at today's 5500 → fixed fee.
-    buy = _order(1, 100, 7000, is_bot=True, ts=_OLD, tracking=1)
-    sell = _order(2, 1, 6500, is_bot=False, ts=_OLD, tracking=2)
-    rep = await pr.build_fee_report(_fake_db([buy, sell], [(_CUST, _AGENT)]), today=_TODAY)
-    assert rep.buy_rows[0].fee == Decimal("0")  # the 1 sold share was a loss
-    v = rep.virtual_rows[0]
-    assert v.trigger == "20d" and v.in_loss is True and v.fee == Decimal("300000")
-    assert v.open_qty == 99
-    assert rep.per_customer[_CUST].total_fee == Decimal("300000")
-
-
-async def test_mtm_days_setting_resolved(monkeypatch):
-    # mark_to_market_days=None resolves the ``mark_to_market_days`` setting:
-    # at 30 days a 29-day-old lot stays open; at 20 it marks.
-    async def _price(_db, _isin):
-        return 7000
-    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
-    setting = {"value": "30"}
-
-    async def _setting(_db, key):
-        assert key == "mark_to_market_days"
-        return setting["value"]
-    monkeypatch.setattr(pr.settings_store, "get_setting", _setting)
-
-    buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)  # 29 days old
-    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
-    assert rep.virtual_rows == []
-
-    setting["value"] = "20"
-    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
-    assert len(rep.virtual_rows) == 1
-
-    setting["value"] = "999"  # out of range (1..365) → default 20 → still marks
-    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
-    assert len(rep.virtual_rows) == 1
-
-
-async def test_virtual_row_oldest_buy_date(monkeypatch):
-    # Two aged lots (29d and 25d) → ONE virtual row carrying the EARLIEST date.
-    async def _price(_db, _isin):
-        return 7000
-    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
-    b1 = _order(1, 50, 6000, is_bot=True, ts=_OLD, tracking=1)
-    b2 = _order(1, 50, 6200, is_bot=True,
-                ts=datetime(2026, 6, 5, tzinfo=timezone.utc), tracking=2)
-    rep = await pr.build_fee_report(_fake_db([b1, b2], [(_CUST, _AGENT)]), today=_TODAY)
-    assert len(rep.virtual_rows) == 1
-    assert rep.virtual_rows[0].open_qty == 100
-    assert rep.virtual_rows[0].oldest_buy_date == _OLD.date()
-
-
-async def test_20day_marks_only_aged_lots_in_mixed_age_position(monkeypatch):
-    # One aged lot (29d) + one RECENT lot (5d) on the same customer × stock →
-    # the virtual row covers ONLY the aged lot's open volume at ITS price; the
-    # recent lot stays open and unbilled. Kills the "mark the whole open
-    # remainder once any lot is aged" mutation (the #130 shape this reverts).
-    async def _price(_db, _isin):
-        return 7000
-    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
-    aged_buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
-    recent_buy = _order(1, 50, 6200, is_bot=True, ts=_RECENT, tracking=2)
-    rep = await pr.build_fee_report(
-        _fake_db([aged_buy, recent_buy], [(_CUST, _AGENT)]), today=_TODAY
-    )
+async def test_close_realizes_whole_remainder_blending_mixed_age(monkeypatch):
+    # Two open lots (aged + recent) on the same customer × stock → ONE close row
+    # over the WHOLE remainder at the BLENDED avg buy (no per-lot age split — the
+    # whole-remainder realization the operator wants).
+    monkeypatch.setattr(pr.close_prices_svc, "get_close_prices",
+                        _close_prices({_ISIN: Decimal("7000")}))
+    b1 = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
+    b2 = _order(1, 100, 6400, is_bot=True, ts=_RECENT, tracking=2)
+    rep = await pr.build_fee_report(_fake_db([b1, b2], [(_CUST, _AGENT)]))
     assert len(rep.virtual_rows) == 1
     v = rep.virtual_rows[0]
-    assert v.open_qty == 100  # the aged lot only — NOT the recent 50
-    assert v.avg_buy_price == Decimal("6000")  # aged lot's price, not blended
-    assert v.fee == Decimal("1000")  # 1% × (7000-6000) × 100
+    assert v.open_qty == 200
+    assert v.avg_buy_price == Decimal("6200")  # (100×6000 + 100×6400)/200
+    assert v.fee == Decimal("1600")  # 1% × (7000-6200) × 200
     assert v.oldest_buy_date == _OLD.date()
 
 
-async def test_20day_boundary_is_strictly_greater(monkeypatch):
-    # Aging is STRICTLY > mark_to_market_days: a lot EXACTLY N days old does
-    # not mark; lowering the window by one day makes it mark.
-    async def _price(_db, _isin):
-        return 7000
-    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
-    exactly_20d = datetime(2026, 6, 10, tzinfo=timezone.utc)  # _TODAY − 20 days
-    buy = _order(1, 100, 6000, is_bot=True, ts=exactly_20d, tracking=1)
-    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
+async def test_fully_sold_position_has_no_close_row(monkeypatch):
+    # A saved close price doesn't conjure a row when nothing is open.
+    monkeypatch.setattr(pr.close_prices_svc, "get_close_prices",
+                        _close_prices({_ISIN: Decimal("9000")}))
+    buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
+    sell = _order(2, 100, 6500, is_bot=False, ts=_OLD, tracking=2)
+    rep = await pr.build_fee_report(_fake_db([buy, sell], [(_CUST, _AGENT)]))
     assert rep.virtual_rows == []
-    rep = await pr.build_fee_report(
-        _fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY, mark_to_market_days=19
-    )
-    assert len(rep.virtual_rows) == 1
-
-
-async def test_20day_uses_stored_wallclock_date_no_tz_shift(monkeypatch):
-    # Stored broker timestamps are Tehran WALL-CLOCK labeled UTC, so the aging
-    # date is ts.date() AS-IS. A late-evening lot (21:00 on June 9 wall clock)
-    # is 21 days old on June 30 → marks. An (incorrect) astimezone(+03:30)
-    # would roll it to June 10 → exactly 20 days → silently not mark; this
-    # pins against that double-shift regression.
-    async def _price(_db, _isin):
-        return 7000
-    monkeypatch.setattr(pr.market_data_client, "get_last_price", _price)
-    late_evening = datetime(2026, 6, 9, 21, 0, tzinfo=timezone.utc)
-    buy = _order(1, 100, 6000, is_bot=True, ts=late_evening, tracking=1)
-    rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]), today=_TODAY)
-    assert len(rep.virtual_rows) == 1
-    assert rep.virtual_rows[0].oldest_buy_date == date(2026, 6, 9)
+    assert rep.buy_rows[0].fee == Decimal("500")  # only the FIFO sell fee
 
 
 # ---------------------------------------------------------------------------

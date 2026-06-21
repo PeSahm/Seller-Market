@@ -13,6 +13,10 @@
   <strong>Owed − paid = remaining.</strong> Payments are recorded by the operator.
 </p>
 
+<div class="filter-bar" style="margin-bottom:12px;">
+  <a class="btn btn--sm" href="/agent/close-positions">Close open positions…</a>
+</div>
+
 {% if my_customers %}
 <form method="get" action="/agent/fees" class="filter-bar">
   <select name="customer_id" class="input">
@@ -98,6 +102,41 @@
       <td>{% include "partials/fee_row_actions.html" %}</td>
     </tr>
     <tr class="fee-detail" hidden><td colspan="10">{% include "partials/fee_order_legs.html" %}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+{% if fr.virtual_rows %}
+<h2 class="h3" style="margin-top:20px;">Closed positions</h2>
+<p class="text-small text-muted">
+  Open bot-buy remainder realized at the close price set on the
+  <a href="/agent/close-positions">Close positions</a> page: profit → % of the
+  gain; loss → the fixed loss fee; break-even → no fee. Editing the price
+  re-adjusts; clearing it re-opens.
+</p>
+<div class="table-scroll">
+<table class="table">
+  <thead>
+    <tr><th>Customer</th><th>Symbol / ISIN</th><th>Open qty</th><th>Avg buy</th><th>Close price</th><th>Status</th><th>Fee</th></tr>
+  </thead>
+  <tbody>
+    {% for v in fr.virtual_rows %}
+    {% set cust = customers_by_id.get(v.customer_id) %}
+    <tr>
+      <td dir="auto" class="text-small">{{ cust.display_name if cust else '—' }}</td>
+      <td>{{ symbol_label(v.isin, symbol=v.symbol) }}</td>
+      <td class="text-small">{{ '{:,}'.format(v.open_qty) }}</td>
+      <td class="text-small">{{ '{:,.0f}'.format(v.avg_buy_price) }}</td>
+      <td class="text-small">{{ '{:,.0f}'.format(v.price) }}</td>
+      <td>
+        {% if v.in_loss %}<span class="badge badge--down">loss</span>
+        {% elif v.price > v.avg_buy_price %}<span class="badge badge--up">profit</span>
+        {% else %}<span class="badge">break-even</span>{% endif %}
+      </td>
+      <td class="text-small"><strong>{{ '{:,.0f}'.format(v.fee) }}</strong></td>
+    </tr>
     {% endfor %}
   </tbody>
 </table>

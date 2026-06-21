@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
@@ -27,23 +27,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.broker_orders import BrokerOrder
 from app.models.customers import Customer
 from app.models.fees import AgentFeeConfig
-from app.services import fee_payments, market_data_client, settings_store
+from app.services import close_prices as close_prices_svc
+from app.services import fee_payments, settings_store
 from app.services.broker_orders import in_time_window, is_excluded
 from app.services.profit_matching import OrderLeg, match_lots
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_FEE_PERCENT = Decimal("1.0")
-_MARK_TO_MARKET_DAYS = 20
-_MARK_TO_MARKET_DAYS_MAX = 365
 _TOMAN_TO_RIAL = Decimal("10")
-
-# Broker timestamps are stored as Tehran WALL-CLOCK labeled UTC (both
-# families relabel — see the Session-4 basis decision), so ``ts.date()`` IS
-# the Tehran market date already. Only "today" needs the real Tehran clock
-# (fixed +03:30 — Iran abolished DST in 2022), else the aging count runs a
-# day behind between Tehran midnight and UTC midnight.
-_TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 
 # Buy is fully sold / partly sold / not sold yet ("possible sell" still to come).
 STATUS_REALIZED = "realized"
@@ -89,14 +81,15 @@ class BuyFeeRow:
 
 @dataclass
 class VirtualFeeRow:
-    """20-day mark-to-market of the UNSOLD remainder of a bot-bought position.
+    """Manual close of the UNSOLD remainder of a bot-bought position.
 
-    Any bot-buy quantity still unsold > ``mark_to_market_days`` after its buy
-    date is valued at TODAY's live market price — regardless of whether the
-    position has partial sells (the sold shares already billed via FIFO in the
-    per-buy rows). In profit → fee = X% of the paper gain; in loss → a fixed
-    per-agent fee. Recomputed live each view: a later real sell moves quantity
-    from this virtual row into the FIFO-realized fee.
+    When an ISIN has a saved global CLOSE PRICE (set on the Close-positions
+    page — replacing the old automatic 20-day rule), the whole open remainder
+    of each (customer, isin) group is realized at that price — regardless of
+    partial sells (the sold shares already billed via FIFO in the per-buy rows).
+    In profit → fee = X% of the gain; in loss → a fixed per-agent fee;
+    break-even → no fee. Recomputed live each view: editing the close price
+    re-adjusts, clearing it re-opens the position (this row disappears).
     """
 
     customer_id: Optional[UUID]
@@ -106,11 +99,11 @@ class VirtualFeeRow:
     symbol: str
     open_qty: int
     avg_buy_price: Decimal
-    price: int          # realization price (today's market price)
-    trigger: str        # "20d"
+    price: Decimal      # realization price (the saved close price)
+    trigger: str        # "close"
     in_loss: bool
     fee: Decimal
-    oldest_buy_date: Optional[date] = None  # earliest aged lot — how stale
+    oldest_buy_date: Optional[date] = None  # earliest open buy — how long held
 
 
 @dataclass
@@ -122,8 +115,8 @@ class CustomerFeeTotals:
     num_buys: int = 0
     total_buy_value: Decimal = Decimal("0")
     realized_profit: Decimal = Decimal("0")
-    total_fee: Decimal = Decimal("0")  # owed (realized + 20-day mark-to-market)
-    mark_fee: Decimal = Decimal("0")   # the 20-day mark-to-market portion
+    total_fee: Decimal = Decimal("0")  # owed (realized + manual-close portion)
+    mark_fee: Decimal = Decimal("0")   # the close-price realized portion
     open_volume: int = 0
     paid: Decimal = Decimal("0")
     remaining: Decimal = Decimal("0")
@@ -175,7 +168,7 @@ async def get_fee_percent(
 
 
 async def get_loss_fee_rial(db: AsyncSession, agent_id: Optional[UUID]) -> Decimal:
-    """Resolve the fixed loss-fee (in RIAL) for the 20-day mark-to-market.
+    """Resolve the fixed loss-fee (in RIAL) billed on a manual close at a loss.
 
     Per-agent ``agent_fee_configs.loss_fee_toman`` override → global
     ``mark_to_market_loss_fee_toman`` setting → 0. Stored in Toman; returned
@@ -240,7 +233,6 @@ async def build_fee_report(
     window_end: Optional[time] = None,
     exclude: Optional[set[str]] = None,
     today: Optional[date] = None,
-    mark_to_market_days: Optional[int] = None,
     max_rows: int = 20000,
 ) -> FeeReport:
     """Compute per-buy profit + operator fee across the filtered orders.
@@ -251,25 +243,13 @@ async def build_fee_report(
     (owed − paid = remaining) + per agent. Every customer with orders in scope
     appears, even at zero, so each is reachable for fee config + payments.
 
-    Mark-to-market: any bot-buy quantity still UNSOLD ``mark_to_market_days``
-    after its buy date is valued at today's market price — regardless of
-    partial sells — in profit → fee = X% of the paper gain; in loss → a fixed
-    per-agent fee. ``mark_to_market_days=None`` resolves the
-    ``mark_to_market_days`` setting (default 20).
+    Manual close: when an ISIN has a saved GLOBAL close price (set on the
+    Close-positions page), the whole UNSOLD remainder of each (customer, isin)
+    group is realized at that price — profit → fee = X% of the gain; loss → a
+    fixed per-agent fee; break-even → no fee. No saved price → the remainder
+    stays open (no fee). ``today`` is accepted for backward compatibility but no
+    longer affects the result (the old time-based 20-day rule was removed).
     """
-    today = today or datetime.now(_TEHRAN_TZ).date()
-    if mark_to_market_days is None:
-        try:
-            mark_to_market_days = int(
-                str(await settings_store.get_setting(db, "mark_to_market_days"))
-            )
-            if not (1 <= mark_to_market_days <= _MARK_TO_MARKET_DAYS_MAX):
-                raise ValueError(mark_to_market_days)
-        except Exception:  # noqa: BLE001 — malformed setting shouldn't 500 the report
-            logger.warning(
-                "mark_to_market_days setting is unparseable/out of range; using default"
-            )
-            mark_to_market_days = _MARK_TO_MARKET_DAYS
     stmt = (
         select(BrokerOrder)
         .where(BrokerOrder.state == 3)
@@ -312,6 +292,13 @@ async def build_fee_report(
         )
         cust_agent = {cid: aid for cid, aid in rows.all()}
 
+    # Saved global close prices for the instruments in scope (replaces the old
+    # per-isin live-price lookup). An ISIN with a row here gets its open
+    # remainder realized; absent → the remainder stays open.
+    close_prices = await close_prices_svc.get_close_prices(
+        db, {o.isin for o in orders if o.isin}
+    )
+
     groups: dict[tuple, list[BrokerOrder]] = {}
     for o in orders:
         groups.setdefault((o.customer_id, o.isin), []).append(o)
@@ -319,12 +306,6 @@ async def build_fee_report(
     report = FeeReport()
     fee_pct_cache: dict[tuple, Decimal] = {}
     loss_fee_cache: dict[Optional[UUID], Decimal] = {}
-    price_cache: dict[str, Optional[int]] = {}
-
-    async def _today_price(isin: str) -> Optional[int]:
-        if isin not in price_cache:
-            price_cache[isin] = await market_data_client.get_last_price(db, isin)
-        return price_cache[isin]
 
     async def _loss_fee(agent: Optional[UUID]) -> Decimal:
         if agent not in loss_fee_cache:
@@ -428,89 +409,77 @@ async def build_fee_report(
             ctot.total_fee += row.fee
             ctot.open_volume += row.open_volume
 
-        # --- 20-day mark-to-market on the UNSOLD remainder (customer × stock) ---
-        # Plain FIFO bills the actually-sold shares (per-buy rows above). Any
-        # lot quantity still unsold > mark_to_market_days after its buy date
-        # realizes at TODAY's live market price — regardless of whether the
-        # position has partial sells (a 1-share sell must not exempt the rest).
-        # In profit → fee = X% of the paper gain; in loss → the fixed per-agent
-        # loss fee (per losing position). Recomputed live each view: a later
-        # real sell moves quantity from this virtual row into the FIFO fee.
+        # --- Manual close of the UNSOLD remainder (customer × stock) ---
+        # Plain FIFO bills the actually-sold shares (per-buy rows above). When
+        # this ISIN has a saved GLOBAL close price (set on the Close-positions
+        # page — replacing the old time-based 20-day rule), the WHOLE open
+        # remainder is realized at that price regardless of partial sells.
+        # profit → fee = X% of the gain; loss → the fixed per-agent loss fee;
+        # break-even → no fee. No saved price → the remainder stays open.
+        # Recomputed live: editing the close price re-adjusts; clearing it
+        # re-opens (this row disappears).
+        saved = close_prices.get(_isin)
         open_lots = [
             (o, per_buy[o.tracking_number].open_volume)
             for o in bot_buys
             if per_buy[o.tracking_number].open_volume > 0
         ]
-        if open_lots:
-            realize_price: Optional[Decimal] = None
-            rem_lots: list = []
-            aged = [
-                (o, q)
-                for o, q in open_lots
-                if (ts := (o.execution_date or o.created_at_broker or o.placed_at))
-                is not None
-                and (today - ts.date()).days > mark_to_market_days
-            ]
-            if aged:
-                tp = await _today_price(_isin)
-                if tp and tp > 0:
-                    realize_price = Decimal(tp)
-                    rem_lots = aged
-                else:
-                    logger.warning(
-                        "fee: no live price for %s — skipping 20-day mark-to-market",
-                        _isin,
+        if open_lots and saved is not None and saved > 0:
+            realize_price = Decimal(saved)
+            rem_qty = sum(q for _, q in open_lots)
+            weighted_buy = sum(
+                (
+                    (Decimal(o.price) if o.price is not None else Decimal("0")) * q
+                    for o, q in open_lots
+                ),
+                Decimal("0"),
+            )
+            avg_buy = weighted_buy / rem_qty
+            if realize_price > avg_buy:
+                vfee = (fee_pct / Decimal("100")) * (realize_price - avg_buy) * rem_qty
+                in_loss = False
+            elif realize_price < avg_buy:
+                vfee = await _loss_fee(agent_id_of_group)
+                in_loss = True
+            else:
+                vfee = Decimal("0")  # break-even — closed, no fee
+                in_loss = False
+            sym = next(
+                (x.symbol or x.symbol_title for x in group if (x.symbol or x.symbol_title)),
+                "",
+            ) or ""
+            oldest = min(
+                (
+                    ts.date()
+                    for o, _q in open_lots
+                    if (
+                        ts := (
+                            o.execution_date
+                            or o.created_at_broker
+                            or o.placed_at
+                        )
                     )
-            if realize_price is not None and realize_price > 0 and rem_lots:
-                rem_qty = sum(q for _, q in rem_lots)
-                weighted_buy = sum(
-                    (
-                        (Decimal(o.price) if o.price is not None else Decimal("0")) * q
-                        for o, q in rem_lots
-                    ),
-                    Decimal("0"),
-                )
-                avg_buy = weighted_buy / rem_qty
-                if realize_price > avg_buy:
-                    vfee = (fee_pct / Decimal("100")) * (realize_price - avg_buy) * rem_qty
-                    in_loss = False
-                else:
-                    vfee = await _loss_fee(agent_id_of_group)
-                    in_loss = True
-                if vfee > 0:
-                    sym = next(
-                        (x.symbol or x.symbol_title for x in group if (x.symbol or x.symbol_title)),
-                        "",
-                    ) or ""
-                    oldest = min(
-                        (
-                            ts.date()
-                            for o, _q in rem_lots
-                            if (
-                                ts := (
-                                    o.execution_date
-                                    or o.created_at_broker
-                                    or o.placed_at
-                                )
-                            )
-                            is not None
-                        ),
-                        default=None,
-                    )
-                    report.virtual_rows.append(VirtualFeeRow(
-                        customer_id=cust_id, agent_id=agent_id_of_group,
-                        broker=group[0].broker, isin=_isin, symbol=sym,
-                        open_qty=rem_qty, avg_buy_price=avg_buy,
-                        price=int(realize_price), trigger="20d",
-                        in_loss=in_loss, fee=vfee,
-                        oldest_buy_date=oldest,
-                    ))
-                    ctot.total_fee += vfee
-                    ctot.mark_fee += vfee
-                    atot = report.per_agent.setdefault(
-                        agent_id_of_group, AgentTotals(agent_id=agent_id_of_group)
-                    )
-                    atot.total_fee += vfee
+                    is not None
+                ),
+                default=None,
+            )
+            # Every closed position is shown (profit, loss, or break-even) so the
+            # operator sees that all open trades were calculated; only profit/loss
+            # actually bill.
+            report.virtual_rows.append(VirtualFeeRow(
+                customer_id=cust_id, agent_id=agent_id_of_group,
+                broker=group[0].broker, isin=_isin, symbol=sym,
+                open_qty=rem_qty, avg_buy_price=avg_buy,
+                price=realize_price, trigger="close",
+                in_loss=in_loss, fee=vfee,
+                oldest_buy_date=oldest,
+            ))
+            ctot.total_fee += vfee
+            ctot.mark_fee += vfee
+            atot = report.per_agent.setdefault(
+                agent_id_of_group, AgentTotals(agent_id=agent_id_of_group)
+            )
+            atot.total_fee += vfee
 
     # Per-customer paid (received-fee ledger) → remaining = owed − paid (#116).
     paid_map = await fee_payments.total_paid_by_customer(

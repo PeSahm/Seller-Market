@@ -21,6 +21,7 @@ from __future__ import annotations
 import difflib
 import logging
 from datetime import date, datetime, time, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -53,9 +54,12 @@ from app.schemas.locust import LocustUpsert
 from app.schemas.scheduler import SchedulerJobUpsert
 from app.security.deps import get_current_user
 from app.services import agents as services_agents
+from app.services import audit as services_audit
 from app.services import auto_sell_view as services_auto_sell_view
 from app.services import broker_client
 from app.services import brokers_admin
+from app.services import close_positions_view as services_close_positions
+from app.services import close_prices as services_close_prices
 from app.services import customers as services_customers
 from app.services import health_signals as services_health
 from app.services import instruments as services_instruments
@@ -1455,6 +1459,174 @@ async def agent_undo_decline(
     await _agent_order_or_404(db, user, order_id)
     await services_broker_orders.undo_decline(db, order_id, actor_id=user.id)
     target = _fees_safe_next(next_url)
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
+
+
+# ---------------------------------------------------------------------------
+# Close open positions (manual price-driven realization — replaces 20-day MTM)
+# ---------------------------------------------------------------------------
+
+
+def _close_positions_agent_safe_next(next_url: Optional[str]) -> str:
+    """Constrain a post-save redirect to the agent close-positions page."""
+    if (
+        next_url
+        and next_url.startswith("/agent/close-positions")
+        and "//" not in next_url
+        and "\\" not in next_url
+        and "\n" not in next_url
+        and "\r" not in next_url
+    ):
+        return next_url
+    return "/agent/close-positions"
+
+
+async def _agent_open_isins(db: AsyncSession, user: User) -> Optional[set[str]]:
+    """ISINs the agent currently holds OPEN — ``None`` for admin (no limit).
+
+    An agent may only set/clear a close price for an instrument their own
+    customers actually hold open (404 otherwise — no UUID/ISIN leak). Admins
+    bypass. A position that already has a saved close price still has open
+    quantity, so it remains in this set (clearing it is allowed).
+    """
+    if user.role == "admin":
+        return None
+    return await services_close_positions.list_open_isins(db, agent_id=user.id)
+
+
+def _close_positions_flash_int(s: Optional[str]) -> Optional[int]:
+    return int(s) if (s or "").isdigit() else None
+
+
+@router.get("/close-positions")
+async def agent_close_positions(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    closed: Optional[str] = None,
+    defaulted: Optional[str] = None,
+):
+    """The agent's own OPEN positions with avg buy + latest price + saved close
+    price, plus the history of the agent's own close actions. Saving a price
+    realizes that symbol into the fee; the bulk action closes everything still
+    open. The price is GLOBAL (shared fleet-wide); an agent may only touch the
+    instruments their own customers hold open."""
+    _require_agent_or_admin(user)
+    await services_instruments.ensure_instruments(db)
+    own_agent_id = None if user.role == "admin" else user.id
+    rows = await services_close_positions.build_open_positions(db, agent_id=own_agent_id)
+    history = await services_audit.list_audit(
+        db, target_type="instrument_close_price", actor_id=user.id, limit=100
+    )
+    ctx = _ctx(request, user, current_tab="/agent/close-positions")
+    ctx["rows"] = rows
+    ctx["history"] = history
+    ctx["actors_by_id"] = {user.id: user}
+    ctx["flash_closed"] = _close_positions_flash_int(closed)
+    ctx["flash_defaulted"] = _close_positions_flash_int(defaulted)
+    return templates.TemplateResponse("agent/close_positions.html", ctx)
+
+
+@router.post("/close-positions/price")
+async def agent_close_positions_set(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    isin: str = Form(...),
+    price: str = Form(...),
+    note: str = Form(""),
+    next_url: str = Form("", alias="next"),
+):
+    """Save/replace the GLOBAL close price for one ISIN the agent holds open."""
+    _require_agent_or_admin(user)
+    isin = (isin or "").strip()
+    try:
+        p = Decimal(str(price).strip())
+    except (InvalidOperation, ValueError):
+        raise HTTPException(status_code=400, detail="invalid price")
+    # Reject non-finite (inf/nan) and absurd values that would overflow the
+    # Numeric(20,4) column → a clean 400, not a DB-layer 500.
+    if not isin or not p.is_finite() or p <= 0 or p >= Decimal("1e15"):
+        raise HTTPException(status_code=400, detail="invalid isin/price")
+    allowed = await _agent_open_isins(db, user)
+    if allowed is not None and isin not in allowed:
+        raise HTTPException(status_code=404, detail="position not found")
+    await services_close_prices.set_close_price(
+        db, isin, p, (note or "").strip() or None, user.id
+    )
+    target = _close_positions_agent_safe_next(next_url)
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
+
+
+@router.post("/close-positions/clear")
+async def agent_close_positions_clear(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    isin: str = Form(...),
+    next_url: str = Form("", alias="next"),
+):
+    """Clear an ISIN's close price → re-opens its positions (no fee)."""
+    _require_agent_or_admin(user)
+    isin = (isin or "").strip()
+    if isin:
+        allowed = await _agent_open_isins(db, user)
+        if allowed is not None and isin not in allowed:
+            raise HTTPException(status_code=404, detail="position not found")
+        await services_close_prices.clear_close_price(db, isin, user.id)
+    target = _close_positions_agent_safe_next(next_url)
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
+
+
+@router.post("/close-positions/close-all")
+async def agent_close_positions_close_all(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    next_url: str = Form("", alias="next"),
+):
+    """Close EVERY still-OPEN position the agent holds at its latest day price
+    (avg-buy fallback when the sidecar has no price). Already-priced positions
+    are left untouched. After this none of the agent's positions stay open."""
+    _require_agent_or_admin(user)
+    own_agent_id = None if user.role == "admin" else user.id
+    rows = await services_close_positions.build_open_positions(db, agent_id=own_agent_id)
+    closed = 0
+    defaulted = 0
+    for r in rows:
+        if r.saved_price is not None:
+            continue  # already closed — don't overwrite a manual price
+        if r.latest_price and r.latest_price > 0:
+            price = Decimal(r.latest_price)
+            note = "bulk close at latest price"
+            is_default = False
+        else:
+            price = r.avg_buy_price
+            note = "bulk close (no market price — avg buy)"
+            is_default = True
+        if price is None or price <= 0:
+            continue
+        # Atomic insert-if-absent: never clobber a price set concurrently.
+        inserted = await services_close_prices.set_close_price_if_absent(
+            db, r.isin, price, note, user.id, commit=False
+        )
+        if inserted:
+            closed += 1
+            if is_default:
+                defaulted += 1
+    await db.commit()
+
+    from urllib.parse import urlencode
+
+    target = "/agent/close-positions?" + urlencode(
+        {"closed": closed, "defaulted": defaulted}
+    )
     if request.headers.get("HX-Request"):
         return Response(status_code=204, headers={"HX-Redirect": target})
     return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
