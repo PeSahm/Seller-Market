@@ -31,6 +31,11 @@ from app.workers.scheduled_run_ingestor import run_scheduled_run_ingest_worker
 from app.workers.trade_ingestor import run_trade_ingest_worker
 from app.workers.broker_order_reconciler import run_broker_order_reconcile_worker
 from app.workers.fire_log_ingestor import run_fire_log_ingest_worker
+from app.services.leader import (
+    acquire_worker_leadership,
+    release_worker_leadership,
+)
+from app.services.db_failover import run_failover_supervisor
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +214,10 @@ def create_app() -> FastAPI:
     # handle + stop event on the FastAPI ``app.state`` to keep this module
     # free of module-level globals (which matter when create_app() is called
     # more than once, e.g. in test harnesses).
+    # WS3: only the elected worker leader runs the background workers (set by
+    # the election handler below). Default True so a single instance always
+    # runs them; a non-leader in a multi-instance deployment serves UI only.
+    app.state.is_worker_leader = True
     app.state.health_stop = asyncio.Event()
     app.state.health_task = None  # type: Optional[asyncio.Task[None]]
     # Sibling worker for per-stack ``docker compose ps`` polling. Same shape
@@ -245,9 +254,78 @@ def create_app() -> FastAPI:
     # reconciles broker_orders.is_bot. Internal SSH only — default on.
     app.state.fire_log_ingest_stop = asyncio.Event()
     app.state.fire_log_ingest_task = None  # type: Optional[asyncio.Task[None]]
+    # WS2/HA: app-level DB auto-failover supervisor. Probes the main DB and
+    # rebinds the shared sessionmaker to the warm spare on a sustained outage.
+    # Runs on EVERY instance (NOT leader-gated — each fails itself over).
+    app.state.active_db = "main"
+    app.state.failed_over_at = None
+    app.state.failover_stop = asyncio.Event()
+    app.state.failover_task = None  # type: Optional[asyncio.Task[None]]
+
+    @app.on_event("startup")
+    async def _elect_worker_leader() -> None:
+        # WS3: elect a single worker leader so multiple mgmt instances don't
+        # double-run the fleet-acting workers. Runs BEFORE the worker startup
+        # handlers (registration order) so they see the result.
+        if not settings.enable_worker_leader_election:
+            app.state.is_worker_leader = True
+            return
+        app.state.is_worker_leader = await acquire_worker_leadership(app)
+
+    @app.on_event("shutdown")
+    async def _release_worker_leader() -> None:
+        await release_worker_leadership(app)
+
+    @app.on_event("startup")
+    async def _start_failover_supervisor() -> None:
+        # NOT leader-gated: every instance must detect the main going down and
+        # rebind ITS OWN sessionmaker to the spare to keep serving.
+        if not settings.enable_db_auto_failover:
+            logger.info("db auto-failover disabled via settings")
+            return
+        if not settings.spare_dsn:
+            logger.warning(
+                "db auto-failover enabled but no spare_dsn set — supervisor not started"
+            )
+            return
+        # Validate the spare DSN eagerly so a malformed value fails LOUD at boot
+        # rather than silently blowing up the supervisor task on the first real
+        # outage (create_async_engine raises synchronously on a bad DSN/driver).
+        try:
+            from app import db as _db
+
+            if _db.get_spare_engine() is None:
+                logger.warning("spare engine unavailable — db auto-failover not started")
+                return
+        except Exception as exc:  # noqa: BLE001
+            logger.error("invalid SPARE_DSN (%s) — db auto-failover NOT started", exc)
+            return
+        app.state.failover_task = asyncio.create_task(
+            run_failover_supervisor(app, app.state.failover_stop),
+            name="db-failover-supervisor",
+        )
+
+    @app.on_event("shutdown")
+    async def _stop_failover_supervisor() -> None:
+        task: Optional[asyncio.Task[None]] = app.state.failover_task
+        if task is None:
+            return
+        app.state.failover_stop.set()
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("db-failover supervisor did not stop in 5s; cancelling")
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
 
     @app.on_event("startup")
     async def _start_health_worker() -> None:
+        if not app.state.is_worker_leader:
+            logger.info("worker startup skipped: not the worker leader")
+            return
         if not settings.enable_health_worker:
             logger.info("health worker disabled via settings")
             return
@@ -274,6 +352,9 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _start_stack_health_worker() -> None:
+        if not app.state.is_worker_leader:
+            logger.info("worker startup skipped: not the worker leader")
+            return
         if not settings.enable_stack_health_worker:
             logger.info("stack health worker disabled via settings")
             return
@@ -300,6 +381,9 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _start_trade_ingestor() -> None:
+        if not app.state.is_worker_leader:
+            logger.info("worker startup skipped: not the worker leader")
+            return
         if not settings.enable_trade_ingestor:
             logger.info("trade ingestor worker disabled via settings")
             return
@@ -329,6 +413,9 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _start_scheduled_run_ingestor() -> None:
+        if not app.state.is_worker_leader:
+            logger.info("worker startup skipped: not the worker leader")
+            return
         if not settings.enable_scheduled_run_ingestor:
             logger.info("scheduled-run ingestor worker disabled via settings")
             return
@@ -358,6 +445,9 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _start_fire_log_ingestor() -> None:
+        if not app.state.is_worker_leader:
+            logger.info("worker startup skipped: not the worker leader")
+            return
         if not settings.enable_fire_log_ingestor:
             logger.info("fire-log ingestor disabled via settings")
             return
@@ -387,6 +477,9 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _start_broker_order_reconciler() -> None:
+        if not app.state.is_worker_leader:
+            logger.info("worker startup skipped: not the worker leader")
+            return
         if not settings.enable_broker_order_reconciler:
             logger.info("broker order reconciler disabled via settings")
             return
@@ -420,6 +513,9 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _start_health_scanner() -> None:
+        if not app.state.is_worker_leader:
+            logger.info("worker startup skipped: not the worker leader")
+            return
         if not settings.enable_health_scanner:
             logger.info("health scanner worker disabled via settings")
             return
@@ -449,6 +545,9 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _start_janitor() -> None:
+        if not app.state.is_worker_leader:
+            logger.info("worker startup skipped: not the worker leader")
+            return
         if not settings.enable_janitor:
             logger.info("janitor worker disabled via settings")
             return

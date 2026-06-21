@@ -56,6 +56,7 @@ from app.services import brokers_admin
 from app.services import customers as services_customers
 from app.services import fee_export
 from app.services import fee_payments as services_fee_payments
+from app.services.ha_status import build_ha_status
 from app.services import profit_report as services_profit_report
 from app.services import distribution as services_distribution
 from app.services import health_signals as services_health
@@ -255,6 +256,31 @@ async def admin_dashboard(
     ctx["health_summary"] = health_summary
     ctx["audit_summary"] = audit_summary
     return templates.TemplateResponse("admin/dashboard.html", ctx)
+
+
+# ---------------------------------------------------------------------------
+# HA status (#156 WS4)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/ha")
+async def admin_ha(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Consolidated HA status: main + spare DB, the OCR failover pool, server /
+    bot-stack rollups, unacked alerts, and whether THIS instance holds the
+    worker-leader lease. Probe-on-load; graceful (a down target shows red, never
+    500s)."""
+    ha = await build_ha_status(
+        db,
+        is_worker_leader=bool(getattr(request.app.state, "is_worker_leader", True)),
+        failed_over_at=getattr(request.app.state, "failed_over_at", None),
+    )
+    ctx = _ctx(request, user, current_tab="/admin/ha")
+    ctx["ha"] = ha
+    return templates.TemplateResponse("admin/ha.html", ctx)
 
 
 # ---------------------------------------------------------------------------
