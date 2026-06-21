@@ -1398,3 +1398,44 @@ The review earned its keep — it found real **data-loss** bugs. Fixes were most
 3. **Set `ENABLE_DB_AUTO_FAILOVER=true` + `SPARE_DSN`** on both instances; verify `/admin/ha` (Active=main, auto-failover on, Backups Kept 4), then rehearse a failover on a quiet day.
 4. **Recovery container** (cold path, PR #157) + **secure the DB link** (plaintext now) remain deferred per operator.
 5. Still-open from S23: **AVX2 OCR server** (operator buying) for full OCR HA.
+
+---
+
+## Session 25 — HA FULLY DEPLOYED: 2-instance mgmt (PouyanIt + ParsPack) + auto-failover live + /admin/ha lists both instances
+
+Took Session 24's code from "merged but off" to **fully deployed + live**. **PR #158 merged** (squash `1f97c85`) and **PR #159 merged** (`a719d2d`, the mgmt-instances heartbeat) + a hotfix (`6b239d8`). The fleet's database is the external **Windows PG18** (`87.107.164.154:65444`); mgmt now runs on **two hosts**, both auto-failover-armed to one shared warm spare.
+
+### Final LIVE state (all verified)
+- **DB: Windows PG18 main** (verified `inet_server_addr=87.107.164.154`, alembic now `0017`, 6 servers / 72 customers). A PouyanIt-local-DB restore onto Windows would CLOBBER live data — confirmed mgmt is on Windows, so NO such restore.
+- **mgmt instance #1 — PouyanIt** `http://5.10.248.55:28080/` (worker **leader**, runs the fleet workers).
+- **mgmt instance #2 — ParsPack** `http://45.139.10.192:28080/` (UI-only **standby**).
+- **⚠️ The mgmt host port is `28080`, NOT 8000** (`MGMT_HOST_PORT=28080` in `.env`; the container's 8000 → host 28080). I wasted a round telling the operator `:8000`. Always check `MGMT_HOST_PORT` before quoting a URL.
+- **Warm spare** `sm-spare-pg` (`postgres:18`) on PouyanIt — on `sm_mgmt_net` (PouyanIt api reaches it by name `sm-spare-pg:5432`) AND host-published `:5433` (firewalled to ParsPack only). ParsPack's `SPARE_DSN` → `5.10.248.55:5433`. Both instances fail over to this ONE shared spare (per-host spares would split-brain).
+- **Backup cron** `*/3` on PouyanIt keeps the spare warm (dump Windows → restore spare, manifest, keep 4, marker-aware).
+- **Single leader confirmed**: `pg_locks` advisory count = **1** across the cluster. No double-run, no split-brain.
+- **/admin/ha** shows: Database (main+spare), **mgmt instances table** (both, with addresses / leader-vs-standby / DB / last-seen), Backups (kept 4), OCR pool, servers/stacks, alerts.
+
+### 2nd-mgmt-on-ParsPack setup (reusable runbook)
+1. ParsPack→Windows DB reachable ✓ (TCP probe); ParsPack→PouyanIt cross-host ✓; docker+compose present.
+2. **Expose the spare**: recreate `sm-spare-pg` with `-p 5433:5432` + `iptables -I DOCKER-USER -p tcp --dport 5433 ! -s 45.139.10.192 -j DROP` (allow ParsPack only). The PouyanIt api uses the docker NETWORK (by name), so the published port + firewall don't affect it.
+3. **Copy secrets PouyanIt→ParsPack** (piped host-to-host so values never print): `.env` (md5-verified IDENTICAL → all of `MGMT_SECRET_KEY`/`CSRF`/`FERNET_KEY_PART1`/`POSTGRES_PASSWORD` match). **`/var/lib/sm-mgmt/ssh_keys` is EMPTY on PouyanIt too** — the fleet SSH creds live in the DB (`servers.ssh_secret_ref`, Fernet-encrypted), so only the matching Fernet key needs to be shared (it is, via `.env`). No `key.part2` (part1-only, consistent).
+4. **ParsPack compose** = api ONLY (no local postgres/market-data/cron): `DATABASE_URL`→Windows, `SPARE_DSN`→`5.10.248.55:5433`, `ENABLE_DB_AUTO_FAILOVER=true`, `MGMT_INSTANCE_NAME=ParsPack`, `MGMT_INSTANCE_ADDRESS=45.139.10.192:28080`, the 3 mounts. Mirror-pull the image by digest (ghcr blocked on ParsPack).
+
+### Bugs hit during deploy (all fixed)
+- **postgres:18 changed its data path** — mount the volume at `/var/lib/postgresql`, NOT `/var/lib/postgresql/data` (the old path crash-loops "data in unused mount"). (Also in S24 notes.)
+- **Heartbeat crashed SILENTLY on `settings.app_version`** (AttributeError — Settings has no such field; the dashboard hardcodes the version). The crash was BEFORE the loop, OUTSIDE the try/except → silent; the leader-gated workers (different handler) kept working, which MASKED it (`servers.last_seen` updated but `mgmt_instances` stayed empty). **Diagnosis: app loggers don't emit to stdout, so I diagnosed via DB state** (servers.last_seen recent = workers run; mgmt_instances empty = heartbeat-specific) + an isolated `upsert_instance` test (worked) → narrowed to the pre-loop `settings.app_version`. Fix: `getattr(settings, "app_version", None)`; test now mocks settings WITHOUT app_version as a regression guard. **Live-patched both containers** (`docker cp` + `docker restart`) for an immediate fix, then committed `6b239d8` + a clean redeploy on the rebuilt image superseded the patch.
+- **Wrong `MGMT_INSTANCE_ADDRESS`** (`:8000`) — fixed to `:28080` on both (the actual published port).
+- **My grep `^[A-Z_]+=` excluded digits** → it "didn't show" `MGMT_FERNET_KEY_PART1` (has a `1`), making me think the key was missing. It was there. Use `^[A-Z_0-9]+=` or just `grep -i fernet`.
+
+### Deploy-ops learnings (Session 25)
+- **A just-merged feature's image may not have a hotfix yet** — recreating a hot-patched container on the un-rebuilt image REVERTS the patch. Wait for the fix's image build before `compose up` (checked `gh run list --workflow=docker-publish-mgmt-ui.yml` for `6b239d8 completed/success`), or you reintroduce the bug.
+- **A background asyncio task that raises BEFORE its loop's try/except dies silently** (`asyncio.create_task` is fire-and-forget; the app keeps serving). Put EVERYTHING the task touches at startup inside the guarded loop, or it's an invisible no-op.
+- **Verify a feature against LIVE state, not unit tests** — the heartbeat's unit tests passed (they mocked settings WITH app_version); only the live deploy exposed the real Settings lacking it. Same lesson as the S16/S18 "real-DB / real-surface catches what mocks can't".
+- **CodeRabbit on #159 = clean** (only its walkthrough; no inline findings) — the real bug was runtime/integration, invisible to static review.
+- **`MGMT_HOST_PORT=28080`** — the published mgmt port across the fleet; the dashboard URL is `<host>:28080`, NOT `:8000`.
+
+### Still deferred (per operator — NOT active todos)
+- **AVX2 OCR server** (operator buying) → full OCR HA. Until then OCR is a PouyanIt SPOF, so PouyanIt dying still stops trading even with 2 mgmt instances up.
+- **Secure the DB link** (Windows main + the cross-host spare are plaintext) → SSL/WireGuard.
+- **Recovery container** (cold path, PR #157) not deployed.
+- The stale local `postgres:16-alpine` (S23 fallback) still runs on PouyanIt — harmless, a separate cleanup.
