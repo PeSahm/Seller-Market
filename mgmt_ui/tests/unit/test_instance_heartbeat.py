@@ -79,12 +79,14 @@ async def test_heartbeat_worker_upserts_and_survives_errors(monkeypatch):
 
     monkeypatch.setattr(ih, "upsert_instance", _upsert)
     monkeypatch.setattr(ih.db_mod, "active_db", lambda: "main")
+    # NOTE: deliberately NO ``app_version`` attr — mirrors the real Settings,
+    # which lacks it. The worker must read it via getattr (regression guard:
+    # ``settings.app_version`` would AttributeError-crash the task here).
     monkeypatch.setattr(
         ih, "get_settings",
         lambda: SimpleNamespace(
             instance_heartbeat_interval_seconds=0.01,
             mgmt_instance_address="",
-            app_version="x",
             resolved_instance_name=lambda: "PouyanIt",
         ),
     )

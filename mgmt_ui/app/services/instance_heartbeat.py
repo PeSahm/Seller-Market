@@ -79,7 +79,9 @@ async def run_heartbeat_worker(app, stop_event: asyncio.Event) -> None:
     interval = settings.instance_heartbeat_interval_seconds
     name = settings.resolved_instance_name()
     address = settings.mgmt_instance_address or None
-    version = settings.app_version
+    # Settings has no ``app_version`` field (the dashboard hardcodes it) — use a
+    # safe getattr so a missing attr can't crash the task before its loop.
+    version = getattr(settings, "app_version", None)
     logger.info("instance heartbeat started as '%s' (every %ss)", name, interval)
     while not stop_event.is_set():
         try:
