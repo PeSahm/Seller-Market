@@ -240,3 +240,47 @@ def test_run_backup_runs_when_no_marker(tmp_path):
     )
     assert "skipped" not in out
     assert calls == ["dump", "restore"]
+
+
+def test_run_backup_skips_restore_if_marker_appears_during_dump(tmp_path):
+    # The pre-flight guard passes, but a failover STARTS during the (slow) dump.
+    marker = tmp_path / "FAILOVER_ACTIVE"
+    calls = []
+
+    def dump(_main, out):
+        open(out, "wb").close()  # produce the dump file
+        marker.write_text("appeared mid-dump\n")  # failover began during the dump
+        calls.append("dump")
+
+    out = db_backup.run_backup(
+        main_dsn="m@host", spare_dsn="s", dump_dir=str(tmp_path), keep=4,
+        marker_path=str(marker),
+        dump_fn=dump, restore_fn=lambda a, b: calls.append("restore"),
+    )
+    assert calls == ["dump"]  # restore NOT called over the now-live spare
+    assert out["restored_ok"] is False
+    assert out.get("restore_skipped") == "failover_active"
+    assert (tmp_path / "manifest.json").exists()  # dump still kept as a backup
+
+
+@pytest.mark.asyncio
+async def test_do_failover_alerts_when_marker_write_fails(monkeypatch):
+    app = _app()
+    monkeypatch.setattr(db_mod, "activate_spare", AsyncMock(return_value=True))
+    monkeypatch.setattr(db_failover, "_write_marker", lambda p: False)  # write FAILS
+    monkeypatch.setattr(
+        db_failover, "get_settings",
+        lambda: SimpleNamespace(resolved_failover_marker_path=lambda: "/x/FAILOVER_ACTIVE"),
+    )
+    sigs = []
+
+    async def _sig(kind, sev, msg):
+        sigs.append((kind, sev))
+
+    monkeypatch.setattr(db_failover, "_raise_signal", _sig)
+
+    await db_failover._do_failover(app)
+
+    assert app.state.active_db == "spare"  # still failed over (serving > guard)
+    # a loud critical alert tells the operator the cron guard is NOT armed
+    assert ("db_failover_marker_error", "critical") in sigs

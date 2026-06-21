@@ -2,7 +2,7 @@
 
 Goal end-state (operator's spec):
 
-```
+```text
    DATABASE  ───►  Windows PostgreSQL 18   (main, 87.107.164.154:65444)
                           │  every few minutes: pg_dump ──► pg_restore
                           ▼

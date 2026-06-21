@@ -50,11 +50,19 @@ def _dsn_host_port(dsn: str) -> tuple[str, int | None]:
         return ("?", None)
 
 
-async def _probe_main_db(db: AsyncSession) -> dict:
+async def _probe_main_db() -> dict:
+    # Probe the MAIN engine directly (it is never rebound — only the shared
+    # sessionmaker is, on failover). Probing the request session would report
+    # the SPARE's reachability as the main's after a failover.
     host, port = _dsn_host_port(get_settings().database_url)
     t0 = time.perf_counter()
+
+    async def _q() -> None:
+        async with db_mod.engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+
     try:
-        await db.execute(text("SELECT 1"))
+        await asyncio.wait_for(_q(), timeout=_SPARE_PROBE_TIMEOUT)
         return {
             "host": host,
             "port": port,
@@ -175,7 +183,7 @@ async def build_ha_status(
     # uses its own connection, OCR uses httpx — safe to run concurrently (only
     # one task touches ``db``).
     main_db, spare_db, ocr = await asyncio.gather(
-        _probe_main_db(db),
+        _probe_main_db(),
         _probe_spare_db(settings.spare_dsn),
         _probe_ocr(ocr_urls),
     )

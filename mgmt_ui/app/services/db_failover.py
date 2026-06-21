@@ -47,14 +47,16 @@ async def _probe(engine, timeout: float) -> bool:
         return False
 
 
-def _write_marker(path: str) -> None:
+def _write_marker(path: str) -> bool:
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(datetime.now(timezone.utc).isoformat() + "\n")
         logger.warning("db_failover: wrote marker %s (backup cron will pause)", path)
+        return True
     except Exception as exc:  # noqa: BLE001
         logger.error("db_failover: could not write marker %s: %s", path, exc)
+        return False
 
 
 async def _raise_signal(kind: str, severity: str, message: str) -> None:
@@ -73,9 +75,20 @@ async def _do_failover(app) -> None:
     if not activated:
         logger.error("db_failover: NO spare configured — staying on a dead main (503s)")
         return
-    _write_marker(settings.resolved_failover_marker_path())
+    marker_ok = _write_marker(settings.resolved_failover_marker_path())
     app.state.active_db = "spare"
     app.state.failed_over_at = datetime.now(timezone.utc)
+    if not marker_ok:
+        # We still fail over (serving the spare beats serving a dead main), but
+        # the cron-clobber guard is NOT armed — warn loudly so the operator
+        # pauses the backup cron manually before it overwrites the live spare.
+        await _raise_signal(
+            "db_failover_marker_error",
+            "critical",
+            "FAILED OVER to the spare but could NOT write the failover marker — "
+            "the backup cron guard is INACTIVE. Pause the backup cron manually "
+            "so it cannot pg_restore over the live spare.",
+        )
 
     # We intentionally do NOT re-elect leadership or restart workers at runtime.
     # The boot-time worker-leader keeps running the workers — they each open a

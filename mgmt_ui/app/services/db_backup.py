@@ -166,6 +166,28 @@ def run_backup(
 
     dump_fn(main_dsn, out_path)  # raises on failure -> the whole tick fails loudly
 
+    # Re-check: a failover may have STARTED during the (slow) dump. If the marker
+    # appeared, the spare is now the LIVE database — keep the dump as a backup but
+    # do NOT restore it over live spare writes.
+    if marker_path and os.path.exists(marker_path):
+        logger.warning(
+            "failover marker appeared during the dump (%s) — keeping the dump, "
+            "skipping the restore to protect the live spare",
+            marker_path,
+        )
+        entry = {
+            "file": os.path.basename(out_path),
+            "taken_at": now.isoformat(),
+            "size": os.path.getsize(out_path),
+            "sha256": sha256_file(out_path),
+            "source": main_dsn.split("@")[-1] if "@" in main_dsn else "main",
+            "restored_ok": False,
+            "restore_skipped": "failover_active",
+        }
+        append_manifest(d / MANIFEST_NAME, entry, keep)
+        prune_dumps(d, keep)
+        return entry
+
     restored_ok = True
     try:
         restore_fn(out_path, spare_dsn)
@@ -198,10 +220,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not args.main_dsn or not args.spare_dsn:
         ap.error("--main-dsn and --spare-dsn (or MAIN_DSN/SPARE_DSN env) are required")
     try:
+        # Default the marker to <dump_dir>/FAILOVER_ACTIVE so the cron-clobber
+        # guard is ON by default (matches the app-side default marker location),
+        # not opt-in.
+        marker_path = args.marker_path or str(Path(args.dump_dir) / "FAILOVER_ACTIVE")
         entry = run_backup(
             main_dsn=args.main_dsn, spare_dsn=args.spare_dsn,
             dump_dir=args.dump_dir, keep=args.keep,
-            marker_path=args.marker_path or None,
+            marker_path=marker_path,
         )
     except subprocess.CalledProcessError as exc:
         logger.error("backup tick failed: %s", exc)
