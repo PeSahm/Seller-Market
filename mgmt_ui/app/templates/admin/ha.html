@@ -196,6 +196,52 @@
 
 </div>
 
+{# ---- mgmt instances ---- #}
+<article class="card" style="margin-top:16px;">
+  <div class="card-header"><h2 class="h3">mgmt instances</h2></div>
+  <p class="text-muted text-small">
+    Every running mgmt instance heartbeats itself here. Exactly one is the worker
+    leader (runs the fleet workers); the rest serve the UI. Reach the dashboard at
+    any of these.
+  </p>
+  <div class="table-scroll">
+    <table class="table">
+      <thead>
+        <tr><th>Instance</th><th>Address</th><th>Role</th><th>DB</th><th>Last seen</th></tr>
+      </thead>
+      <tbody>
+        {% for i in ha.instances %}
+          <tr>
+            <td><strong dir="auto">{{ i.name }}</strong></td>
+            <td><code dir="ltr">{{ i.address or '—' }}</code></td>
+            <td>
+              {% if i.is_leader %}
+                <span class="badge badge--up">worker leader</span>
+              {% else %}
+                <span class="badge badge--pending">standby (UI)</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if i.active_db == 'main' %}
+                <span class="badge badge--up">main</span>
+              {% else %}
+                <span class="badge badge--down">{{ i.active_db }}</span>
+              {% endif %}
+            </td>
+            <td class="text-muted text-small">
+              {% if i.stale %}<span class="badge badge--down">stale</span> {% endif %}
+              {{ i.last_seen_at.strftime('%H:%M:%S') if i.last_seen_at else '—' }} UTC
+            </td>
+          </tr>
+        {% endfor %}
+        {% if not ha.instances %}
+          <tr><td colspan="5" class="text-muted text-small">No instances heartbeating yet.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</article>
+
 {# ---- OCR failover pool ---- #}
 <article class="card" style="margin-top:16px;">
   <div class="card-header">

@@ -18,6 +18,7 @@ from app.models.auto_sell_reload_status import AutoSellReloadStatus
 from app.models.fees import AgentFeeConfig, CustomerFeePayment
 from app.models.health import HealthSignal
 from app.models.audit import AuditLog
+from app.models.mgmt_instance import MgmtInstance
 
 __all__ = [
     "Base",
@@ -42,4 +43,5 @@ __all__ = [
     "CustomerFeePayment",
     "HealthSignal",
     "AuditLog",
+    "MgmtInstance",
 ]
