@@ -1,0 +1,121 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Close positions{% endblock %}
+
+{% block page_body %}
+{% set current_url = request.url.path ~ ('?' ~ request.url.query if request.url.query else '') %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Close open positions</h1>
+    <p class="text-muted text-small">
+      Bot-buy positions with an unsold remainder. Saving a <strong>close price</strong>
+      realizes that symbol into the fee (% of the gain, the fixed loss fee, or
+      nothing at break-even). The price is <strong>global</strong> — one per
+      symbol, fleet-wide — and editable anytime (e.g. after a مجمع dividend
+      drop); the fee recomputes live. <strong>Clear</strong> re-opens a position.
+    </p>
+  </div>
+</div>
+
+{% if flash_closed is not none %}
+<div class="card" style="margin-bottom:12px;">
+  <p class="text-small">Closed {{ flash_closed }} position(s){% if flash_defaulted %} — {{ flash_defaulted }} had no market price and defaulted to the average buy (set a real price below){% endif %}.</p>
+</div>
+{% endif %}
+
+<form method="get" action="/admin/close-positions" class="filter-bar" style="margin-bottom:12px;">
+  <select name="agent_id" class="input">
+    <option value="">All agents</option>
+    {% for a in all_agents %}
+      <option value="{{ a.id }}" {% if filter_agent_id and filter_agent_id == (a.id|string) %}selected{% endif %} dir="auto">{{ a.username }}</option>
+    {% endfor %}
+  </select>
+  <input type="text" name="broker" class="input" placeholder="broker" value="{{ filter_broker }}" style="max-width:140px;">
+  <button class="btn btn--ghost btn--sm" type="submit">Filter</button>
+  {% if filter_agent_id or filter_broker %}<a class="btn btn--ghost btn--sm" href="/admin/close-positions">Clear</a>{% endif %}
+</form>
+
+{% if rows %}
+<form method="post" action="/admin/close-positions/close-all" style="margin-bottom:14px;"
+      onsubmit="return confirm('Close ALL still-open positions at the latest day price? Already-priced positions are left untouched.');">
+  {% include "partials/csrf.html" %}
+  <input type="hidden" name="agent_id" value="{{ filter_agent_id }}">
+  <input type="hidden" name="broker" value="{{ filter_broker }}">
+  <button class="btn btn--danger btn--sm" type="submit">Close all open positions at latest price</button>
+</form>
+{% endif %}
+
+{% if not rows %}
+<div class="card"><p class="text-muted">No open positions in scope.</p></div>
+{% else %}
+<div class="table-scroll">
+<table class="table">
+  <thead>
+    <tr><th>Symbol / ISIN</th><th>Customers</th><th>Open qty</th><th>Avg buy</th><th>Latest price</th><th>Close price</th><th>State</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for p in rows %}
+    {% set default_price = p.saved_price if p.saved_price is not none else (p.latest_price if (p.latest_price and p.latest_price > 0) else p.avg_buy_price) %}
+    <tr>
+      <td>{{ symbol_label(p.isin, symbol=p.symbol, title=p.symbol_title) }}</td>
+      <td class="text-small text-muted">{{ p.customer_count }}</td>
+      <td class="text-small">{{ '{:,}'.format(p.open_qty) }}</td>
+      <td class="text-small">{{ '{:,.0f}'.format(p.avg_buy_price) }}</td>
+      <td class="text-small text-muted">{% if p.latest_price %}{{ '{:,}'.format(p.latest_price) }}{% else %}<span title="sidecar has no price — set one manually">— needs price</span>{% endif %}</td>
+      <td>
+        <form method="post" action="/admin/close-positions/price" class="filter-bar" style="gap:4px;margin:0;">
+          {% include "partials/csrf.html" %}
+          <input type="hidden" name="isin" value="{{ p.isin }}">
+          <input type="hidden" name="next" value="{{ current_url }}">
+          <input type="number" step="1" min="1" name="price" class="input" style="max-width:110px;"
+                 value="{{ '{:.0f}'.format(default_price) }}" required>
+          <input type="text" name="note" class="input" placeholder="note" style="max-width:110px;">
+          <button class="btn btn--primary btn--sm" type="submit">Save</button>
+        </form>
+      </td>
+      <td>
+        {% if p.saved_price is not none %}<span class="badge badge--up" title="realized at the saved close price">closed</span>
+        {% else %}<span class="badge">open</span>{% endif %}
+      </td>
+      <td>
+        {% if p.saved_price is not none %}
+        <form method="post" action="/admin/close-positions/clear" style="margin:0;">
+          {% include "partials/csrf.html" %}
+          <input type="hidden" name="isin" value="{{ p.isin }}">
+          <input type="hidden" name="next" value="{{ current_url }}">
+          <button class="btn btn--danger btn--sm" type="submit" title="re-open this position (no fee)">Clear</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+<h2 class="h3" style="margin-top:20px;">Action history</h2>
+{% if not history %}
+<p class="text-small text-muted">No close-price actions yet.</p>
+{% else %}
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Symbol</th><th>Old → new price</th></tr></thead>
+  <tbody>
+    {% for h in history %}
+    {% set actor = actors_by_id.get(h.actor_user_id) %}
+    <tr>
+      <td class="text-small text-muted">{{ h.ts.strftime('%Y-%m-%d %H:%M') if h.ts else '—' }}</td>
+      <td class="text-small" dir="auto">{{ actor.username if actor else '—' }}</td>
+      <td class="text-small">{% if h.action.endswith('.clear') %}clear{% else %}set{% endif %}</td>
+      <td>{{ symbol_label(h.target_id) }}</td>
+      <td class="text-small">
+        {{ (h.before_json.close_price if h.before_json else none) or '—' }} →
+        {{ (h.after_json.close_price if h.after_json else none) or '—' }}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

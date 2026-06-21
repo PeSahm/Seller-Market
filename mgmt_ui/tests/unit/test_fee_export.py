@@ -136,15 +136,15 @@ def test_build_fee_workbook_empty_report_is_valid():
 
 
 def test_build_fee_workbook_mark_to_market_sheet():
-    # A 20d virtual row renders with the Oldest-buy column and the "20d"
-    # trigger label (the sell-trigger label is gone with the FIFO revert).
+    # A manual-close virtual row renders with the Oldest-buy column and the
+    # "close" trigger label.
     agent_id = uuid.uuid4()
     customer_id = uuid.uuid4()
     report = FeeReport(
         virtual_rows=[VirtualFeeRow(
             customer_id=customer_id, agent_id=agent_id, broker="ayandeh",
             isin="IRO1PNES0001", symbol="شپنا", open_qty=40,
-            avg_buy_price=Decimal("6000"), price=7000, trigger="20d",
+            avg_buy_price=Decimal("6000"), price=7000, trigger="close",
             in_loss=False, fee=Decimal("400"),
             oldest_buy_date=date(2026, 6, 1),
         )],
@@ -161,7 +161,7 @@ def test_build_fee_workbook_mark_to_market_sheet():
     assert "Oldest buy" in header
     row = {header[i]: ws[2][i].value for i in range(len(header))}
     assert row["Customer"] == "Mostafa main"
-    assert row["Trigger"] == "20d"
+    assert row["Trigger"] == "close"
     # Real Excel date cell (openpyxl reads date cells back as datetime).
     assert row["Oldest buy"] == datetime(2026, 6, 1)
     assert row["Open qty"] == 40 and row["Fee"] == 400

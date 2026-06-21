@@ -158,7 +158,7 @@ def build_fee_workbook(
     _apply_formats(wsc, date_cols=[], money_cols=[4, 5, 6, 7], pct_cols=[], nrows=len(report.per_customer))
     _autosize(wsc, [18, 16, 10, 18, 16, 16, 16, 12])
 
-    # ---- Sheet: Realized remainder (mark-to-market, unsold > N days) ----
+    # ---- Sheet: Realized remainder (manual close of the unsold remainder) ----
     if report.virtual_rows:
         wsv = wb.create_sheet("Realized remainder")
         _write_header(
@@ -176,8 +176,8 @@ def build_fee_workbook(
                 v.oldest_buy_date,  # real Excel date cell (None → empty)
                 _num(v.avg_buy_price),
                 int(v.price),
-                "20d",
-                "loss" if v.in_loss else "profit",
+                v.trigger,
+                ("loss" if v.in_loss else ("profit" if v.fee and v.fee > 0 else "break-even")),
                 _num(v.fee),
             ])
         _apply_formats(wsv, date_cols=[], money_cols=[7, 8, 11], pct_cols=[], nrows=len(report.virtual_rows))

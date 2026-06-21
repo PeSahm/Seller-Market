@@ -53,6 +53,8 @@ from app.services import autobalance as services_autobalance
 from app.services import broker_client
 from app.services import broker_orders as services_broker_orders
 from app.services import brokers_admin
+from app.services import close_positions_view as services_close_positions
+from app.services import close_prices as services_close_prices
 from app.services import customers as services_customers
 from app.services import fee_export
 from app.services import fee_payments as services_fee_payments
@@ -4019,15 +4021,6 @@ async def admin_bot_report(
     ctx["filter_only_bot"] = bool(only_bot)
     ctx["excluded_instruments_raw"] = exclude_raw
     ctx["excluded_count"] = len(exclude_set)
-    try:
-        mtm_days = int(str(await settings_store.get_setting(db, "mark_to_market_days")))
-        # Same 1..365 rule as build_fee_report, so the page never displays a
-        # window the engine silently replaced with the default.
-        if not (1 <= mtm_days <= 365):
-            raise ValueError(mtm_days)
-        ctx["mtm_days"] = mtm_days
-    except Exception:  # noqa: BLE001 — malformed setting must not 500 the page
-        ctx["mtm_days"] = 20
     return templates.TemplateResponse("admin/bot_report.html", ctx)
 
 
@@ -4192,36 +4185,6 @@ async def admin_bot_report_exclusions(
     )
 
 
-@router.post("/bot-report/mtm-days")
-async def admin_bot_report_mtm_days(
-    request: Request,
-    user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-    mtm_days: str = Form(""),
-    next_url: str = Form("", alias="next"),
-):
-    """Save the mark-to-market aging window (days a bot-buy lot may sit unsold
-    before the fee report values the open remainder at today's price). Stored
-    as the ``mark_to_market_days`` setting — ``set_setting`` writes the audit
-    row. Out-of-range/garbage input keeps the stored value (no 422)."""
-    try:
-        days: Optional[int] = int(str(mtm_days).strip())
-    except (TypeError, ValueError):
-        days = None
-    if days is not None and 1 <= days <= 365:
-        await settings_store.set_setting(
-            db, "mark_to_market_days", str(days), updated_by=user.id
-        )
-        await db.commit()
-
-    target = _bot_report_safe_next(next_url)
-    if request.headers.get("HX-Request"):
-        return Response(status_code=204, headers={"HX-Redirect": target})
-    return Response(
-        status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target}
-    )
-
-
 @router.post("/bot-report/orders/{order_id}/decline")
 async def admin_decline_order(
     order_id: UUID,
@@ -4265,6 +4228,171 @@ async def admin_undo_decline(
     return Response(
         status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target}
     )
+
+
+# ---------------------------------------------------------------------------
+# Close open positions (manual price-driven realization — replaces 20-day MTM)
+# ---------------------------------------------------------------------------
+
+
+def _close_positions_safe_next(next_url: Optional[str]) -> str:
+    """Constrain a post-save redirect to the local close-positions page."""
+    if (
+        next_url
+        and next_url.startswith("/admin/close-positions")
+        and "//" not in next_url
+        and "\\" not in next_url
+        and "\n" not in next_url
+        and "\r" not in next_url
+    ):
+        return next_url
+    return "/admin/close-positions"
+
+
+async def _close_positions_actor_map(db, history):
+    """``{user_id: User}`` for the actors in the close-price audit history."""
+    ids = [h.actor_user_id for h in history if h.actor_user_id]
+    out: dict = {}
+    if ids:
+        res = await db.execute(select(User).where(User.id.in_(ids)))
+        out = {u.id: u for u in res.scalars().all()}
+    return out
+
+
+@router.get("/close-positions")
+async def admin_close_positions(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    agent_id: Optional[str] = None,
+    broker: Optional[str] = None,
+    closed: Optional[str] = None,
+    defaulted: Optional[str] = None,
+):
+    """List every OPEN bot-buy position (all agents, optional agent/broker
+    filter) with its avg buy + latest price + saved close price, plus the
+    close-price action history. Saving a price realizes that symbol into the
+    fee (live recompute); the bulk action closes everything still open."""
+    await services_instruments.ensure_instruments(db)
+    p_agent = _bot_report_parse_uuid(agent_id)
+    rows = await services_close_positions.build_open_positions(
+        db, agent_id=p_agent, broker=broker or None
+    )
+    history = await services_audit.list_audit(
+        db, target_type="instrument_close_price", limit=100
+    )
+    agents = {
+        a.id: a for a in await services_agents.list_agents(db, include_deleted=True)
+    }
+    ctx = _ctx(request, user, current_tab="/admin/close-positions")
+    ctx["rows"] = rows
+    ctx["history"] = history
+    ctx["actors_by_id"] = await _close_positions_actor_map(db, history)
+    ctx["all_agents"] = sorted(agents.values(), key=lambda a: a.username)
+    ctx["filter_agent_id"] = agent_id or ""
+    ctx["filter_broker"] = broker or ""
+    ctx["flash_closed"] = _bot_report_parse_int(closed)
+    ctx["flash_defaulted"] = _bot_report_parse_int(defaulted)
+    return templates.TemplateResponse("admin/close_positions.html", ctx)
+
+
+@router.post("/close-positions/price")
+async def admin_close_positions_set(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    isin: str = Form(...),
+    price: str = Form(...),
+    note: str = Form(""),
+    next_url: str = Form("", alias="next"),
+):
+    """Save/replace the GLOBAL close price for one ISIN → realizes its open
+    positions into the fee at that price (recomputes live)."""
+    isin = (isin or "").strip()
+    try:
+        p = Decimal(str(price).strip())
+    except (InvalidOperation, ValueError):
+        raise HTTPException(status_code=400, detail="invalid price")
+    # Reject non-finite (inf/nan) and absurd values that would overflow the
+    # Numeric(20,4) column → a clean 400, not a DB-layer 500.
+    if not isin or not p.is_finite() or p <= 0 or p >= Decimal("1e15"):
+        raise HTTPException(status_code=400, detail="invalid isin/price")
+    await services_close_prices.set_close_price(
+        db, isin, p, (note or "").strip() or None, user.id
+    )
+    target = _close_positions_safe_next(next_url)
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
+
+
+@router.post("/close-positions/clear")
+async def admin_close_positions_clear(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    isin: str = Form(...),
+    next_url: str = Form("", alias="next"),
+):
+    """Clear an ISIN's close price → re-opens its positions (no fee)."""
+    isin = (isin or "").strip()
+    if isin:
+        await services_close_prices.clear_close_price(db, isin, user.id)
+    target = _close_positions_safe_next(next_url)
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
+
+
+@router.post("/close-positions/close-all")
+async def admin_close_positions_close_all(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    agent_id: str = Form(""),
+    broker: str = Form(""),
+    next_url: str = Form("", alias="next"),
+):
+    """Close EVERY still-OPEN position in scope at its latest day price (avg-buy
+    fallback when the sidecar has no price). Positions that already have a saved
+    close price are left untouched (so a manual post-مجمع price isn't clobbered).
+    After this nothing in scope stays open."""
+    p_agent = _bot_report_parse_uuid(agent_id or None)
+    rows = await services_close_positions.build_open_positions(
+        db, agent_id=p_agent, broker=(broker or None)
+    )
+    closed = 0
+    defaulted = 0
+    for r in rows:
+        if r.saved_price is not None:
+            continue  # already closed — don't overwrite a manual price
+        if r.latest_price and r.latest_price > 0:
+            price = Decimal(r.latest_price)
+            note = "bulk close at latest price"
+        else:
+            price = r.avg_buy_price
+            note = "bulk close (no market price — avg buy)"
+        if price is None or price <= 0:
+            continue
+        if not (r.latest_price and r.latest_price > 0):
+            defaulted += 1
+        await services_close_prices.set_close_price(
+            db, r.isin, price, note, user.id, commit=False
+        )
+        closed += 1
+    await db.commit()
+
+    from urllib.parse import urlencode
+
+    params: dict = {"closed": closed, "defaulted": defaulted}
+    if agent_id:
+        params["agent_id"] = agent_id
+    if broker:
+        params["broker"] = broker
+    target = "/admin/close-positions?" + urlencode(params)
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
 
 
 @router.get("/bot-report/export.xlsx")
