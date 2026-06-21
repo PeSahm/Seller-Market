@@ -1483,21 +1483,39 @@ def _close_positions_agent_safe_next(next_url: Optional[str]) -> str:
     return "/agent/close-positions"
 
 
-async def _agent_open_isins(db: AsyncSession, user: User) -> Optional[set[str]]:
-    """ISINs the agent currently holds OPEN — ``None`` for admin (no limit).
+async def _agent_close_customer_or_404(db: AsyncSession, user: User, customer_id_raw):
+    """Parse + authorize the posted customer_id, else 404 (no UUID leak).
 
-    An agent may only set/clear a close price for an instrument their own
-    customers actually hold open (404 otherwise — no UUID/ISIN leak). Admins
-    bypass. A position that already has a saved close price still has open
-    quantity, so it remains in this set (clearing it is allowed).
+    An agent may only set/clear a close price for THEIR OWN customer's position;
+    admins may touch any. Returns the parsed customer UUID.
     """
-    if user.role == "admin":
-        return None
-    return await services_close_positions.list_open_isins(db, agent_id=user.id)
+    try:
+        cid = UUID((customer_id_raw or "").strip())
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=404, detail="position not found")
+    if user.role != "admin":
+        customer = await services_customers.get_customer(db, cid)
+        if customer is None or not _can_access_customer(user, customer):
+            raise HTTPException(status_code=404, detail="position not found")
+    return cid
 
 
 def _close_positions_flash_int(s: Optional[str]) -> Optional[int]:
     return int(s) if (s or "").isdigit() else None
+
+
+def _close_positions_customer_ids(rows, history) -> set:
+    """Customer ids in the open rows + the close-price audit JSON (name lookup)."""
+    out = {r.customer_id for r in rows}
+    for h in history:
+        for blob in (h.after_json, h.before_json):
+            cid = blob.get("customer_id") if isinstance(blob, dict) else None
+            if cid:
+                try:
+                    out.add(UUID(str(cid)))
+                except (ValueError, AttributeError):
+                    pass
+    return out
 
 
 @router.get("/close-positions")
@@ -1508,11 +1526,11 @@ async def agent_close_positions(
     closed: Optional[str] = None,
     defaulted: Optional[str] = None,
 ):
-    """The agent's own OPEN positions with avg buy + latest price + saved close
-    price, plus the history of the agent's own close actions. Saving a price
-    realizes that symbol into the fee; the bulk action closes everything still
-    open. The price is GLOBAL (shared fleet-wide); an agent may only touch the
-    instruments their own customers hold open."""
+    """The agent's own OPEN positions (one row per customer × symbol) with avg
+    buy + latest price + saved close price, plus the history of the agent's own
+    close actions. Saving a price realizes THAT customer's position into the fee;
+    the bulk action closes everything still open. An agent may only touch their
+    own customers' positions; the price is per (customer, symbol)."""
     _require_agent_or_admin(user)
     await services_instruments.ensure_instruments(db)
     own_agent_id = None if user.role == "admin" else user.id
@@ -1520,10 +1538,16 @@ async def agent_close_positions(
     history = await services_audit.list_audit(
         db, target_type="instrument_close_price", actor_id=user.id, limit=100
     )
+    cust_ids = _close_positions_customer_ids(rows, history)
+    customers_by_id: dict = {}
+    if cust_ids:
+        res = await db.execute(select(Customer).where(Customer.id.in_(cust_ids)))
+        customers_by_id = {str(c.id): c for c in res.scalars().all()}
     ctx = _ctx(request, user, current_tab="/agent/close-positions")
     ctx["rows"] = rows
     ctx["history"] = history
     ctx["actors_by_id"] = {user.id: user}
+    ctx["customers_by_id"] = customers_by_id
     ctx["flash_closed"] = _close_positions_flash_int(closed)
     ctx["flash_defaulted"] = _close_positions_flash_int(defaulted)
     return templates.TemplateResponse("agent/close_positions.html", ctx)
@@ -1534,12 +1558,13 @@ async def agent_close_positions_set(
     request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    customer_id: str = Form(...),
     isin: str = Form(...),
     price: str = Form(...),
     note: str = Form(""),
     next_url: str = Form("", alias="next"),
 ):
-    """Save/replace the GLOBAL close price for one ISIN the agent holds open."""
+    """Save/replace the close price for one of the agent's own customer positions."""
     _require_agent_or_admin(user)
     isin = (isin or "").strip()
     try:
@@ -1550,11 +1575,9 @@ async def agent_close_positions_set(
     # Numeric(20,4) column → a clean 400, not a DB-layer 500.
     if not isin or not p.is_finite() or p <= 0 or p >= Decimal("1e15"):
         raise HTTPException(status_code=400, detail="invalid isin/price")
-    allowed = await _agent_open_isins(db, user)
-    if allowed is not None and isin not in allowed:
-        raise HTTPException(status_code=404, detail="position not found")
+    cid = await _agent_close_customer_or_404(db, user, customer_id)
     await services_close_prices.set_close_price(
-        db, isin, p, (note or "").strip() or None, user.id
+        db, cid, isin, p, (note or "").strip() or None, user.id
     )
     target = _close_positions_agent_safe_next(next_url)
     if request.headers.get("HX-Request"):
@@ -1567,17 +1590,16 @@ async def agent_close_positions_clear(
     request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    customer_id: str = Form(...),
     isin: str = Form(...),
     next_url: str = Form("", alias="next"),
 ):
-    """Clear an ISIN's close price → re-opens its positions (no fee)."""
+    """Clear one of the agent's own customer positions → re-opens it (no fee)."""
     _require_agent_or_admin(user)
     isin = (isin or "").strip()
+    cid = await _agent_close_customer_or_404(db, user, customer_id)
     if isin:
-        allowed = await _agent_open_isins(db, user)
-        if allowed is not None and isin not in allowed:
-            raise HTTPException(status_code=404, detail="position not found")
-        await services_close_prices.clear_close_price(db, isin, user.id)
+        await services_close_prices.clear_close_price(db, cid, isin, user.id)
     target = _close_positions_agent_safe_next(next_url)
     if request.headers.get("HX-Request"):
         return Response(status_code=204, headers={"HX-Redirect": target})
@@ -1614,7 +1636,7 @@ async def agent_close_positions_close_all(
             continue
         # Atomic insert-if-absent: never clobber a price set concurrently.
         inserted = await services_close_prices.set_close_price_if_absent(
-            db, r.isin, price, note, user.id, commit=False
+            db, r.customer_id, r.isin, price, note, user.id, commit=False
         )
         if inserted:
             closed += 1

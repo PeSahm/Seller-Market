@@ -1,8 +1,8 @@
 """Unit tests for the manual close-price service (``close_prices``).
 
-set_close_price / clear_close_price upsert/delete a GLOBAL per-ISIN close price,
-write one audit row (before/after), and are idempotent. No DB — a fake session
-with get/add/delete/commit; get_close_prices uses a fake execute.
+set/clear upsert/delete a PER-CUSTOMER (customer_id, isin) close price, write one
+audit row (before/after, carrying customer_id), and are idempotent. No DB — a
+fake session with get/add/delete/commit; get_close_prices uses a fake execute.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from app.models.instrument_close_price import InstrumentClosePrice
 from app.services import close_prices as svc
 
 _ISIN = "IRO1XXXX0001"
+_CUST = uuid.uuid4()
 
 
 class _FakeDB:
@@ -52,12 +53,19 @@ def _audits(db):
     return [a for a in db.added if isinstance(a, AuditLog)]
 
 
+def _icp(**kw):
+    kw.setdefault("customer_id", _CUST)
+    kw.setdefault("isin", _ISIN)
+    return InstrumentClosePrice(**kw)
+
+
 async def test_set_inserts_when_absent():
     actor = uuid.uuid4()
     db = _FakeDB(None)
-    row = await svc.set_close_price(db, _ISIN, Decimal("7000"), "post-مجمع", actor)
+    row = await svc.set_close_price(db, _CUST, _ISIN, Decimal("7000"), "post-مجمع", actor)
     assert isinstance(row, InstrumentClosePrice)
-    assert row.isin == _ISIN and row.close_price == Decimal("7000")
+    assert row.customer_id == _CUST and row.isin == _ISIN
+    assert row.close_price == Decimal("7000")
     assert row.note == "post-مجمع" and row.updated_by == actor
     aus = _audits(db)
     assert len(aus) == 1
@@ -66,14 +74,15 @@ async def test_set_inserts_when_absent():
     assert aus[0].target_id == _ISIN
     assert aus[0].before_json["close_price"] is None
     assert aus[0].after_json["close_price"] == "7000"
+    assert aus[0].after_json["customer_id"] == str(_CUST)
     assert db.commits == 1
 
 
 async def test_set_updates_when_present():
     actor = uuid.uuid4()
-    existing = InstrumentClosePrice(isin=_ISIN, close_price=Decimal("6000"), note="old")
+    existing = _icp(close_price=Decimal("6000"), note="old")
     db = _FakeDB(existing)
-    row = await svc.set_close_price(db, _ISIN, Decimal("7200"), None, actor)
+    row = await svc.set_close_price(db, _CUST, _ISIN, Decimal("7200"), None, actor)
     assert row is existing
     assert row.close_price == Decimal("7200") and row.note is None
     assert row.updated_by == actor
@@ -87,7 +96,7 @@ async def test_set_updates_when_present():
 async def test_set_no_commit_defers_for_bulk():
     db = _FakeDB(None)
     await svc.set_close_price(
-        db, _ISIN, Decimal("7000"), None, uuid.uuid4(), commit=False
+        db, _CUST, _ISIN, Decimal("7000"), None, uuid.uuid4(), commit=False
     )
     assert db.commits == 0
     assert len(_audits(db)) == 1  # audit still staged
@@ -96,18 +105,19 @@ async def test_set_no_commit_defers_for_bulk():
 async def test_set_if_absent_inserts_and_audits():
     actor = uuid.uuid4()
     db = _FakeDB(insert_result=_ISIN)  # ON CONFLICT inserted → RETURNING isin
-    out = await svc.set_close_price_if_absent(db, _ISIN, Decimal("7000"), "n", actor)
+    out = await svc.set_close_price_if_absent(db, _CUST, _ISIN, Decimal("7000"), "n", actor)
     assert out is True
     aus = _audits(db)
     assert len(aus) == 1 and aus[0].action == "instrument_close_price.set"
     assert aus[0].after_json["close_price"] == "7000"
+    assert aus[0].after_json["customer_id"] == str(_CUST)
     assert db.commits == 1
 
 
 async def test_set_if_absent_skips_when_present():
     db = _FakeDB(insert_result=None)  # ON CONFLICT DO NOTHING → no row returned
     out = await svc.set_close_price_if_absent(
-        db, _ISIN, Decimal("7000"), None, uuid.uuid4()
+        db, _CUST, _ISIN, Decimal("7000"), None, uuid.uuid4()
     )
     assert out is False
     assert _audits(db) == []  # no audit when nothing inserted
@@ -117,16 +127,16 @@ async def test_set_if_absent_skips_when_present():
 async def test_set_if_absent_no_commit_defers_for_bulk():
     db = _FakeDB(insert_result=_ISIN)
     await svc.set_close_price_if_absent(
-        db, _ISIN, Decimal("7000"), None, uuid.uuid4(), commit=False
+        db, _CUST, _ISIN, Decimal("7000"), None, uuid.uuid4(), commit=False
     )
     assert db.commits == 0
     assert len(_audits(db)) == 1
 
 
 async def test_clear_deletes_and_audits():
-    existing = InstrumentClosePrice(isin=_ISIN, close_price=Decimal("7000"), note="n")
+    existing = _icp(close_price=Decimal("7000"), note="n")
     db = _FakeDB(existing)
-    out = await svc.clear_close_price(db, _ISIN, uuid.uuid4())
+    out = await svc.clear_close_price(db, _CUST, _ISIN, uuid.uuid4())
     assert out is True
     assert existing in db.deleted
     aus = _audits(db)
@@ -138,7 +148,7 @@ async def test_clear_deletes_and_audits():
 
 async def test_clear_absent_is_noop():
     db = _FakeDB(None)
-    out = await svc.clear_close_price(db, _ISIN, uuid.uuid4())
+    out = await svc.clear_close_price(db, _CUST, _ISIN, uuid.uuid4())
     assert out is False
     assert _audits(db) == []
     assert db.deleted == []
@@ -146,18 +156,20 @@ async def test_clear_absent_is_noop():
 
 
 async def test_get_close_price_returns_decimal():
-    db = _FakeDB(InstrumentClosePrice(isin=_ISIN, close_price=Decimal("7000")))
-    assert await svc.get_close_price(db, _ISIN) == Decimal("7000")
+    db = _FakeDB(_icp(close_price=Decimal("7000")))
+    assert await svc.get_close_price(db, _CUST, _ISIN) == Decimal("7000")
 
 
 async def test_get_close_price_none_when_absent():
-    assert await svc.get_close_price(_FakeDB(None), _ISIN) is None
+    assert await svc.get_close_price(_FakeDB(None), _CUST, _ISIN) is None
 
 
 async def test_get_close_prices_batch():
+    cust2 = uuid.uuid4()
+
     class _Res:
         def all(self):
-            return [(_ISIN, Decimal("7000")), ("IRO2YYYY0002", Decimal("5000"))]
+            return [(_CUST, _ISIN, Decimal("7000")), (cust2, "IRO2YYYY0002", Decimal("5000"))]
 
     class _DB:
         def __init__(self):
@@ -168,8 +180,10 @@ async def test_get_close_prices_batch():
             return _Res()
 
     db = _DB()
-    out = await svc.get_close_prices(db, [_ISIN, "IRO2YYYY0002", ""])
-    assert out == {_ISIN: Decimal("7000"), "IRO2YYYY0002": Decimal("5000")}
+    out = await svc.get_close_prices(
+        db, [(_CUST, _ISIN), (cust2, "IRO2YYYY0002"), (None, "x"), (_CUST, "")]
+    )
+    assert out == {(_CUST, _ISIN): Decimal("7000"), (cust2, "IRO2YYYY0002"): Decimal("5000")}
     assert db.calls == 1
 
 

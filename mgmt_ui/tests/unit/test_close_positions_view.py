@@ -1,8 +1,9 @@
-"""Unit tests for the open-positions aggregation + the agent ownership guard.
+"""Unit tests for the open-positions aggregation (per customer × symbol) + the
+agent ownership guard.
 
-``build_open_positions`` reuses ``build_fee_report`` (mocked) and aggregates the
-OPEN bot-buy remainder per ISIN. The agent route may only set/clear a price for
-an instrument the agent holds open (404 otherwise).
+``build_open_positions`` reuses ``build_fee_report`` (mocked) and yields one row
+per (customer, ISIN) with the open remainder. The agent route may only set/clear
+a price for its OWN customer's position (404 otherwise).
 """
 from __future__ import annotations
 
@@ -45,49 +46,59 @@ async def _setup(monkeypatch, report, *, last_price=None, saved=None):
         return last_price
     monkeypatch.setattr(cpv.market_data_client, "get_last_price", _last)
 
-    async def _close(_db, _isins):
+    async def _close(_db, _pairs):
         return dict(saved or {})
     monkeypatch.setattr(cpv.close_prices_svc, "get_close_prices", _close)
 
 
-async def test_aggregates_open_volume_and_blended_avg_buy(monkeypatch):
-    _CUST_B = uuid.uuid4()
+async def test_one_row_per_customer_symbol(monkeypatch):
+    cust_b = uuid.uuid4()
     report = FeeReport(buy_rows=[
-        _buy_row("IRO1AAA", 6000, 100),                 # _CUST
-        _buy_row("IRO1AAA", 6400, 100, cust=_CUST_B),   # a SECOND customer, same ISIN
-        _buy_row("IRO1BBB", 5000, 50),
+        _buy_row("IRO1AAA", 6000, 100),                  # _CUST
+        _buy_row("IRO1AAA", 6400, 100),                  # _CUST again, same symbol → blends
+        _buy_row("IRO1AAA", 5000, 50, cust=cust_b),      # DIFFERENT customer, same symbol
+        _buy_row("IRO1BBB", 5000, 50),                   # _CUST, other symbol
     ])
-    await _setup(monkeypatch, report, last_price=7000, saved={"IRO1AAA": Decimal("7200")})
+    await _setup(monkeypatch, report, last_price=7000,
+                 saved={(_CUST, "IRO1AAA"): Decimal("7200")})
     rows = await cpv.build_open_positions(None, agent_id=_AGENT)
-    by = {r.isin: r for r in rows}
-    assert by["IRO1AAA"].open_qty == 200
-    assert by["IRO1AAA"].avg_buy_price == Decimal("6200")  # (100×6000 + 100×6400)/200
-    assert by["IRO1AAA"].latest_price == 7000
-    assert by["IRO1AAA"].saved_price == Decimal("7200")
-    assert by["IRO1BBB"].saved_price is None
-    assert by["IRO1AAA"].customer_count == 2  # two distinct customers on this ISIN
-    assert by["IRO1BBB"].customer_count == 1
+    by = {(r.customer_id, r.isin): r for r in rows}
+    # _CUST's two IRO1AAA buys blend into ONE row
+    assert by[(_CUST, "IRO1AAA")].open_qty == 200
+    assert by[(_CUST, "IRO1AAA")].avg_buy_price == Decimal("6200")
+    assert by[(_CUST, "IRO1AAA")].latest_price == 7000
+    assert by[(_CUST, "IRO1AAA")].saved_price == Decimal("7200")
+    # cust_b's IRO1AAA is a SEPARATE position, unaffected by _CUST's close
+    assert by[(cust_b, "IRO1AAA")].open_qty == 50
+    assert by[(cust_b, "IRO1AAA")].saved_price is None
+    assert (_CUST, "IRO1BBB") in by
+    assert len(rows) == 3
 
 
-async def test_skips_fully_realized_rows(monkeypatch):
-    report = FeeReport(buy_rows=[_buy_row("IRO1AAA", 6000, 0)])  # nothing open
+async def test_skips_fully_realized_and_unattributed(monkeypatch):
+    report = FeeReport(buy_rows=[
+        _buy_row("IRO1AAA", 6000, 0),                  # nothing open
+        _buy_row("IRO1BBB", 6000, 100, cust=None),     # unattributed → skipped
+    ])
     await _setup(monkeypatch, report)
     assert await cpv.build_open_positions(None, agent_id=_AGENT) == []
 
 
-# --- agent ownership guard (404 on a foreign ISIN) --------------------------
+# --- agent ownership guard (404 on a foreign customer) ----------------------
 
 
-async def test_agent_set_foreign_isin_404(monkeypatch):
+def _user(role):
+    return SimpleNamespace(role=role, id=uuid.uuid4())
+
+
+async def test_agent_set_foreign_customer_404(monkeypatch):
     from app.routers import agent as agent_router
+    user = _user("agent")
 
-    user = SimpleNamespace(role="agent", id=uuid.uuid4())
-
-    async def _open(_db, *, agent_id):
-        return {"IRO1OTHER"}  # agent holds a DIFFERENT isin open
-    monkeypatch.setattr(
-        agent_router.services_close_positions, "list_open_isins", _open
-    )
+    async def _get_customer(_db, cid):
+        return SimpleNamespace(id=cid, agent_id=uuid.uuid4())  # owned by SOMEONE ELSE
+    monkeypatch.setattr(agent_router.services_customers, "get_customer", _get_customer)
+    monkeypatch.setattr(agent_router, "_can_access_customer", lambda u, c: c.agent_id == u.id)
 
     called = {"set": 0}
 
@@ -98,76 +109,44 @@ async def test_agent_set_foreign_isin_404(monkeypatch):
     req = SimpleNamespace(headers={})
     with pytest.raises(HTTPException) as ei:
         await agent_router.agent_close_positions_set(
-            req, user=user, db=None, isin="IRO1AAA", price="7000", note="", next_url=""
-        )
+            req, user=user, db=None, customer_id=str(uuid.uuid4()),
+            isin="IRO1AAA", price="7000", note="", next_url="")
     assert ei.value.status_code == 404
     assert called["set"] == 0
 
 
-async def test_agent_set_owned_isin_calls_service(monkeypatch):
+async def test_agent_set_own_customer_calls_service(monkeypatch):
     from app.routers import agent as agent_router
+    user = _user("agent")
+    cid = uuid.uuid4()
 
-    user = SimpleNamespace(role="agent", id=uuid.uuid4())
+    async def _get_customer(_db, c):
+        return SimpleNamespace(id=c, agent_id=user.id)  # owned by the agent
+    monkeypatch.setattr(agent_router.services_customers, "get_customer", _get_customer)
+    monkeypatch.setattr(agent_router, "_can_access_customer", lambda u, c: c.agent_id == u.id)
 
-    async def _open(_db, *, agent_id):
-        return {"IRO1AAA"}
-    monkeypatch.setattr(
-        agent_router.services_close_positions, "list_open_isins", _open
-    )
+    calls = []
 
-    called = {"set": 0, "isin": None, "price": None}
-
-    async def _set(_db, isin, price, note, actor_id, **k):
-        called["set"] += 1
-        called["isin"] = isin
-        called["price"] = price
+    async def _set(_db, customer_id, isin, price, note, actor_id, **k):
+        calls.append((customer_id, isin, price))
     monkeypatch.setattr(agent_router.services_close_prices, "set_close_price", _set)
 
     req = SimpleNamespace(headers={})
     resp = await agent_router.agent_close_positions_set(
-        req, user=user, db=None, isin="IRO1AAA", price="7200", note="", next_url=""
-    )
-    assert called["set"] == 1
-    assert called["isin"] == "IRO1AAA" and called["price"] == Decimal("7200")
+        req, user=user, db=None, customer_id=str(cid),
+        isin="IRO1AAA", price="7200", note="", next_url="")
+    assert calls == [(cid, "IRO1AAA", Decimal("7200"))]
     assert resp.status_code == 303  # non-HTMX → redirect
-
-
-async def test_admin_set_bypasses_open_set(monkeypatch):
-    # An admin may price any ISIN — _agent_open_isins returns None (no limit), so
-    # list_open_isins must NOT even be consulted on the admin path.
-    from app.routers import agent as agent_router
-
-    user = SimpleNamespace(role="admin", id=uuid.uuid4())
-
-    async def _open(_db, *, agent_id):  # pragma: no cover - must not run
-        raise AssertionError("admin must bypass the open-set guard")
-    monkeypatch.setattr(
-        agent_router.services_close_positions, "list_open_isins", _open
-    )
-
-    called = {"set": 0}
-
-    async def _set(*a, **k):
-        called["set"] += 1
-    monkeypatch.setattr(agent_router.services_close_prices, "set_close_price", _set)
-
-    req = SimpleNamespace(headers={})
-    await agent_router.agent_close_positions_set(
-        req, user=user, db=None, isin="IRO1ZZZ", price="9000", note="", next_url=""
-    )
-    assert called["set"] == 1
 
 
 async def test_agent_set_rejects_non_finite_price(monkeypatch):
     from app.routers import agent as agent_router
+    user = _user("agent")
 
-    user = SimpleNamespace(role="agent", id=uuid.uuid4())
-
-    async def _open(_db, *, agent_id):  # pragma: no cover - guard runs after parse
-        return {"IRO1AAA"}
-    monkeypatch.setattr(
-        agent_router.services_close_positions, "list_open_isins", _open
-    )
+    async def _get_customer(_db, c):  # pragma: no cover - 400 fires before this
+        return SimpleNamespace(id=c, agent_id=user.id)
+    monkeypatch.setattr(agent_router.services_customers, "get_customer", _get_customer)
+    monkeypatch.setattr(agent_router, "_can_access_customer", lambda u, c: True)
 
     called = {"set": 0}
 
@@ -179,8 +158,8 @@ async def test_agent_set_rejects_non_finite_price(monkeypatch):
     for bad in ("inf", "1e1000", "nan"):
         with pytest.raises(HTTPException) as ei:
             await agent_router.agent_close_positions_set(
-                req, user=user, db=None, isin="IRO1AAA", price=bad, note="", next_url=""
-            )
+                req, user=user, db=None, customer_id=str(uuid.uuid4()),
+                isin="IRO1AAA", price=bad, note="", next_url="")
         assert ei.value.status_code == 400
     assert called["set"] == 0
 
@@ -196,85 +175,76 @@ class _CommitDB:
         self.commits += 1
 
 
-def _pos(isin, saved, latest, avg):
+def _pos(cust, isin, saved, latest, avg):
     return SimpleNamespace(
-        isin=isin, saved_price=saved, latest_price=latest, avg_buy_price=Decimal(str(avg))
-    )
+        customer_id=cust, isin=isin, saved_price=saved, latest_price=latest,
+        avg_buy_price=Decimal(str(avg)))
 
 
 async def test_agent_close_all_skips_priced_and_falls_back(monkeypatch):
     from app.routers import agent as agent_router
-
-    user = SimpleNamespace(role="agent", id=uuid.uuid4())
+    user = _user("agent")
+    cA, cB, cC = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     rows = [
-        _pos("IRO1AAA", Decimal("7000"), 8000, 6000),  # already priced → SKIP
-        _pos("IRO1BBB", None, 9930, 6000),             # latest price
-        _pos("IRO1CCC", None, None, 5000),             # no market price → avg-buy fallback
+        _pos(cA, "IRO1AAA", Decimal("7000"), 8000, 6000),  # already priced → SKIP
+        _pos(cB, "IRO1BBB", None, 9930, 6000),             # latest price
+        _pos(cC, "IRO1CCC", None, None, 5000),             # avg-buy fallback
     ]
 
     async def _open(_db, *, agent_id):
         return rows
-    monkeypatch.setattr(
-        agent_router.services_close_positions, "build_open_positions", _open
-    )
+    monkeypatch.setattr(agent_router.services_close_positions, "build_open_positions", _open)
 
     calls = []
 
-    async def _set_if_absent(_db, isin, price, note, actor_id, *, commit=True):
-        calls.append((isin, price, commit))
-        return True  # inserted (no concurrent price)
+    async def _set_if_absent(_db, customer_id, isin, price, note, actor_id, *, commit=True):
+        calls.append((customer_id, isin, price, commit))
+        return True
     monkeypatch.setattr(
-        agent_router.services_close_prices, "set_close_price_if_absent", _set_if_absent
-    )
+        agent_router.services_close_prices, "set_close_price_if_absent", _set_if_absent)
 
     db = _CommitDB()
     req = SimpleNamespace(headers={})
-    resp = await agent_router.agent_close_positions_close_all(
-        req, user=user, db=db, next_url=""
-    )
-    isins = [c[0] for c in calls]
-    assert "IRO1AAA" not in isins  # already priced — not clobbered
-    assert ("IRO1BBB", Decimal("9930"), False) in calls
-    assert ("IRO1CCC", Decimal("5000"), False) in calls  # avg-buy fallback
-    assert db.commits == 1  # single commit after staging both
+    resp = await agent_router.agent_close_positions_close_all(req, user=user, db=db, next_url="")
+    keys = [(c, i) for c, i, _p, _co in calls]
+    assert (cA, "IRO1AAA") not in keys  # already priced — not clobbered
+    assert (cB, "IRO1BBB", Decimal("9930"), False) in calls
+    assert (cC, "IRO1CCC", Decimal("5000"), False) in calls
+    assert db.commits == 1
     assert "closed=2" in resp.headers["Location"]
     assert "defaulted=1" in resp.headers["Location"]
 
 
 async def test_admin_close_all_skips_priced_and_falls_back(monkeypatch):
     from app.routers import admin as admin_router
-
-    user = SimpleNamespace(role="admin", id=uuid.uuid4())
+    user = _user("admin")
+    cA, cB, cC = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     rows = [
-        _pos("IRO1AAA", Decimal("7000"), 8000, 6000),  # already priced → SKIP
-        _pos("IRO1BBB", None, 9930, 6000),             # latest price
-        _pos("IRO1CCC", None, None, 5000),             # avg-buy fallback
+        _pos(cA, "IRO1AAA", Decimal("7000"), 8000, 6000),
+        _pos(cB, "IRO1BBB", None, 9930, 6000),
+        _pos(cC, "IRO1CCC", None, None, 5000),
     ]
 
     async def _open(_db, *, agent_id, broker=None):
         return rows
-    monkeypatch.setattr(
-        admin_router.services_close_positions, "build_open_positions", _open
-    )
+    monkeypatch.setattr(admin_router.services_close_positions, "build_open_positions", _open)
 
     calls = []
 
-    async def _set_if_absent(_db, isin, price, note, actor_id, *, commit=True):
-        calls.append((isin, price, commit))
+    async def _set_if_absent(_db, customer_id, isin, price, note, actor_id, *, commit=True):
+        calls.append((customer_id, isin, price, commit))
         return True
     monkeypatch.setattr(
-        admin_router.services_close_prices, "set_close_price_if_absent", _set_if_absent
-    )
+        admin_router.services_close_prices, "set_close_price_if_absent", _set_if_absent)
 
     db = _CommitDB()
     req = SimpleNamespace(headers={})
     resp = await admin_router.admin_close_positions_close_all(
-        req, user=user, db=db, agent_id="", broker="", next_url=""
-    )
-    isins = [c[0] for c in calls]
-    assert "IRO1AAA" not in isins
-    assert ("IRO1BBB", Decimal("9930"), False) in calls
-    assert ("IRO1CCC", Decimal("5000"), False) in calls
+        req, user=user, db=db, agent_id="", broker="", next_url="")
+    keys = [(c, i) for c, i, _p, _co in calls]
+    assert (cA, "IRO1AAA") not in keys
+    assert (cB, "IRO1BBB", Decimal("9930"), False) in calls
+    assert (cC, "IRO1CCC", Decimal("5000"), False) in calls
     assert db.commits == 1
     assert "closed=2" in resp.headers["Location"]
     assert "defaulted=1" in resp.headers["Location"]

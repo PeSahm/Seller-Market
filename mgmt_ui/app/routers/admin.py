@@ -4259,6 +4259,20 @@ async def _close_positions_actor_map(db, history):
     return out
 
 
+def _close_positions_history_customer_ids(history) -> set:
+    """Customer ids referenced in the close-price audit JSON (for name lookup)."""
+    out: set = set()
+    for h in history:
+        for blob in (h.after_json, h.before_json):
+            cid = blob.get("customer_id") if isinstance(blob, dict) else None
+            if cid:
+                try:
+                    out.add(UUID(str(cid)))
+                except (ValueError, AttributeError):
+                    pass
+    return out
+
+
 @router.get("/close-positions")
 async def admin_close_positions(
     request: Request,
@@ -4284,10 +4298,14 @@ async def admin_close_positions(
     agents = {
         a.id: a for a in await services_agents.list_agents(db, include_deleted=True)
     }
+    cust_ids = {r.customer_id for r in rows}
+    cust_ids |= _close_positions_history_customer_ids(history)
     ctx = _ctx(request, user, current_tab="/admin/close-positions")
     ctx["rows"] = rows
     ctx["history"] = history
     ctx["actors_by_id"] = await _close_positions_actor_map(db, history)
+    _cmap = await _bot_report_customer_map(db, cust_ids)
+    ctx["customers_by_id"] = {str(k): v for k, v in _cmap.items()}
     ctx["all_agents"] = sorted(agents.values(), key=lambda a: a.username)
     ctx["filter_agent_id"] = agent_id or ""
     ctx["filter_broker"] = broker or ""
@@ -4301,24 +4319,26 @@ async def admin_close_positions_set(
     request: Request,
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
+    customer_id: str = Form(...),
     isin: str = Form(...),
     price: str = Form(...),
     note: str = Form(""),
     next_url: str = Form("", alias="next"),
 ):
-    """Save/replace the GLOBAL close price for one ISIN → realizes its open
-    positions into the fee at that price (recomputes live)."""
+    """Save/replace the close price for ONE customer's position → realizes it
+    into the fee at that price (recomputes live; other customers untouched)."""
     isin = (isin or "").strip()
+    cid = _bot_report_parse_uuid(customer_id)
     try:
         p = Decimal(str(price).strip())
     except (InvalidOperation, ValueError):
         raise HTTPException(status_code=400, detail="invalid price")
     # Reject non-finite (inf/nan) and absurd values that would overflow the
     # Numeric(20,4) column → a clean 400, not a DB-layer 500.
-    if not isin or not p.is_finite() or p <= 0 or p >= Decimal("1e15"):
-        raise HTTPException(status_code=400, detail="invalid isin/price")
+    if cid is None or not isin or not p.is_finite() or p <= 0 or p >= Decimal("1e15"):
+        raise HTTPException(status_code=400, detail="invalid customer/isin/price")
     await services_close_prices.set_close_price(
-        db, isin, p, (note or "").strip() or None, user.id
+        db, cid, isin, p, (note or "").strip() or None, user.id
     )
     target = _close_positions_safe_next(next_url)
     if request.headers.get("HX-Request"):
@@ -4331,13 +4351,15 @@ async def admin_close_positions_clear(
     request: Request,
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
+    customer_id: str = Form(...),
     isin: str = Form(...),
     next_url: str = Form("", alias="next"),
 ):
-    """Clear an ISIN's close price → re-opens its positions (no fee)."""
+    """Clear one customer's position close price → re-opens it (no fee)."""
     isin = (isin or "").strip()
-    if isin:
-        await services_close_prices.clear_close_price(db, isin, user.id)
+    cid = _bot_report_parse_uuid(customer_id)
+    if cid is not None and isin:
+        await services_close_prices.clear_close_price(db, cid, isin, user.id)
     target = _close_positions_safe_next(next_url)
     if request.headers.get("HX-Request"):
         return Response(status_code=204, headers={"HX-Redirect": target})
@@ -4378,7 +4400,7 @@ async def admin_close_positions_close_all(
             continue
         # Atomic insert-if-absent: never clobber a price set concurrently.
         inserted = await services_close_prices.set_close_price_if_absent(
-            db, r.isin, price, note, user.id, commit=False
+            db, r.customer_id, r.isin, price, note, user.id, commit=False
         )
         if inserted:
             closed += 1

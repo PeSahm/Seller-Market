@@ -166,7 +166,7 @@ def _close_prices(mapping):
 async def test_close_realizes_open_remainder_at_saved_price(monkeypatch):
     # bot buy 100 @ 6000, never sold → open 100; saved close price 7000.
     monkeypatch.setattr(pr.close_prices_svc, "get_close_prices",
-                        _close_prices({_ISIN: Decimal("7000")}))
+                        _close_prices({(_CUST, _ISIN): Decimal("7000")}))
     buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
     rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]))
     assert len(rep.virtual_rows) == 1
@@ -176,11 +176,12 @@ async def test_close_realizes_open_remainder_at_saved_price(monkeypatch):
     assert rep.per_customer[_CUST].mark_fee == Decimal("1000")
     assert rep.per_customer[_CUST].total_fee == Decimal("1000")
     assert rep.grand_fee == Decimal("1000")
+    assert rep.buy_rows[0].closed is True  # the per-buy grid shows "closed"
 
 
 async def test_close_loss_bills_fixed_per_agent_fee(monkeypatch):
     monkeypatch.setattr(pr.close_prices_svc, "get_close_prices",
-                        _close_prices({_ISIN: Decimal("5500")}))  # below 6000 → loss
+                        _close_prices({(_CUST, _ISIN): Decimal("5500")}))  # below 6000 → loss
 
     async def _loss(_db, _agent):
         return Decimal("500000")  # fixed loss fee, in Rial
@@ -200,7 +201,7 @@ async def test_close_break_even_bills_no_fee(monkeypatch):
     # is configured (the fallback price for a no-market-price symbol relies on
     # this so a forced break-even close bills nothing).
     monkeypatch.setattr(pr.close_prices_svc, "get_close_prices",
-                        _close_prices({_ISIN: Decimal("6000")}))
+                        _close_prices({(_CUST, _ISIN): Decimal("6000")}))
 
     async def _loss(_db, _agent):
         return Decimal("500000")
@@ -221,12 +222,13 @@ async def test_no_saved_price_stays_open():
     rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]))
     assert rep.virtual_rows == []
     assert rep.buy_rows[0].open_volume == 100
+    assert rep.buy_rows[0].closed is False  # no close price → still "open"
 
 
 async def test_close_has_no_time_gate(monkeypatch):
     # No aging: a RECENT buy (5 days old) with a saved close price realizes too.
     monkeypatch.setattr(pr.close_prices_svc, "get_close_prices",
-                        _close_prices({_ISIN: Decimal("7000")}))
+                        _close_prices({(_CUST, _ISIN): Decimal("7000")}))
     buy = _order(1, 100, 6000, is_bot=True, ts=_RECENT, tracking=1)
     rep = await pr.build_fee_report(_fake_db([buy], [(_CUST, _AGENT)]))
     assert len(rep.virtual_rows) == 1
@@ -236,7 +238,7 @@ async def test_close_has_no_time_gate(monkeypatch):
 async def test_partial_sell_then_close(monkeypatch):
     # buy 100 @ 6000, sell 60 @ 6500 (FIFO fee 300), close the unsold 40 @ 7000.
     monkeypatch.setattr(pr.close_prices_svc, "get_close_prices",
-                        _close_prices({_ISIN: Decimal("7000")}))
+                        _close_prices({(_CUST, _ISIN): Decimal("7000")}))
     buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
     sell = _order(2, 60, 6500, is_bot=False, ts=_OLD, tracking=2)
     rep = await pr.build_fee_report(_fake_db([buy, sell], [(_CUST, _AGENT)]))
@@ -255,7 +257,7 @@ async def test_close_realizes_whole_remainder_blending_mixed_age(monkeypatch):
     # over the WHOLE remainder at the BLENDED avg buy (no per-lot age split — the
     # whole-remainder realization the operator wants).
     monkeypatch.setattr(pr.close_prices_svc, "get_close_prices",
-                        _close_prices({_ISIN: Decimal("7000")}))
+                        _close_prices({(_CUST, _ISIN): Decimal("7000")}))
     b1 = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
     b2 = _order(1, 100, 6400, is_bot=True, ts=_RECENT, tracking=2)
     rep = await pr.build_fee_report(_fake_db([b1, b2], [(_CUST, _AGENT)]))
@@ -270,7 +272,7 @@ async def test_close_realizes_whole_remainder_blending_mixed_age(monkeypatch):
 async def test_fully_sold_position_has_no_close_row(monkeypatch):
     # A saved close price doesn't conjure a row when nothing is open.
     monkeypatch.setattr(pr.close_prices_svc, "get_close_prices",
-                        _close_prices({_ISIN: Decimal("9000")}))
+                        _close_prices({(_CUST, _ISIN): Decimal("9000")}))
     buy = _order(1, 100, 6000, is_bot=True, ts=_OLD, tracking=1)
     sell = _order(2, 100, 6500, is_bot=False, ts=_OLD, tracking=2)
     rep = await pr.build_fee_report(_fake_db([buy, sell], [(_CUST, _AGENT)]))

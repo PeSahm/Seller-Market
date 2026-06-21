@@ -264,6 +264,7 @@
           <td class="text-small"><strong>{{ '{:,.0f}'.format(r.fee) }}</strong></td>
           <td>
             {% if r.status == 'realized' %}<span class="badge badge--up">realized</span>
+            {% elif r.closed %}<span class="badge badge--up" title="closed at a saved price — fee shown in Closed positions below">closed</span>
             {% elif r.status == 'partial' %}<span class="badge badge--pending">partial</span>
             {% else %}<span class="badge">open / possible sell</span>{% endif %}
           </td>

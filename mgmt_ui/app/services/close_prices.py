@@ -1,11 +1,13 @@
-"""Manual GLOBAL per-instrument close prices for the fee report.
+"""Manual per-customer close prices for the fee report.
 
 Replaces the automatic 20-day mark-to-market: an open (unmatched) bot-buy
-remainder is realized into the fee only when its ISIN has a saved close price
-here. The price is editable anytime (a stock can drop after a general assembly /
-مجمع dividend) and the fee recomputes live; clearing the row re-opens the
-position. Mirrors the per-order ``decline_order`` shape — every mutation writes
-an ``audit_log`` row (before/after) and is idempotent.
+remainder of a (customer, ISIN) position is realized into the fee only when that
+position has a saved close price here. The price is per customer — closing one
+customer's holding of a symbol does NOT touch another customer's. It defaults to
+the latest market price but is editable anytime (a stock can drop after a general
+assembly / مجمع dividend) and the fee recomputes live; clearing the row re-opens
+the position. Mirrors ``decline_order`` — every mutation writes an ``audit_log``
+row (before/after) and is idempotent.
 """
 from __future__ import annotations
 
@@ -15,37 +17,67 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditLog
 from app.models.instrument_close_price import InstrumentClosePrice
 
+_Key = tuple[UUID, str]
 
-async def get_close_price(db: AsyncSession, isin: str) -> Optional[Decimal]:
-    """The saved global close price for ``isin``, or ``None`` if unset."""
-    row = await db.get(InstrumentClosePrice, isin)
+
+def _audit(actor_id, customer_id, isin, *, prev_price=None, prev_note=None,
+           new_price=None, new_note=None, action: str) -> AuditLog:
+    return AuditLog(
+        actor_user_id=actor_id,
+        action=action,
+        target_type="instrument_close_price",
+        target_id=str(isin),  # the ISIN, so the history can resolve the symbol
+        before_json={
+            "customer_id": str(customer_id),
+            "close_price": str(prev_price) if prev_price is not None else None,
+            "note": prev_note,
+        },
+        after_json={
+            "customer_id": str(customer_id),
+            "close_price": str(new_price) if new_price is not None else None,
+            "note": new_note,
+        },
+    )
+
+
+async def get_close_price(
+    db: AsyncSession, customer_id: UUID, isin: str
+) -> Optional[Decimal]:
+    """The saved close price for one (customer, isin) position, or ``None``."""
+    row = await db.get(InstrumentClosePrice, (customer_id, isin))
     return row.close_price if row is not None else None
 
 
 async def get_close_prices(
-    db: AsyncSession, isins: Iterable[str]
-) -> dict[str, Decimal]:
-    """Batch-load saved close prices for ``isins`` → ``{isin: close_price}``.
+    db: AsyncSession, pairs: Iterable[_Key]
+) -> dict[_Key, Decimal]:
+    """Batch-load close prices for (customer_id, isin) pairs.
 
-    Used once at the top of the fee report so it never makes a per-ISIN call.
+    Used once at the top of the fee report so it never makes a per-position call.
     Empty input → ``{}`` (no query).
     """
-    wanted = {i for i in isins if i}
+    wanted = {(c, i) for c, i in pairs if c is not None and i}
     if not wanted:
         return {}
     rows = await db.execute(
-        select(InstrumentClosePrice.isin, InstrumentClosePrice.close_price).where(
-            InstrumentClosePrice.isin.in_(wanted)
+        select(
+            InstrumentClosePrice.customer_id,
+            InstrumentClosePrice.isin,
+            InstrumentClosePrice.close_price,
+        ).where(
+            tuple_(InstrumentClosePrice.customer_id, InstrumentClosePrice.isin).in_(
+                list(wanted)
+            )
         )
     )
-    return {isin: price for isin, price in rows.all()}
+    return {(c, i): p for c, i, p in rows.all()}
 
 
 async def list_close_prices(db: AsyncSession) -> list[InstrumentClosePrice]:
@@ -58,6 +90,7 @@ async def list_close_prices(db: AsyncSession) -> list[InstrumentClosePrice]:
 
 async def set_close_price(
     db: AsyncSession,
+    customer_id: UUID,
     isin: str,
     price: Decimal,
     note: Optional[str],
@@ -65,32 +98,23 @@ async def set_close_price(
     *,
     commit: bool = True,
 ) -> InstrumentClosePrice:
-    """Upsert the global close price for ``isin`` → realizes its open positions.
+    """Upsert the close price for one (customer, isin) → realizes that position.
 
-    Writes an ``instrument_close_price.set`` audit row (before/after). Pass
-    ``commit=False`` from a bulk route to stage many sets under one commit (the
-    caller commits). Caller validates ``price > 0``.
+    Writes an ``instrument_close_price.set`` audit row. ``commit=False`` stages
+    for a bulk caller. Caller validates ``price > 0``.
     """
-    row = await db.get(InstrumentClosePrice, isin)
+    row = await db.get(InstrumentClosePrice, (customer_id, isin))
     prev_price = row.close_price if row is not None else None
     prev_note = row.note if row is not None else None
-    db.add(
-        AuditLog(
-            actor_user_id=actor_id,
-            action="instrument_close_price.set",
-            target_type="instrument_close_price",
-            target_id=str(isin),
-            before_json={
-                "close_price": str(prev_price) if prev_price is not None else None,
-                "note": prev_note,
-            },
-            after_json={"close_price": str(price), "note": note},
-        )
-    )
+    db.add(_audit(
+        actor_id, customer_id, isin, prev_price=prev_price, prev_note=prev_note,
+        new_price=price, new_note=note, action="instrument_close_price.set",
+    ))
     now = datetime.now(timezone.utc)
     if row is None:
         row = InstrumentClosePrice(
-            isin=isin, close_price=price, note=note, updated_by=actor_id, updated_at=now
+            customer_id=customer_id, isin=isin, close_price=price, note=note,
+            updated_by=actor_id, updated_at=now,
         )
         db.add(row)
     else:
@@ -105,6 +129,7 @@ async def set_close_price(
 
 async def set_close_price_if_absent(
     db: AsyncSession,
+    customer_id: UUID,
     isin: str,
     price: Decimal,
     note: Optional[str],
@@ -112,36 +137,29 @@ async def set_close_price_if_absent(
     *,
     commit: bool = True,
 ) -> bool:
-    """Insert a close price ONLY if the ISIN has none yet — atomic, race-safe.
+    """Insert a close price ONLY if the (customer, isin) has none — race-safe.
 
-    Used by the bulk "Close all" so a manual price set concurrently (between the
-    open-positions snapshot and the loop) is NEVER clobbered. Returns ``True`` if
-    a row was inserted (and audits the set), ``False`` if a price already existed
-    (left as-is, no audit). ``ON CONFLICT (isin) DO NOTHING`` does the check in
-    one statement. Caller validates ``price > 0``.
+    Used by the bulk "Close all" so a manual price set concurrently is never
+    clobbered. Returns ``True`` if inserted (and audits), ``False`` if a price
+    already existed. ``ON CONFLICT (customer_id, isin) DO NOTHING``.
     """
     now = datetime.now(timezone.utc)
     stmt = (
         pg_insert(InstrumentClosePrice)
         .values(
-            isin=isin, close_price=price, note=note, updated_by=actor_id, updated_at=now
+            customer_id=customer_id, isin=isin, close_price=price, note=note,
+            updated_by=actor_id, updated_at=now,
         )
-        .on_conflict_do_nothing(index_elements=["isin"])
+        .on_conflict_do_nothing(index_elements=["customer_id", "isin"])
         .returning(InstrumentClosePrice.isin)
     )
     res = await db.execute(stmt)
     inserted = res.scalar_one_or_none() is not None
     if inserted:
-        db.add(
-            AuditLog(
-                actor_user_id=actor_id,
-                action="instrument_close_price.set",
-                target_type="instrument_close_price",
-                target_id=str(isin),
-                before_json={"close_price": None, "note": None},
-                after_json={"close_price": str(price), "note": note},
-            )
-        )
+        db.add(_audit(
+            actor_id, customer_id, isin, new_price=price, new_note=note,
+            action="instrument_close_price.set",
+        ))
     if commit:
         await db.commit()
     return inserted
@@ -149,34 +167,24 @@ async def set_close_price_if_absent(
 
 async def clear_close_price(
     db: AsyncSession,
+    customer_id: UUID,
     isin: str,
     actor_id: UUID,
     *,
     commit: bool = True,
 ) -> bool:
-    """Delete the close price for ``isin`` → re-opens its positions (no fee).
+    """Delete the close price for one (customer, isin) → re-opens that position.
 
     Returns ``True`` if a row was removed, ``False`` if none existed (idempotent,
-    no audit, no commit on a no-op — matches ``undo_decline``).
+    no audit/commit on a no-op).
     """
-    row = await db.get(InstrumentClosePrice, isin)
+    row = await db.get(InstrumentClosePrice, (customer_id, isin))
     if row is None:
         return False
-    prev_price = row.close_price
-    prev_note = row.note
-    db.add(
-        AuditLog(
-            actor_user_id=actor_id,
-            action="instrument_close_price.clear",
-            target_type="instrument_close_price",
-            target_id=str(isin),
-            before_json={
-                "close_price": str(prev_price) if prev_price is not None else None,
-                "note": prev_note,
-            },
-            after_json={"close_price": None},
-        )
-    )
+    db.add(_audit(
+        actor_id, customer_id, isin, prev_price=row.close_price, prev_note=row.note,
+        action="instrument_close_price.clear",
+    ))
     await db.delete(row)
     if commit:
         await db.commit()

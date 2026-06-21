@@ -77,6 +77,10 @@ class BuyFeeRow:
     # The sells (with details) that realized this buy — drives the UI sub-grid.
     matched_sells: list[MatchedSell] = field(default_factory=list)
     status: str = STATUS_OPEN
+    # True once this position (customer, isin) has a saved close price — its
+    # open remainder is realized in a VirtualFeeRow. Lets the per-buy grid show
+    # "closed" instead of "open" after a close.
+    closed: bool = False
 
 
 @dataclass
@@ -292,11 +296,10 @@ async def build_fee_report(
         )
         cust_agent = {cid: aid for cid, aid in rows.all()}
 
-    # Saved global close prices for the instruments in scope (replaces the old
-    # per-isin live-price lookup). An ISIN with a row here gets its open
-    # remainder realized; absent → the remainder stays open.
+    # Saved per-customer close prices for the positions in scope. A (customer,
+    # isin) with a row gets its open remainder realized; absent → stays open.
     close_prices = await close_prices_svc.get_close_prices(
-        db, {o.isin for o in orders if o.isin}
+        db, {(o.customer_id, o.isin) for o in orders if o.customer_id and o.isin}
     )
 
     groups: dict[tuple, list[BrokerOrder]] = {}
@@ -418,13 +421,17 @@ async def build_fee_report(
         # break-even → no fee. No saved price → the remainder stays open.
         # Recomputed live: editing the close price re-adjusts; clearing it
         # re-opens (this row disappears).
-        saved = close_prices.get(_isin)
+        saved = close_prices.get((cust_id, _isin))
         open_lots = [
             (o, per_buy[o.tracking_number].open_volume)
             for o in bot_buys
             if per_buy[o.tracking_number].open_volume > 0
         ]
         if open_lots and saved is not None and saved > 0:
+            # Mark the group's still-open buys "closed" so the per-buy grid shows
+            # "closed" instead of "open" (a fully-sold buy stays "realized").
+            for _o, _q in open_lots:
+                per_buy[_o.tracking_number].closed = True
             realize_price = Decimal(saved)
             rem_qty = sum(q for _, q in open_lots)
             weighted_buy = sum(
