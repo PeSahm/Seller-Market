@@ -1741,3 +1741,44 @@ The monitor immediately surfaced real things; each became a "don't cry wolf" / c
 | — | **Stage the `marketdatagw` bot image fleet-wide (URGENT-ish)** | The auth probe CONFIRMED most servers' BOTS still resolve ephoenix market-data to the **dead `mdapi1`** (only Tebyan-Mostafa-5 on `marketdatagw`). At trade time those stacks' `get_instrument_info`/`cache_warmup` would fail on ephoenix. The monitor now forces `marketdatagw` so it reads green — which MASKS this — so the bot-image staleness must be fixed separately (the carried S29/S30 follow-up, now proven real). Check which `sm-agent-*-bot` containers have `mdapi1` in `/app/broker_enum.py` and stage the current bot image. |
 | — | Operator runs Deep check periodically / market hours | It's manual + zero-cost when idle; run it to confirm the real trade-path per broker per server. Auth rows only refresh on the button. |
 | — | (Optional) periodic external-health alert worker | `/admin/server-services` + `/admin/ha` are snapshot pages; a worker raising `health_signals` on a newly-down service would alert proactively (carried from S29). |
+
+---
+
+## Session 33 — DB-pushed bot `[runtime]` overrides (PR #163) + the `[runtime]` crash hotfix (PR #164) + default scheduler jobs (PR #165). All deployed fleet-wide.
+
+Operator: *"check `broker_enum.py` and other hardcoded places — I want everything in settings, and when I save, all stacks receive the change immediately; waiting for CI + image pull on all in a disaster is not good."* Built it (PR **#163** `cbc78eb`), deployed fleet-wide, fixed a crash it introduced (PR **#164** `7da8aa0`), then seeded default schedules (PR **#165** `44910a3`). **Whole fleet (mgmt ×2 + 20 bot stacks) on the new code.** No migration anywhere (alembic stays `0020_service_probes`). Plan: `~/.claude/plans/check-setting-of-this-zany-hellman.md`.
+
+### Feature (PR #163) — values baked into the bot IMAGE are now DB settings
+Hardcoded values (broker/market-data hosts & domains, exir fee fallback, RLC hosts, OCR pool, auto-sell window/confirm) → DB settings → rendered into each `config.ini`'s **`[runtime]` section** → pushed to all stacks via the EXISTING SFTP path (in-place inode-preserving write). After a **one-time** new bot image, every future change is instant: **no CI, no image, no recreate.** Motivated by the S29 `mdapi1`→`marketdatagw` incident.
+- **Operator decisions**: scope = disaster set + a generic **escape hatch**; market-data sidecar deferred; auto-push on save + live per-stack status panel.
+- **Bot (`SellerMarket/`)**: new `runtime_config.py` (call-time, mtime+TTL cached, **`RawConfigParser`** + unescapes `%%`→`%`, **sentinel-gated**); every hardcoded call-site reads-through with its old literal as fallback (`broker_enum`, `exir_adapter`, `rlc_price`/`rlc_market`, `captcha_utils`, `rlc_ws`, `bot_entrypoint`); `auto_sell_monitor` window/confirm hot-reload each tick. **No `[runtime]` section == today's behaviour** (rollout-safe any order).
+- **mgmt (`mgmt_ui/`)**: `settings_store.DEFAULTS` `bot_rt_*` keys + `build_runtime_section` which **OMITS values still at default** (config.ini byte-identical until edited); `config_ini` renders `[runtime]` (sorted, `%%`-escaped, before sentinel); `push_config_ini_to_all_stacks` fleet helper (per-server lock, parallel across hosts, own sessions, per-stack status); Settings "Bot runtime / endpoints" card + Advanced escape-hatch editor + auto-push-on-save + status panel (`partials/fleet_push_status.html`).
+
+### THE BUG it introduced + hotfix (PR #164 `7da8aa0`) — headline lesson
+Operator ran `cache_warmup.py` on Mostafa/Tebyan2 (7 customers) → **`KeyError: 'username'`**. The `[runtime]` section is in config.ini whenever a value is non-default (prod: the OCR pool S30 + market-data pool S27). `cache_warmup.py` AND `locustfile_new.py` iterate `config.sections()` and read `section['username']` directly → crash on `[runtime]` (`"Sections to process: 8"` = 7 customers + `[runtime]`). Would have crashed the 08:15 warmup AND 08:44 run fleet-wide. The auto-sell monitor was the ONLY iterator I'd verified (safe via `.get("side")`+skip) — NOT the only one.
+- **Fix**: `runtime_config.drop_non_customer_sections(cp)` removes any section lacking `username` (the `[runtime]` block) right after config load in both modules (they read overrides via `runtime_config`, not the config object) + a defensive guard in `warmup_account`.
+- **LESSON: adding a GLOBAL section to a config.ini the bot also reads per-customer breaks EVERY `config.sections()` consumer that assumes customer rows.** Grep ALL `.sections()` usages and skip the global section. My unit + round-trip smokes fed `[runtime]` to `runtime_config`/`broker_enum` but NEVER to the cache_warmup/locustfile section loop — only the operator's live run caught it. **Smoke-test the OTHER consumers, not just the new reader.**
+
+### Default scheduler jobs (PR #165 `44910a3`, mgmt-only, no migration)
+Operator: *"ensure all stacks have a valid warmup + run schedule (08:30:00 / 08:44:20), set it only if a stack has NO schedule, and make it the default for new stacks."* (Confirmed via AskUserQuestion: run = **08:44:20** to match the fleet, not the typed "08:40:20".)
+- **Audit: 7 of 20 stacks had NO scheduler jobs** (`scheduler_jobs` empty → never warm/trade). **Part 1 (backfill, data op via api container, DONE live)**: created `cache_warmup`@`08:30:00` + `run_trading`@`08:44:20` (canonical commands via `upsert_job(command=None)`), **only-if-missing** (`get_job is None`), then `push_scheduler_config_for_stack` per stack (bot re-reads `scheduler_config.json` every tick → live). Verified 0 stacks missing.
+- **Part 2 (new-stack default, code, deployed both mgmt)**: `scheduler_jobs.ensure_default_scheduler_jobs` (only-if-missing, idempotent) + `schemas.scheduler.DEFAULT_JOB_TIMES={cache_warmup:08:30:00, run_trading:08:44:20}`; called from `stacks.find_or_create_stack` on the **CREATE path** (best-effort). Canonical commands: warmup `python cache_warmup.py`, run `locust -f locustfile_new.py --headless`.
+
+### Deploy (all three PRs) — verified
+- mgmt-UI on **both instances** → `44910a3` (PouyanIt ghcr-direct, ParsPack mirror-by-digest), `/health`=200, helper + `DEFAULT_JOB_TIMES` present.
+- Bot image `7da8aa0` staged by digest on all 5 hosts → **20 stacks redeployed** (off-market, 0 armed → safe). **BONUS: `marketdatagw` is now BAKED into the bot image → resolves the S32 URGENT follow-up (most bots were on dead `mdapi1`); the S29 live-patch is retired.**
+- **Deploy-mechanics learnings**: bot `:latest` pull can be a cache NO-OP right after a build → pull the immutable **short-sha tag** (`:7da8aa0`) for the digest; stage by digest via `run_command` through the api container (mirror on ghcr-blocked Tebyan hosts). `str(float)` default mismatch (`"5"` vs `"5.0"`) caused a false-positive change-detection push → store the float repr in DEFAULTS. **`git reset --hard origin/main` during a PR resync WIPES uncommitted CLAUDE.md edits** — commit memory updates (docs commit) promptly (this entry was lost once to exactly that and re-added).
+
+### Fleet state (END S33) — 20 stacks / 5 Tebyan hosts
+`.177` Tebyan2 (6), `.180` Tebyan4 (1), `.189` Tebyan3 (5), `.246` Tebyan-Saeed (6), `.5` Tebyan-Mostafa-5 (2). All `pull_policy=never`; **all 20 on bot rev `7da8aa0`**; **all 20 scheduled** (run `08:44:20`; warmup mostly `08:30:00`); **0 armed auto-sell**. PouyanIt `5.10.248.55` + ParsPack `45.139.10.192` = mgmt/OCR/DB-spare/market-data only; **mgmt `44910a3` both instances**, alembic `0020_service_probes`.
+
+### How to use it
+- **Admin → Settings → "Bot runtime / endpoints"** → edit a field → Save auto-pushes to all 20 stacks in seconds with a per-stack status panel (Retry-failed). Escape hatch: Advanced editor `bot_rt_<key>=value`. A value at default is omitted (config.ini byte-identical); only overrides render. `MARKET_DATA_URL` itself still needs a redeploy; per-broker endpoints + OCR + windows are instant.
+- New stacks auto-seed warmup `08:30:00` + run `08:44:20` (only-if-missing).
+
+### Open follow-ups (Session 33)
+| # | Title | Why |
+|---|---|---|
+| — | Legacy section-iterators not hardened | `locustfile.py` (old), `config_api.py`, `simple_config_bot.py` have the same `config.sections()`+`['username']` pattern but are NOT in the scheduled path. `Orbis.py` is dead + reads `config.orbis.ini` (unaffected). Harden/delete if ever run manually. |
+| — | Operator live change-and-revert test | A real UI edit of one harmless `bot_rt_*` field → watch the auto-push land on all 20 + the bot pick it up. |
+| — | Market-data sidecar RLC host as a setting | Deferred (different deploy shape, ~2 instances). |
