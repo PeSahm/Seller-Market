@@ -28,6 +28,7 @@ from broker_enum import get_endpoints_for
 from api_client import EphoenixAPIClient
 from cache_manager import TradingCache
 from captcha_utils import decode_captcha
+from runtime_config import drop_non_customer_sections
 
 # Configure logging — archive the previous warmup's log (gzipped) to logs/
 # then truncate in place (single-file bind mount: truncate, never rename),
@@ -102,6 +103,14 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
     Returns:
         True if successful, False otherwise
     """
+    # Defensive: a non-account section (e.g. the global [runtime] overrides) has
+    # no username. It should never reach here (the main loop drops it via
+    # runtime_config.drop_non_customer_sections), but guard so a stray section is
+    # a quiet skip rather than a KeyError that aborts the whole warmup.
+    if 'username' not in config_section:
+        logger.info("skipping non-account config section (no username)")
+        return True
+
     username = config_section['username']
     broker_code = config_section['broker']
     password = config_section['password']
@@ -267,6 +276,11 @@ def main():
     try:
         config = configparser.ConfigParser()
         config.read(args.config)
+        # Drop the global [runtime] section (endpoint/host overrides) so the
+        # per-account loop below only ever sees real customer sections. The
+        # overrides are consumed via runtime_config (broker_enum/captcha), not
+        # this config object.
+        drop_non_customer_sections(config)
         logger.info(f"Loaded configuration from {args.config}")
     except Exception as e:
         logger.error(f"Failed to load configuration: {e}")
