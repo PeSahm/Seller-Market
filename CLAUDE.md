@@ -1776,9 +1776,16 @@ Operator: *"ensure all stacks have a valid warmup + run schedule (08:30:00 / 08:
 - **Admin → Settings → "Bot runtime / endpoints"** → edit a field → Save auto-pushes to all 20 stacks in seconds with a per-stack status panel (Retry-failed). Escape hatch: Advanced editor `bot_rt_<key>=value`. A value at default is omitted (config.ini byte-identical); only overrides render. `MARKET_DATA_URL` itself still needs a redeploy; per-broker endpoints + OCR + windows are instant.
 - New stacks auto-seed warmup `08:30:00` + run `08:44:20` (only-if-missing).
 
+### Follow-on (S33) — agent-created customers auto-assign to a random existing stack (PR #166 `d628fb2`, mgmt deployed)
+Operator: *"when an agent adds a customer it's pending; instead assign it to one of the agent's existing stacks RANDOMLY — no create stack."*
+- New `distribution.assign_customer_to_random_existing_stack(db, customer_id, *, actor_id)`: locks the customer, queries the agent's `agent_stacks` rows, `random.choice` one, sets `server_id`/`stack_id`/`assignment_status='active'`, audits `customer.assign`, commits, pushes that stack's config.ini. **NEVER creates a stack and ignores distribution policy** (unlike `assign_customer` which uses `resolve_target_server` + `find_or_create_stack`). **If the agent has no stack → returns `ok=False`, customer stays `pending`** (the admin inbox handles it).
+- Wired **best-effort** into `agent.py::agent_customer_create` after `create_customer` (a failure never blocks creation; the customer is already saved). **Agent route only — admin-created customers are unchanged** (admin keeps the inbox + manual/policy assign).
+- A customer with no trade instructions yet renders no config.ini section (S20); the auto-assign just sets placement, and the existing `_push_customer_stack_config` surfaces the section once the agent adds instructions. Tests: `test_auto_assign.py` (random pick / no-create / no-stack-stays-pending); mgmt suite 705 green. mgmt-only, no migration.
+
 ### Open follow-ups (Session 33)
 | # | Title | Why |
 |---|---|---|
+| — | Auto-assign is uniform RANDOM, not balanced | Operator asked for random; it can imbalance a multi-stack agent (autobalance only reconciles on provision/redeploy, not on customer create). Switch to least-loaded if imbalance bites. Admin-created customers are NOT auto-assigned (by design). |
 | — | Legacy section-iterators not hardened | `locustfile.py` (old), `config_api.py`, `simple_config_bot.py` have the same `config.sections()`+`['username']` pattern but are NOT in the scheduled path. `Orbis.py` is dead + reads `config.orbis.ini` (unaffected). Harden/delete if ever run manually. |
 | — | Operator live change-and-revert test | A real UI edit of one harmless `bot_rt_*` field → watch the auto-push land on all 20 + the bot pick it up. |
 | — | Market-data sidecar RLC host as a setting | Deferred (different deploy shape, ~2 instances). |
