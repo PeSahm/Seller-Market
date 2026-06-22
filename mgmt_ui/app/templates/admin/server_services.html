@@ -1,0 +1,130 @@
+{% extends "partials/page_shell.html" %}
+{% block page_title %}Service reachability{% endblock %}
+
+{% block page_body %}
+<div class="page-header">
+  <div>
+    <h1 class="h1">Per-server service reachability</h1>
+    <p class="text-muted text-small">
+      What each server can reach, probed <strong>from that server</strong> (so it
+      reflects what its bots actually experience — e.g. <code>marketdatagw</code> is
+      reachable from Tebyan but not PouyanIt). A real request tells a genuine API
+      (<span class="badge badge--up">real</span>) apart from a live-but-placeholder
+      host (<span class="badge badge--pending">html</span>, e.g. the old
+      <code>mdapi1</code>).
+    </p>
+  </div>
+  <div class="header-actions">
+    <form method="post" action="/admin/server-services/probe-now" style="display:inline">
+      {% include "partials/csrf.html" %}
+      <button class="btn btn--primary btn--sm" type="submit">Probe now ↻</button>
+    </form>
+    <form method="post" action="/admin/server-services/deep-check" style="display:inline"
+          onsubmit="return confirm('Run a REAL authenticated login (Mostafa\'s credential) on every broker, inside each host\'s bot container? This logs into live accounts incl. khobregan.');">
+      {% include "partials/csrf.html" %}
+      <button class="btn btn--warning btn--sm" type="submit">Deep check (real login)</button>
+    </form>
+  </div>
+</div>
+
+{% if flash_probed %}
+<div class="flash flash--success" role="status" style="margin-bottom:12px;">
+  Probe complete — the matrix below shows the latest reachability.
+</div>
+{% endif %}
+{% if flash_probe_error %}
+<div class="flash flash--error" role="alert" style="margin-bottom:12px;">
+  Probe run failed — the matrix below may be stale. Check the logs and retry.
+</div>
+{% endif %}
+{% if flash_deep %}
+<div class="flash flash--success" role="status" style="margin-bottom:12px;">
+  Deep check started — authenticated rows fill in shortly (logins run serialized
+  per account). Refresh in a few seconds.
+</div>
+{% endif %}
+
+<div class="card" style="margin-bottom:16px;">
+  <p class="text-small" style="margin:0;">
+    {{ matrix.server_count }} server(s) · {{ matrix.row_count }} endpoint(s) ·
+    {% if matrix.down %}<span class="badge badge--down">{{ matrix.down }} down</span>{% else %}<span class="badge badge--up">none down</span>{% endif %}
+    {% if matrix.placeholder %}<span class="badge badge--pending">{{ matrix.placeholder }} not-real</span>{% endif %}
+    <span class="text-muted">
+      · last probe:
+      {% if matrix.overall_freshness %}{{ matrix.overall_freshness.strftime('%Y-%m-%d %H:%M:%S UTC') }}{% else %}never{% endif %}
+      · last deep-check:
+      {% if matrix.last_deep_check %}{{ matrix.last_deep_check.strftime('%Y-%m-%d %H:%M:%S UTC') }}{% else %}never{% endif %}
+    </span>
+  </p>
+  <p class="text-small text-muted" style="margin:6px 0 0;">
+    Legend:
+    <span class="badge badge--up">✓ real / up</span>
+    <span class="badge badge--pending">⚠ placeholder / unexpected</span>
+    <span class="badge badge--down">✗ down</span>
+    <span class="text-muted">– skipped (host-local) / blank = not probed</span>
+  </p>
+</div>
+
+{% macro cell(c) %}
+  {% if c is none %}
+    <span class="text-muted">—</span>
+  {% else %}
+    {% set _t = c.state ~ ' · HTTP ' ~ (c.http_status if c.http_status is not none else '—') ~ ' · ' ~ (c.content_type or '') ~ ' · ' ~ (c.latency_ms if c.latency_ms is not none else '—') ~ 'ms' ~ (' · ' ~ c.detail if c.detail else '') %}
+    {% if c.state in ('real', 'up') %}
+      <span class="badge badge--up" title="{{ _t }}">✓ {{ c.state }}</span>
+    {% elif c.state == 'placeholder' %}
+      <span class="badge badge--pending" title="{{ _t }}">⚠ html</span>
+    {% elif c.state == 'degraded' %}
+      <span class="badge badge--pending" title="{{ _t }}">⚠ ?</span>
+    {% elif c.state == 'skipped' %}
+      <span class="text-muted" title="{{ _t }}">– skip</span>
+    {% else %}
+      <span class="badge badge--down" title="{{ _t }}">✗ down</span>
+    {% endif %}
+  {% endif %}
+{% endmacro %}
+
+{% if not matrix.servers %}
+  <p class="text-muted">No servers configured yet.</p>
+{% elif not matrix.groups %}
+  <p class="text-muted">No probe results yet — click <strong>Probe now</strong> to populate the matrix.</p>
+{% else %}
+<div class="table-scroll">
+<table class="table">
+  <thead>
+    <tr>
+      <th>Endpoint</th>
+      {% for s in matrix.servers %}
+        <th>
+          <span dir="auto">{{ s.name }}</span><br>
+          <span class="text-muted text-small"><code>{{ s.host }}</code></span><br>
+          {% if s.ssh_state == 'up' %}<span class="badge badge--up">ssh</span>
+          {% elif s.ssh_state == 'down' %}<span class="badge badge--down">ssh ✗</span>
+          {% else %}<span class="badge badge--pending">ssh ?</span>{% endif %}
+        </th>
+      {% endfor %}
+    </tr>
+  </thead>
+  <tbody>
+    {% for g in matrix.groups %}
+      <tr>
+        <th colspan="{{ matrix.servers|length + 1 }}" class="text-small"
+            style="background:rgba(127,127,127,0.08);">{{ g.label }}</th>
+      </tr>
+      {% for row in g.rows %}
+        <tr>
+          <td>
+            <span dir="auto">{{ row.name }}</span><br>
+            <span class="text-muted text-small"><code>{{ row.url }}</code></span>
+          </td>
+          {% for s in matrix.servers %}
+            <td>{{ cell(row.cells.get(s.id)) }}</td>
+          {% endfor %}
+        </tr>
+      {% endfor %}
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

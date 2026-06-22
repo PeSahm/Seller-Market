@@ -107,6 +107,23 @@ class Settings(BaseSettings):
         default=60, alias="HEALTH_SCAN_INTERVAL_SECONDS", ge=1
     )
 
+    # Per-server service-reachability probe worker. SSH-probes every managed
+    # server for every service it depends on (OCR, broker APIs, RLC, sidecar)
+    # and stores the latest result for the /admin/server-services matrix.
+    # Internal SSH only (UNAUTHENTICATED probes — no broker login), so safe to
+    # default ON like the other internal-SSH workers. Interval >= 1s.
+    enable_service_probe_worker: bool = Field(
+        default=True, alias="ENABLE_SERVICE_PROBE_WORKER"
+    )
+    service_probe_interval_seconds: int = Field(
+        default=300, alias="SERVICE_PROBE_INTERVAL_SECONDS", ge=1
+    )
+    # The agent whose broker credentials the manual "Deep check" tier uses for a
+    # real authenticated login (run inside a bot container). Mostafa by default.
+    monitor_probe_agent_username: str = Field(
+        default="Mostafa", alias="MONITOR_PROBE_AGENT_USERNAME"
+    )
+
     enable_janitor: bool = Field(default=True, alias="ENABLE_JANITOR")
     janitor_interval_seconds: int = Field(
         default=3600, alias="JANITOR_INTERVAL_SECONDS", ge=1
