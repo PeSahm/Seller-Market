@@ -1651,3 +1651,49 @@ Redeployed at **12:38 Tehran** — past the 08:44 trading run AND past the 09:00
 | — | (Optional) flip to PouyanIt-primary | If preferred, set `ocr_service_url` back to PouyanIt-first + redeploy stacks. Current = new-box-primary (offloads PouyanIt + survives its death). |
 | — | Stage the new bot image fleet-wide (carried from S29) | The `marketdatagw` live-patch is per-container, lost on `redeploy_stack` recreate — these 18 redeploys re-rendered compose from the OLD image, so confirm `marketdatagw` is in the running image, not just the live-patched layer. |
 | — | Document `TG-56743` provisioning | Captured above; if it ever needs a fresh OCR image, pull via the liara mirror (ghcr.io blobs are blocked from this host) + retag. |
+
+---
+
+## Session 31 — provisioned a 5th trading VPS (`185.232.152.5` "Tebyan-Mostafa-5", non-root ssh_user `bargozideh`); fixed the base-dir-not-writable error + full prereqs
+
+Operator added a new server in the mgmt UI and it flagged **"Base directory writable: denied"** + "Docker: not installed". Provisioned it end-to-end (base-dir fix, Tehran time, Docker, pre-staged bot image, reachability) and verified via the mgmt UI's own probe. **Pure ops — no code/migration.** The fleet's trading hosts are now **5 Tebyan-family VPSes** (`.5` new + `.246`/`.177`/`.189`/`.180`); PouyanIt/ParsPack remain mgmt/OCR/DB-only (NOT in the `servers` table).
+
+### New host facts (`185.232.152.5`, server row `Tebyan-Mostafa-5`)
+- ssh_user **`bargozideh`** (uid 1001, primary group **`Tebyan5`** gid 1001) — a **dedicated NON-root user** with **passwordless sudo** (in group `admin`). `ssh_auth=password` (the mgmt UI logs in with the stored password; my workstation key is NOT installed). `image_pull_policy=never` (operator-set), host key pinned, clock skew ~0–2s.
+- **Ubuntu 22.04.5**, x86_64, 2 cores / 3.9 GB RAM. **CPU has NO AVX2** — fine, this is a BOT host (OCR runs over the network; only EasyOCR recognition needs AVX2).
+- **Egress is GOOD** (best of the fleet): `download.docker.com=200` (so the official `get.docker.com` installer works — no host-to-host compose-binary copy like ParsPack S10), `ghcr.io=301` (manifest), `ghcr-mirror.liara.ir=302`, docker.io + `docker.arvancloud.ir` reachable. No proxy env on the host.
+
+### THE ERROR (root cause) — non-root ssh_user can't traverse a hardened `/root`
+The operator created a dedicated unprivileged user `bargozideh` AND left `/root` at its default `0700 root:root`, but entered the default base_dir `/root/seller-market/agents` — which `bargozideh` can't even `cd` into. `base_dir` is fully parameterized (schema only requires an absolute POSIX path, no `..`, no trailing slash; `stacks._guard_rm_rf_target` just forbids `/` and empty), so two fixes were valid: switch base_dir to `/home/bargozideh/...` (owned by the user, no /root change) OR keep `/root/...` + sudo-fix the perms. **Operator chose KEEP `/root/...agents`**:
+```sh
+sudo install -d -m 0755 -o bargozideh -g Tebyan5 /root/seller-market/agents   # group is Tebyan5 (gid 1001), not "bargozideh"
+sudo chmod o+x /root    # traversal-into-/root only; /root's CONTENTS keep their own perms
+```
+Result: `/root` → `drwx-----x`, `/root/seller-market/agents` → `bargozideh:Tebyan5 0755`, write test as bargozideh (no sudo) OK.
+
+### Provisioning runbook executed (all verified)
+1. **Base-dir fix** (above) + **Tehran time**: `timedatectl set-timezone Asia/Tehran` + `/etc/systemd/timesyncd.conf.d/10-iran.conf` (`NTP=ntp.time.ir`, fallbacks cloudflare/google) → TZ +0330, clock synced.
+2. **Docker** via `curl -fsSL https://get.docker.com | sudo sh` (download.docker.com reachable) → **Docker 29.6.0 + Compose v5.1.4**, `systemctl enable --now docker`. **`usermod -aG docker bargozideh`** — REQUIRED because the mgmt UI runs `docker compose` as the ssh_user **without sudo**. Verified `docker ps` + `docker compose version` as bargozideh WITHOUT sudo (`DOCKER_NOSUDO_OK`).
+3. **Pre-staged the bot image**: `docker pull ghcr-mirror.liara.ir/pesahm/seller-market:latest` (mirror `:latest` was **FRESH on attempt 1** — rev == newest main commit) → `docker tag … ghcr.io/pesahm/seller-market:latest`. **rev=`55c511d`**, **`marketdatagw` count=1 / `mdapi1` count=0 in `/app/broker_enum.py`** — so a stack deployed here is CORRECT from the start (no S29 live-patch needed). Note: the rest of the fleet still runs `b2f7463` (mdapi1 in image, live-patched) — this host is one step AHEAD on the S29/S30 "stage marketdatagw fleet-wide" follow-up.
+4. **Reachability** (curl `--noproxy '*'`, "any HTTP code = up"): OCR pool both up (`85.133.205.190:18080`=404, `5.10.248.55:18080`=404), auto-sell MD feeds both `200` (`5.10.248.55:8077`, `45.139.10.192:8077`), **`marketdatagw.ephoenix.ir`=404 (UP)** — the S29 routing block is PouyanIt/ParsPack-specific; this Tebyan host routes to AS214751 fine — plus ephoenix/ibtrader/RLC `core.tadbirrlc.com`/exir `khobregan` all up.
+
+### THE SUBTLE GOTCHA — stale SSH-pool transport after `usermod -aG docker`
+SSH supplementary groups are resolved at **login**, so the long-running mgmt **uvicorn** process's pooled transport to `.5` (cached during the operator's readiness probes, BEFORE the docker-group add) would run `docker compose` as bargozideh **without** the docker group → `permission denied`. And `ssh_pool.run_with_retry` only auto-evicts on **transport** errors (`ChannelException`/`SSHException`), NOT a command's non-zero exit — so it would NOT self-heal. **Fix: restart BOTH mgmt api containers** (PouyanIt + ParsPack, sequentially so one dashboard stays up) → each pool re-authenticates fresh on next use. **My own `docker exec … python` driver was NEVER affected** — each invocation is a separate process with its own pool → a fresh login that already sees the docker group (which is why my direct verification passed while uvicorn would have failed). After the restarts: both apis healthy/`/health=200`, single worker-leader (`advisory_locks=1`, PouyanIt leader / ParsPack standby), both heartbeating.
+
+### End-to-end verification via the mgmt's OWN path (not just my host checks)
+Ran `services.servers.test_connection(db, server_id)` through the freshly-restarted api → **`ok=True`, `base_dir_writable=True`, `base_dir_probed=/root/seller-market/agents`, `docker_version=Docker 29.6.0`, clock skew +0s, host_key_mismatch=False`**. The original "denied" error is gone; the operator's UI now shows the host fully ready.
+
+### Learnings (Session 31)
+- **A non-root `ssh_user` + hardened `/root` (0700) is the root of the "Base directory writable: denied" error** — the user can't traverse into `/root`. Either move base_dir under the user's home, or `install -d -o user -g group <base>/agents` + `chmod o+x /root` (traversal only; contents keep perms). The user's PRIMARY GROUP may not equal its name (`bargozideh` → group `Tebyan5`); read `id` and use the real group in `-g`.
+- **The ssh_user MUST be in the `docker` group** — the mgmt UI runs `docker compose` as the ssh_user with NO sudo. `usermod -aG docker` applies only to NEW logins.
+- **`usermod -aG docker` strands the mgmt uvicorn's CACHED SSH transport** (groups resolved at login) → restart the mgmt api(s) to force a fresh re-auth, because the pool only auto-evicts on transport errors, not a `permission denied` exit. A separate `docker exec python` driver isn't affected (fresh process → fresh pool → fresh login).
+- **Good-egress Iranian providers exist** — `download.docker.com=200` here meant the official `get.docker.com` script worked in one shot (no compose-binary host-copy dance). Always probe egress per-endpoint first; it varies wildly by provider.
+- **The liara mirror's `:latest` can be FRESH** (rev == newest main commit on attempt 1 this time) — but still verify the `org.opencontainers.image.revision` label, and grep the actual file (`marketdatagw` count) to confirm the fix is BAKED IN, not just trust the tag.
+- **Drive a keyless/password-auth host entirely through the mgmt api container** — `run_command(server, "echo <b64>|base64 -d|bash")` via `docker exec seller-market-mgmt-api-1 python`; bargozideh's passwordless sudo handled the privileged steps. Verify the result with the mgmt's own `test_connection`, not only direct host curls.
+
+### Open follow-ups (Session 31)
+| # | Title | Why |
+|---|---|---|
+| — | Operator deploys a stack / assigns customers to Tebyan-Mostafa-5 | Host is fully ready; the first UI-driven deploy uses the fresh pool + the staged `55c511d` image (pull=never). |
+| — | Fleet runs `b2f7463` (live-patched), `.5` runs `55c511d` | Minor heterogeneity, both correct (`.5` has `marketdatagw` baked in). Re-staging the freshest image fleet-wide (S29/S30 follow-up) would reconcile it. |
+| — | Prod Fernet `key.part2` still missing | The api container still logs the DEV-MODE part2 warning on every op (carried from S20) — provision the part2 key file. |
