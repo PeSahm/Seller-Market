@@ -58,6 +58,7 @@ from app.services import audit as services_audit
 from app.services import auto_sell_view as services_auto_sell_view
 from app.services import broker_client
 from app.services import brokers_admin
+from app.services.brokers.base import CredStatus
 from app.services import close_positions_view as services_close_positions
 from app.services import close_prices as services_close_prices
 from app.services import customers as services_customers
@@ -210,6 +211,9 @@ async def agent_dashboard(
         ),
         "pending": sum(
             1 for c in my_customers if c.assignment_status == "pending"
+        ),
+        "invalid_credentials": sum(
+            1 for c in my_customers if c.credential_status == "invalid"
         ),
     }
     # Phase 6: "Recent runs" card on the agent dashboard. Admins acting as
@@ -401,23 +405,26 @@ async def agent_customers(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     status: Optional[str] = None,
+    cred: Optional[str] = None,
     q: Optional[str] = None,
 ):
     """List the current agent's customers. Admin sees all; agents see only theirs.
 
-    ``status`` and ``q`` (free-text search over display_name+username) are
-    both bookmarkable query params.
+    ``status``, ``cred`` (credential_status), and ``q`` (free-text search over
+    display_name+username) are all bookmarkable query params.
     """
     _require_agent_or_admin(user)
     status_filter = status if status in {"pending", "assigned", "active"} else None
+    cred_filter = cred if cred in {"unknown", "valid", "invalid", "transient"} else None
     q = q or None
     if user.role == "admin":
         customers = await services_customers.list_customers(
-            db, status=status_filter, q=q
+            db, status=status_filter, credential_status=cred_filter, q=q
         )
     else:
         customers = await services_customers.list_customers(
-            db, agent_id=user.id, status=status_filter, q=q
+            db, agent_id=user.id, status=status_filter,
+            credential_status=cred_filter, q=q,
         )
     trade_counts = await services_customers.get_customer_trade_counts(
         db, [c.id for c in customers]
@@ -443,6 +450,7 @@ async def agent_customers(
     ctx["total_trade_instructions"] = total_trade_instructions
     ctx["servers_by_id"] = servers_by_id
     ctx["filter_status"] = status_filter
+    ctx["filter_cred"] = cred_filter
     ctx["filter_q"] = q or ""
     return templates.TemplateResponse("agent/customers.html", ctx)
 
@@ -472,11 +480,16 @@ async def agent_customer_create(
     broker: str = Form(...),
     username: str = Form(...),
     password: str = Form(...),
+    verified: str = Form(""),
 ):
     """Create a new account-shaped customer owned by the current agent.
 
     Post-migration 0003, the form is account-shaped. Trade instructions
     are added via the per-customer detail page.
+
+    ``verified=1`` is set by the verify-on-save flow when the broker confirmed
+    the credentials just before submit; we persist ``credential_status=valid``
+    so the dashboard reflects it immediately (the daily checker re-confirms).
     """
     _require_agent_or_admin(user)
 
@@ -539,6 +552,15 @@ async def agent_customer_create(
         logger.exception(
             "auto-assign of new customer %s to an existing stack failed", customer.id
         )
+
+    if verified == "1":
+        try:
+            await services_customers.set_credential_status(
+                db, customer.id, CredStatus.VALID,
+                "verified on save", actor_id=user.id,
+            )
+        except Exception:  # noqa: BLE001 — never block creation on a metadata write
+            logger.exception("persist credential_status for %s failed", customer.id)
 
     redirect_to = f"/agent/customers/{customer.id}"
     if request.headers.get("HX-Request"):
@@ -620,6 +642,7 @@ async def agent_customer_update(
     username: Optional[str] = Form(None),
     password: Optional[str] = Form(None),
     version: int = Form(...),
+    verified: str = Form(""),
 ):
     """Apply a partial, optimistic-locked update to a Customer (account)."""
     _require_agent_or_admin(user)
@@ -715,6 +738,17 @@ async def agent_customer_update(
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # A new password was verified just before submit → mark valid. (Empty
+    # password = creds unchanged → verified is "" → keep the prior verdict.)
+    if verified == "1":
+        try:
+            await services_customers.set_credential_status(
+                db, customer_id, CredStatus.VALID,
+                "verified on save", actor_id=user.id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("persist credential_status for %s failed", customer_id)
 
     await _push_customer_stack_config(db, customer_id, actor_id=user.id)
 
@@ -1289,6 +1323,62 @@ async def agent_customer_holdings(
             {"isin": effective_isin, "error": "could not fetch holding"}
         )
     return JSONResponse({"isin": effective_isin, "holdings": holdings})
+
+
+@router.post("/customers/verify-credentials")
+async def agent_customer_verify_credentials(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    broker: str = Form(""),
+    username: str = Form(""),
+    password: str = Form(...),
+    broker_fallback: str = Form(""),
+    username_fallback: str = Form(""),
+):
+    """One-shot broker probe for the agent customer form — the agent-scoped
+    twin of ``admin_customer_verify_credentials``. Powers both the manual
+    Verify button and the mandatory verify-on-save flow. Never persists; the
+    password is used only for this request and never echoed back.
+
+    Edit-mode quirk handled like the admin route: the broker <select> defaults
+    to "keep current" (empty), so the live form may post an empty broker — we
+    fall back to the row-sourced hidden inputs.
+    """
+    _require_agent_or_admin(user)
+    effective_broker = broker or broker_fallback
+    effective_username = username or username_fallback
+
+    def _render(result: broker_client.VerifyResult):
+        ctx = _ctx(request, user, current_tab="/agent/customers")
+        ctx["result"] = result
+        ctx["typed_username"] = effective_username
+        return templates.TemplateResponse(
+            "partials/customer_verify_result.html", ctx
+        )
+
+    if not effective_broker:
+        return _render(broker_client.VerifyResult(
+            ok=False,
+            error="No broker selected — pick one in the Broker dropdown above.",
+        ))
+    if not password:
+        return _render(broker_client.VerifyResult(
+            ok=False,
+            error=(
+                "Type the broker password above before clicking Verify — "
+                "we can't reuse the stored one for verification."
+            ),
+        ))
+
+    ocr_service_url = await settings_store.get_setting(db, "ocr_service_url")
+    result = await broker_client.verify_credentials(
+        broker_code=effective_broker,
+        username=effective_username,
+        password=password,
+        ocr_service_url=ocr_service_url,
+    )
+    return _render(result)
 
 
 @router.get("/instruments/search")

@@ -133,36 +133,9 @@
     </div>
   </div>
 
-  {# --- Verify credentials button ---
-       Sends broker / username / password (+ fallbacks for edit mode where
-       the dropdown defaults to "keep current") to the verify endpoint
-       and swaps in a result partial. The button is type="button" so it
-       doesn't submit the form. #}
-  <div class="field">
-    {% if is_edit and customer %}
-      <input type="hidden" name="broker_fallback" value="{{ fv.broker|default('') }}">
-      <input type="hidden" name="username_fallback" value="{{ fv.username|default('') }}">
-    {% endif %}
-    <button type="button" class="btn btn--ghost btn--sm"
-            hx-post="/admin/customers/verify-credentials"
-            hx-include="[name=broker],[name=username],[name=password],[name=broker_fallback],[name=username_fallback]"
-            hx-target="#verify-result"
-            hx-swap="innerHTML"
-            hx-indicator="#verify-spinner">
-      Verify credentials
-    </button>
-    <span id="verify-spinner" class="htmx-indicator text-small text-muted" style="margin-left: 8px;">
-      Verifying… (this hits the broker; can take a few seconds while we
-      solve their captcha)
-    </span>
-    {% if is_edit %}
-    <p class="text-small text-muted" style="margin: 4px 0 0;">
-      Re-type the broker password above to verify — the stored one isn't
-      decrypted for probing.
-    </p>
-    {% endif %}
-    <div id="verify-result"></div>
-  </div>
+  {# --- Verify credentials + mandatory verify-on-save (shared partial) --- #}
+  {% set verify_url = "/admin/customers/verify-credentials" %}
+  {% include "partials/customer_verify_credentials.html" %}
 
   {# --- Optimistic-lock token (edit only) --- #}
   {% if is_edit %}

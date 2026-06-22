@@ -70,6 +70,7 @@
       <dd><code>{{ customer.broker }}</code></dd>
       <dt>Broker username</dt>
       <dd dir="auto"><code>{{ customer.username }}</code></dd>
+      {% include "partials/credential_status_row.html" %}
       <dt>Version</dt>
       <dd><code class="text-small">{{ customer.version }}</code></dd>
       <dt>Created</dt>

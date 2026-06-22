@@ -51,6 +51,7 @@ from app.services import audit as services_audit
 from app.services import auto_sell_view as services_auto_sell_view
 from app.services import autobalance as services_autobalance
 from app.services import broker_client
+from app.services.brokers.base import CredStatus
 from app.services import broker_orders as services_broker_orders
 from app.services import brokers_admin
 from app.services import close_positions_view as services_close_positions
@@ -181,6 +182,9 @@ async def admin_dashboard(
         "active": sum(1 for c in all_customers if c.assignment_status == "active"),
         "assigned": sum(1 for c in all_customers if c.assignment_status == "assigned"),
         "pending": sum(1 for c in all_customers if c.assignment_status == "pending"),
+        "invalid_credentials": sum(
+            1 for c in all_customers if c.credential_status == "invalid"
+        ),
     }
 
     # Phase 6: recent-runs roll-up. We pull the most recent 200 runs and
@@ -719,6 +723,7 @@ async def admin_customers(
     agent_id: Optional[str] = None,
     status: Optional[str] = None,
     broker: Optional[str] = None,
+    cred: Optional[str] = None,
     q: Optional[str] = None,
 ):
     """List all customers (accounts) with optional filters + search.
@@ -742,12 +747,14 @@ async def admin_customers(
             agent_uuid = None
     status = status or None
     broker = broker or None
+    cred = cred or None
     q = q or None
     customers = await services_customers.list_customers(
         db,
         agent_id=agent_uuid,
         status=status,
         broker=broker,
+        credential_status=cred,
         q=q,
     )
     trade_counts = await services_customers.get_customer_trade_counts(
@@ -766,6 +773,7 @@ async def admin_customers(
     ctx["filter_agent_id"] = agent_id
     ctx["filter_status"] = status
     ctx["filter_broker"] = broker
+    ctx["filter_cred"] = cred
     ctx["filter_q"] = q or ""
     ctx["all_agents"] = list(agents.values())
     # The LIST filter must include disabled brokers so operators can still
@@ -828,6 +836,7 @@ async def admin_customer_create(
     broker: str = Form(...),
     username: str = Form(...),
     password: str = Form(...),
+    verified: str = Form(""),
 ):
     """Create a new account-shaped customer owned by ``agent_id``.
 
@@ -835,6 +844,9 @@ async def admin_customer_create(
     those move to the per-trade-instruction form on the customer detail
     page. Service layer enforces the composite UNIQUE on
     ``(agent_id, broker, username)`` (one credential set per account).
+
+    ``verified=1`` (set by the verify-on-save flow) persists
+    ``credential_status=valid`` so the dashboard reflects it immediately.
     """
     sticky = {
         "agent_id": str(agent_id),
@@ -891,6 +903,15 @@ async def admin_customer_create(
             ctx,
             status_code=status.HTTP_400_BAD_REQUEST,
         )
+
+    if verified == "1":
+        try:
+            await services_customers.set_credential_status(
+                db, customer.id, CredStatus.VALID,
+                "verified on save", actor_id=user.id,
+            )
+        except Exception:  # noqa: BLE001 — never block creation on a metadata write
+            logger.exception("persist credential_status for %s failed", customer.id)
 
     return _flash_redirect(request, f"/admin/customers/{customer.id}")
 
@@ -1162,6 +1183,7 @@ async def admin_customer_update(
     username: Optional[str] = Form(None),
     password: Optional[str] = Form(None),
     version: int = Form(...),
+    verified: str = Form(""),
 ):
     """Apply an optimistic-locked update to a Customer (account) row.
 
@@ -1266,6 +1288,15 @@ async def admin_customer_update(
     # but don't fail the redirect — the customer change has already
     # committed and an operator can re-trigger the push from the stack
     # page if the SSH layer is having a moment.
+    if verified == "1":
+        try:
+            await services_customers.set_credential_status(
+                db, customer_id, CredStatus.VALID,
+                "verified on save", actor_id=user.id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("persist credential_status for %s failed", customer_id)
+
     await _push_customer_stack_config(db, customer_id, actor_id=user.id)
 
     return _flash_redirect(request, f"/admin/customers/{customer_id}")

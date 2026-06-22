@@ -87,7 +87,25 @@
           <div class="metric-label text-muted text-small">pending</div>
         </div>
         {% endif %}
+        {% if customer_summary.invalid_credentials %}
+        <div class="metric">
+          <div class="metric-value">
+            <a href="/admin/customers?cred=invalid">
+              <span class="badge badge--down">{{ customer_summary.invalid_credentials }}</span>
+            </a>
+          </div>
+          <div class="metric-label text-muted text-small">bad login</div>
+        </div>
+        {% endif %}
       </div>
+      {% if customer_summary.invalid_credentials %}
+      <p class="text-small">
+        ⚠ {{ customer_summary.invalid_credentials }}
+        customer{% if customer_summary.invalid_credentials != 1 %}s have{% else %} has{% endif %}
+        invalid broker credentials —
+        <a href="/admin/customers?cred=invalid">review</a>.
+      </p>
+      {% endif %}
     {% endif %}
   </article>
 

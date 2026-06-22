@@ -151,3 +151,25 @@ async def test_verify_credentials_success_sets_valid(patch_login):
     res = await verify_credentials("bbi", "u", "pw", "http://ocr")
     assert res.ok is True
     assert res.status is CredStatus.VALID
+
+
+# --------------------------------------------------------------------------
+# The verify-result partial must expose data-cred-status — the contract the
+# verify-on-save JS branches on. A render smoke pins it.
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "result,expected_attr",
+    [
+        (VerifyResult(ok=True, status=CredStatus.VALID, full_name="x"), "valid"),
+        (VerifyResult(ok=False, status=CredStatus.INVALID_CREDENTIALS,
+                      error="bad"), "invalid_credentials"),
+        (VerifyResult(ok=False, status=CredStatus.TRANSIENT, error="down"),
+         "transient"),
+    ],
+)
+def test_verify_result_partial_exposes_status(result, expected_attr):
+    from app.routers.dashboard import templates
+    html = templates.env.get_template(
+        "partials/customer_verify_result.html"
+    ).render(result=result, typed_username="u")
+    assert 'data-cred-status="' + expected_attr + '"' in html
