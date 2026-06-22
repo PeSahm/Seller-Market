@@ -293,10 +293,12 @@
     </h2>
   </div>
   <p class="text-muted text-small">
-    Liveness of the broker + market-data backends from this mgmt host — ephoenix
-    (incl. the shared <code>marketdatagw</code>), ibtrader, exir tenants, and the
-    RLC (tadbir) backend. Any HTTP response = up; a connection error/timeout =
-    down. Probed on page load.
+    Liveness of the broker + market-data backends <strong>from this mgmt host</strong>
+    — ephoenix (incl. the shared <code>marketdatagw</code>), ibtrader, exir tenants,
+    and the RLC (tadbir) backend. Any HTTP response = up; a connection error/timeout =
+    down. Probed on page load. Reachability is per-network — for the same probes
+    <strong>from each trading server</strong> (with real-vs-placeholder detection),
+    see <a href="/admin/server-services">Service reachability →</a>.
   </p>
   <div class="table-scroll">
     <table class="table">

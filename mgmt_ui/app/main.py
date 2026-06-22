@@ -28,6 +28,7 @@ from app.workers.health_scanner import run_health_scanner
 from app.workers.janitor import run_janitor
 from app.workers.stack_health import run_stack_health_worker
 from app.workers.scheduled_run_ingestor import run_scheduled_run_ingest_worker
+from app.workers.service_probe import run_service_probe_worker
 from app.workers.trade_ingestor import run_trade_ingest_worker
 from app.workers.broker_order_reconciler import run_broker_order_reconcile_worker
 from app.workers.fire_log_ingestor import run_fire_log_ingest_worker
@@ -246,6 +247,11 @@ def create_app() -> FastAPI:
     # health_signals on a slow cadence via ``services.janitor.run_janitor_tick``.
     app.state.janitor_stop = asyncio.Event()
     app.state.janitor_task = None  # type: Optional[asyncio.Task[None]]
+    # Per-server service-reachability probe. SSH-probes every server for every
+    # service it depends on (OCR/broker APIs/RLC/sidecar) into the
+    # service_probe_results matrix. UNAUTHENTICATED — never logs into a broker.
+    app.state.service_probe_stop = asyncio.Event()
+    app.state.service_probe_task = None  # type: Optional[asyncio.Task[None]]
     # Bot report: daily broker-order reconciler. Pulls a rolling recent window
     # of GetOrders for every customer into broker_orders so the report stays
     # current. Off by default (external broker calls) — see settings.
@@ -568,6 +574,39 @@ def create_app() -> FastAPI:
             await asyncio.wait_for(task, timeout=5.0)
         except asyncio.TimeoutError:
             logger.warning("health scanner worker did not stop in 5s; cancelling")
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    @app.on_event("startup")
+    async def _start_service_probe() -> None:
+        if not app.state.is_worker_leader:
+            logger.info("worker startup skipped: not the worker leader")
+            return
+        if not settings.enable_service_probe_worker:
+            logger.info("service-probe worker disabled via settings")
+            return
+        app.state.service_probe_stop = asyncio.Event()
+        app.state.service_probe_task = asyncio.create_task(
+            run_service_probe_worker(
+                app.state.service_probe_stop,
+                interval_seconds=settings.service_probe_interval_seconds,
+            ),
+            name="service-probe-worker",
+        )
+
+    @app.on_event("shutdown")
+    async def _stop_service_probe() -> None:
+        task: Optional[asyncio.Task[None]] = app.state.service_probe_task
+        if task is None:
+            return
+        app.state.service_probe_stop.set()
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("service-probe worker did not stop in 5s; cancelling")
             task.cancel()
             try:
                 await task

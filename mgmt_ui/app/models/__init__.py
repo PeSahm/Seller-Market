@@ -17,6 +17,7 @@ from app.models.order_fires import OrderFire
 from app.models.auto_sell_reload_status import AutoSellReloadStatus
 from app.models.fees import AgentFeeConfig, CustomerFeePayment
 from app.models.instrument_close_price import InstrumentClosePrice
+from app.models.service_probe import ServiceProbeResult
 from app.models.health import HealthSignal
 from app.models.audit import AuditLog
 from app.models.mgmt_instance import MgmtInstance
@@ -43,6 +44,7 @@ __all__ = [
     "AgentFeeConfig",
     "CustomerFeePayment",
     "InstrumentClosePrice",
+    "ServiceProbeResult",
     "HealthSignal",
     "AuditLog",
     "MgmtInstance",

@@ -67,6 +67,7 @@ from app.services import locust_configs as services_locust
 from app.services import market_data_client
 from app.services import run_executor
 from app.services import runs as services_runs
+from app.services import service_monitor as services_service_monitor
 from app.services import scheduler_jobs as services_scheduler
 from app.services import servers as services_servers
 from app.services import settings_store
@@ -4428,6 +4429,67 @@ async def admin_close_positions_close_all(
     if broker:
         params["broker"] = broker
     target = "/admin/close-positions?" + urlencode(params)
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
+
+
+# ---------------------------------------------------------------------------
+# Per-server service reachability (the endpoint x server matrix)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/server-services")
+async def admin_server_services(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    probed: Optional[str] = None,
+    deep: Optional[str] = None,
+):
+    """The endpoint x server reachability matrix (latest stored probe results).
+
+    A background worker refreshes the unauthenticated rows; "Probe now" forces an
+    immediate refresh; "Deep check" runs a real authenticated login (Mostafa's
+    credential) inside each host's bot container."""
+    matrix = await services_service_monitor.build_service_matrix(db)
+    ctx = _ctx(request, user, current_tab="/admin/server-services")
+    ctx["matrix"] = matrix
+    ctx["flash_probed"] = probed == "1"
+    ctx["flash_deep"] = deep == "1"
+    return templates.TemplateResponse("admin/server_services.html", ctx)
+
+
+@router.post("/server-services/probe-now")
+async def admin_server_services_probe_now(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Force an immediate UNAUTHENTICATED probe of every server (bounded)."""
+    try:
+        await services_service_monitor.probe_all_once(db)
+    except Exception:  # noqa: BLE001 — never 500 the page on a probe hiccup
+        logger.exception("server-services probe-now failed")
+    target = "/admin/server-services?probed=1"
+    if request.headers.get("HX-Request"):
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
+
+
+@router.post("/server-services/deep-check")
+async def admin_server_services_deep_check(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Kick the authenticated deep-check (real login per broker, inside each
+    host's bot container) as a fire-and-forget task; rows fill in shortly."""
+    asyncio.create_task(
+        services_service_monitor.deep_check_once(user.id),
+        name="service-deep-check",
+    )
+    target = "/admin/server-services?deep=1"
     if request.headers.get("HX-Request"):
         return Response(status_code=204, headers={"HX-Redirect": target})
     return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})
