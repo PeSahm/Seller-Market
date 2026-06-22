@@ -61,6 +61,7 @@ from app.services import brokers_admin
 from app.services import close_positions_view as services_close_positions
 from app.services import close_prices as services_close_prices
 from app.services import customers as services_customers
+from app.services import distribution as services_distribution
 from app.services import health_signals as services_health
 from app.services import instruments as services_instruments
 from app.services import broker_orders as services_broker_orders
@@ -523,6 +524,20 @@ async def agent_customer_create(
             "agent/customer_form.html",
             ctx,
             status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Auto-assign the new customer to a RANDOM EXISTING stack of this agent so it
+    # trades from an existing stack right away (no admin pending-inbox step, and
+    # never creating a new stack). If the agent has no stack yet, it stays
+    # pending. Best-effort: a failure here must not break customer creation —
+    # the customer is already saved and can be assigned later.
+    try:
+        await services_distribution.assign_customer_to_random_existing_stack(
+            db, customer.id, actor_id=user.id
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "auto-assign of new customer %s to an existing stack failed", customer.id
         )
 
     redirect_to = f"/agent/customers/{customer.id}"
