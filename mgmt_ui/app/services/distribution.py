@@ -78,6 +78,7 @@ failure) rather than a silent no-op.
 from __future__ import annotations
 
 import logging
+import random
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 from uuid import UUID
@@ -819,6 +820,88 @@ async def assign_customer(
         new_stack_id=stack.id,
         affected_stack_ids=affected,
         message=f"assigned to {server.name}",
+    )
+
+
+async def assign_customer_to_random_existing_stack(
+    db: AsyncSession,
+    customer_id: UUID,
+    *,
+    actor_id: UUID,
+) -> AssignmentResult:
+    """Auto-assign a pending customer to a RANDOM EXISTING stack of its agent.
+
+    Used on agent self-service customer creation so the customer trades from an
+    existing stack immediately, without the admin pending-inbox step. Unlike
+    :func:`assign_customer` this NEVER creates a stack and ignores distribution
+    policy — it just picks uniformly at random among the ``agent_stacks`` rows
+    that already exist for the customer's agent.
+
+    If the agent has NO stack yet, the customer is left ``pending`` (returns
+    ``ok=False``) — the admin inbox / a later assign handles it. Best-effort by
+    contract: callers wrap this so a failure never blocks customer creation.
+
+    Sequence mirrors :func:`assign_customer` (lock → set row → commit → push),
+    minus policy resolution and stack creation.
+    """
+    stacks = _import_stacks_service()
+
+    customer = await _lock_customer_for_update(db, customer_id)
+    if customer is None:
+        raise ValueError(f"customer {customer_id} not found")
+
+    rows = (
+        await db.execute(
+            select(AgentStack).where(AgentStack.agent_id == customer.agent_id)
+        )
+    ).scalars().all()
+    if not rows:
+        # No existing stack for this agent → leave pending (we never create one).
+        return AssignmentResult(
+            ok=False,
+            customer_id=customer.id,
+            old_server_id=customer.server_id,
+            old_stack_id=customer.stack_id,
+            message="no existing stack for agent — left pending",
+        )
+
+    stack = random.choice(rows)
+
+    before = _customer_snapshot(customer)
+    old_stack_id = customer.stack_id
+
+    customer.server_id = stack.server_id
+    customer.stack_id = stack.id
+    customer.assignment_status = "active"
+    customer.updated_at = _now_utc()
+
+    after = _customer_snapshot(customer)
+    await _write_audit(
+        db,
+        actor_id=actor_id,
+        action="customer.assign",
+        target_id=customer.id,
+        before=before,
+        after=after,
+    )
+    await db.commit()
+    await db.refresh(customer)
+
+    affected: list[UUID] = [stack.id]
+    await stacks.push_config_ini_for_stack(db, stack.id, actor_id)
+    if old_stack_id is not None and old_stack_id != stack.id:
+        affected.append(old_stack_id)
+        await stacks.push_config_ini_for_stack(db, old_stack_id, actor_id)
+
+    return AssignmentResult(
+        ok=True,
+        customer_id=customer.id,
+        old_server_id=_uuid_or_none(before.get("server_id")),
+        new_server_id=stack.server_id,
+        old_stack_id=old_stack_id,
+        new_stack_id=stack.id,
+        affected_stack_ids=affected,
+        message="auto-assigned to an existing stack",
     )
 
 
