@@ -279,7 +279,9 @@ async def test_probe_server_auth_success_failure_and_no_bot(monkeypatch):
     monkeypatch.setattr(svc, "run_command", fake_run)
     res = await svc.probe_server_auth(_server(), acct)
     assert res["state"] == "real"
-    assert res["target_key"] == "auth:ayandeh"
+    # Account-specific key (broker + username) so two accounts on one broker
+    # don't collide on the (server_id, target_key) upsert.
+    assert res["target_key"] == "auth:ayandeh:acct-user"
     assert res["group_name"] == "auth-ephoenix"
     # Creds went via stdin, NEVER on the command line.
     exec_call = [c for c in calls if "docker exec" in c["cmd"]][0]
@@ -378,6 +380,42 @@ async def test_deep_check_serializes_per_account(monkeypatch):
     assert len(recorded) == len(accts) * len(servers)
     # An audit row was written.
     assert any(s.added for s in sessions)
+
+
+async def test_deep_check_single_flight_skips_concurrent_run(monkeypatch):
+    """A second deep-check launched while one is in flight is skipped, so two
+    runs can't log the same account in from two IPs at once."""
+    lock = svc._get_deep_check_lock()
+    await lock.acquire()
+    try:
+        n = await svc.deep_check_once(uuid.uuid4())
+        assert n == 0  # skipped — a run already holds the lock
+    finally:
+        lock.release()
+
+
+async def test_record_results_prune_deletes_stale_only_when_asked():
+    class _CountDB:
+        def __init__(self):
+            self.executes = 0
+            self.commits = 0
+
+        async def execute(self, stmt, *a, **k):
+            self.executes += 1
+            return None
+
+        async def commit(self):
+            self.commits += 1
+
+    res = [{"target_key": "a", "group_name": "ephoenix", "name": "A",
+            "url": "u", "state": "real"}]
+    db1 = _CountDB()
+    await svc.record_results(db1, uuid.uuid4(), res)
+    assert db1.executes == 1  # upsert only
+
+    db2 = _CountDB()
+    await svc.record_results(db2, uuid.uuid4(), res, prune_others=True)
+    assert db2.executes == 2  # upsert + prune-delete
 
 
 # --------------------------------------------------------------------------

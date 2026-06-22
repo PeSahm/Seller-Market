@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -70,6 +70,25 @@ GROUP_ORDER: list[tuple[str, str]] = [
 ]
 
 _SSH_META_KEY = "_meta:__ssh__"
+# Groups whose rows are NOT refreshed by the unauthenticated tick (so the tick's
+# stale-row prune must never delete them).
+_AUTH_GROUPS = ("auth-ephoenix", "auth-exir")
+
+# Single-flight guard for the authenticated deep-check: two concurrent runs (e.g.
+# two button clicks) would defeat the per-(broker, account) serialization and log
+# the same account in from two server IPs at once. Lazily created per running
+# loop so it never trips the "bound to a different event loop" footgun in tests.
+_deep_check_lock: Optional[asyncio.Lock] = None
+_deep_check_lock_loop = None
+
+
+def _get_deep_check_lock() -> asyncio.Lock:
+    global _deep_check_lock, _deep_check_lock_loop
+    loop = asyncio.get_running_loop()
+    if _deep_check_lock is None or _deep_check_lock_loop is not loop:
+        _deep_check_lock = asyncio.Lock()
+        _deep_check_lock_loop = loop
+    return _deep_check_lock
 
 
 @dataclass
@@ -347,11 +366,21 @@ async def probe_server(
     return out
 
 
-async def record_results(db: AsyncSession, server_id: UUID, results: list[dict]) -> None:
-    """Upsert one round of probe results for a server (one row per target_key)."""
+async def record_results(
+    db: AsyncSession, server_id: UUID, results: list[dict], *, prune_others: bool = False,
+) -> None:
+    """Upsert one round of probe results for a server (one row per target_key).
+
+    ``prune_others=True`` (the full unauthenticated tick) also DELETES this
+    server's non-auth rows whose ``target_key`` isn't in this round — so a
+    disabled broker / removed OCR URL drops out of the matrix instead of sitting
+    stale forever. Authenticated rows (refreshed only by the manual deep-check)
+    are never pruned.
+    """
     if not results:
         return
     now = datetime.now(timezone.utc)
+    keys = [r["target_key"] for r in results]
     rows = [
         {
             "server_id": server_id, "target_key": r["target_key"],
@@ -372,6 +401,14 @@ async def record_results(db: AsyncSession, server_id: UUID, results: list[dict])
         set_={c: getattr(stmt.excluded, c) for c in update_cols},
     )
     await db.execute(stmt)
+    if prune_others:
+        await db.execute(
+            delete(ServiceProbeResult).where(
+                ServiceProbeResult.server_id == server_id,
+                ServiceProbeResult.target_key.notin_(keys),
+                ServiceProbeResult.group_name.notin_(_AUTH_GROUPS),
+            )
+        )
     await db.commit()
 
 
@@ -407,7 +444,7 @@ async def probe_all_once(
                 )
             try:
                 async with AsyncSessionLocal() as s:
-                    await record_results(s, server.id, results)
+                    await record_results(s, server.id, results, prune_others=True)
             except Exception:  # noqa: BLE001
                 logger.exception("service_probe: record failed for %s", server.id)
 
@@ -529,7 +566,11 @@ async def _find_bot_container(server, *, timeout: float = 15.0) -> Optional[str]
 def _auth_result(acct: AuthTarget, server, state: str, detail=None,
                  latency_ms=None) -> dict:
     return {
-        "target_key": f"auth:{acct.code}", "group_name": f"auth-{acct.family}",
+        # Account-specific key: targets are built per (broker, username), and the
+        # upsert key is (server_id, target_key), so two accounts on the same
+        # broker must NOT share a key or they'd overwrite each other.
+        "target_key": f"auth:{acct.code}:{acct.username}",
+        "group_name": f"auth-{acct.family}",
         "name": f"{acct.label} · {acct.username}",
         "url": f"real login via bot @ {server.name}", "state": state,
         "http_status": None, "content_type": None,
@@ -582,47 +623,55 @@ async def deep_check_once(actor_id: UUID, *, concurrency: int = 3) -> int:
 
     Serializes per ``(broker, account)`` — each account's servers are probed
     SEQUENTIALLY (never the same account from two IPs at once); different accounts
-    run in parallel. Returns the number of accounts checked.
+    run in parallel. A process-wide single-flight lock makes that guarantee hold
+    ACROSS invocations too: a second run launched while one is in flight (e.g. a
+    double-click) is skipped, so two runs can't log the same account in from two
+    server IPs concurrently. Returns the number of accounts checked (0 if skipped).
     """
-    async with AsyncSessionLocal() as db:
-        targets = await build_auth_targets(db)
-        servers = await list_servers(db)
-    if not targets or not servers:
-        logger.info(
-            "deep_check: nothing to do (accounts=%d servers=%d)",
-            len(targets), len(servers),
-        )
+    lock = _get_deep_check_lock()
+    if lock.locked():
+        logger.info("deep_check: a run is already in flight — skipping this launch")
         return 0
+    async with lock:
+        async with AsyncSessionLocal() as db:
+            targets = await build_auth_targets(db)
+            servers = await list_servers(db)
+        if not targets or not servers:
+            logger.info(
+                "deep_check: nothing to do (accounts=%d servers=%d)",
+                len(targets), len(servers),
+            )
+            return 0
 
-    sem = asyncio.Semaphore(concurrency)
+        sem = asyncio.Semaphore(concurrency)
 
-    async def _chain(acct: AuthTarget) -> None:
-        async with sem:
-            for server in servers:
-                res = await probe_server_auth(server, acct)
-                try:
-                    async with AsyncSessionLocal() as s:
-                        await record_results(s, server.id, [res])
-                except Exception:  # noqa: BLE001
-                    logger.exception("deep_check: record failed for %s", server.id)
+        async def _chain(acct: AuthTarget) -> None:
+            async with sem:
+                for server in servers:
+                    res = await probe_server_auth(server, acct)
+                    try:
+                        async with AsyncSessionLocal() as s:
+                            await record_results(s, server.id, [res])
+                    except Exception:  # noqa: BLE001
+                        logger.exception("deep_check: record failed for %s", server.id)
 
-    await asyncio.gather(*[_chain(t) for t in targets])
+        await asyncio.gather(*[_chain(t) for t in targets])
 
-    try:
-        async with AsyncSessionLocal() as s:
-            s.add(AuditLog(
-                actor_user_id=actor_id, action="service_probe.deep_check",
-                target_type="service_probe", target_id="all",
-                before_json={},
-                after_json={"accounts": len(targets), "servers": len(servers)},
-            ))
-            await s.commit()
-    except Exception:  # noqa: BLE001
-        logger.exception("deep_check: audit write failed")
-    logger.info(
-        "deep_check done: %d accounts x %d servers", len(targets), len(servers)
-    )
-    return len(targets)
+        try:
+            async with AsyncSessionLocal() as s:
+                s.add(AuditLog(
+                    actor_user_id=actor_id, action="service_probe.deep_check",
+                    target_type="service_probe", target_id="all",
+                    before_json={},
+                    after_json={"accounts": len(targets), "servers": len(servers)},
+                ))
+                await s.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception("deep_check: audit write failed")
+        logger.info(
+            "deep_check done: %d accounts x %d servers", len(targets), len(servers)
+        )
+        return len(targets)
 
 
 # ---------------------------------------------------------------------------

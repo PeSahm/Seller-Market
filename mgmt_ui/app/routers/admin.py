@@ -4456,6 +4456,7 @@ async def admin_server_services(
     ctx = _ctx(request, user, current_tab="/admin/server-services")
     ctx["matrix"] = matrix
     ctx["flash_probed"] = probed == "1"
+    ctx["flash_probe_error"] = probed == "err"
     ctx["flash_deep"] = deep == "1"
     return templates.TemplateResponse("admin/server_services.html", ctx)
 
@@ -4469,9 +4470,10 @@ async def admin_server_services_probe_now(
     """Force an immediate UNAUTHENTICATED probe of every server (bounded)."""
     try:
         await services_service_monitor.probe_all_once(db)
+        target = "/admin/server-services?probed=1"
     except Exception:  # noqa: BLE001 — never 500 the page on a probe hiccup
         logger.exception("server-services probe-now failed")
-    target = "/admin/server-services?probed=1"
+        target = "/admin/server-services?probed=err"
     if request.headers.get("HX-Request"):
         return Response(status_code=204, headers={"HX-Redirect": target})
     return Response(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target})

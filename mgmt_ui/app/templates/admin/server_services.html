@@ -32,6 +32,11 @@
   Probe complete — the matrix below shows the latest reachability.
 </div>
 {% endif %}
+{% if flash_probe_error %}
+<div class="flash flash--error" role="alert" style="margin-bottom:12px;">
+  Probe run failed — the matrix below may be stale. Check the logs and retry.
+</div>
+{% endif %}
 {% if flash_deep %}
 <div class="flash flash--success" role="status" style="margin-bottom:12px;">
   Deep check started — authenticated rows fill in shortly (logins run serialized
