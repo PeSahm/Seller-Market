@@ -513,9 +513,15 @@ try:
     else:
         from broker_enum import get_endpoints_for
         from api_client import EphoenixAPIClient
+        endpoints = get_endpoints_for(code)
+        # The legacy ephoenix market-data host is decommissioned. Force the call to
+        # the new shared host regardless of the bot image's (possibly stale)
+        # endpoint map; ib keeps its own mdapi.ibtrader.ir shard.
+        if code != "ib":
+            endpoints["market_data"] = "https://marketdatagw.ephoenix.ir/api/v2/instruments/full"
         c = EphoenixAPIClient(broker_code=code, username=user, password=pw,
                               captcha_decoder=decode_captcha,
-                              endpoints=get_endpoints_for(code), cache=cache)
+                              endpoints=endpoints, cache=cache)
         c.authenticate()
         info = c.get_instrument_info(isin, use_cache=False)
         sym = ""
@@ -598,7 +604,9 @@ def _auth_result(acct: AuthTarget, server, state: str, detail=None,
         "target_key": f"auth:{acct.code}:{acct.username}",
         "group_name": f"auth-{acct.family}",
         "name": f"{acct.label} · {acct.username}",
-        "url": f"real login via bot @ {server.name}", "state": state,
+        # Per-server result is the cell; keep the row label generic (not a single
+        # server name, which is misleading on a per-server row).
+        "url": "real login + market-data via bot container", "state": state,
         "http_status": None, "content_type": None,
         "latency_ms": latency_ms, "detail": detail,
     }

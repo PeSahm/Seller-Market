@@ -263,8 +263,13 @@ def test_build_auth_probe_script_is_safe_and_reuses_bot_code():
     assert "decode_captcha" in s
     assert "EphoenixAPIClient" in s
     assert "get_adapter" in s  # exir branch
+    # ephoenix market-data is forced to the new shared host (mdapi1 is dead).
+    assert "marketdatagw.ephoenix.ir" in s
+    assert "mdapi1" not in s
     # The inline script swallows everything → never crashes the exec.
     assert "except Exception" in s
+    # And it must be valid Python (it runs via `python -c`).
+    compile(s, "<auth-probe>", "exec")
 
 
 async def test_build_auth_targets_dedups_and_decrypts(monkeypatch):
