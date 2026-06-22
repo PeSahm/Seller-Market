@@ -35,6 +35,7 @@ from app.models.audit import AuditLog
 from app.models.scheduler import SchedulerJob
 from app.schemas.scheduler import (
     ALLOWED_COMMANDS,
+    DEFAULT_JOB_TIMES,
     SchedulerJobUpsert,
     WillReFireToday,
     is_command_allowed,
@@ -332,6 +333,35 @@ async def upsert_job(
     await db.commit()
     await db.refresh(job)
     return job
+
+
+async def ensure_default_scheduler_jobs(
+    db: AsyncSession,
+    stack_id: UUID,
+    actor_id: Optional[UUID],
+    *,
+    commit: bool = True,
+) -> list[str]:
+    """Seed the canonical scheduler jobs for a stack that is MISSING them.
+
+    Creates ``cache_warmup`` (08:30:00) and ``run_trading`` (08:44:20) with the
+    canonical commands, so a freshly-created stack is schedulable out of the box.
+    **Only-if-missing + idempotent**: an existing job of a given name is left
+    untouched (never overwrites a time the operator set). Returns the names
+    created. Safe to call repeatedly.
+    """
+    created: list[str] = []
+    for name, t in DEFAULT_JOB_TIMES.items():
+        if await get_job(db, stack_id, name) is None:
+            await upsert_job(
+                db, stack_id, name,
+                SchedulerJobUpsert(time=t, enabled=True, command=None, version=0),
+                actor_id,
+            )
+            created.append(name)
+    if created and commit:
+        await db.commit()
+    return created
 
 
 # ---------------------------------------------------------------------------

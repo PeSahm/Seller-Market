@@ -696,6 +696,18 @@ async def find_or_create_stack(
     )
     await db.commit()
     await db.refresh(stack)
+
+    # Seed the two default scheduler jobs (cache_warmup 08:30:00 / run_trading
+    # 08:44:20) so a freshly-created stack is schedulable out of the box. Only
+    # runs on the CREATE path (the early-return above skips existing stacks).
+    # Best-effort: a seeding failure must not abort stack creation — the jobs
+    # can be added/backfilled later.
+    try:
+        from app.services import scheduler_jobs as _scheduler_jobs  # noqa: WPS433
+        await _scheduler_jobs.ensure_default_scheduler_jobs(db, stack.id, actor_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to seed default scheduler jobs for stack %s", stack.id)
+
     return stack
 
 
