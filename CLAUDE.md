@@ -1589,6 +1589,16 @@ Operator: the ephoenix family moved the instrument market-data API host from **`
 | — | Stage the new bot image fleet-wide | Make the `marketdatagw` change survive a future `redeploy_stack` (the live-patch is per-container, lost on recreate). The committed image has it; just pull+retag `:latest` on each host. |
 | — | Periodic external-health worker + alerts | `/admin/ha` external probe is on-page-load only; a small worker raising `health_signals` would alert proactively (the operator's "didn't know mdapi1 died until trades failed" pain). |
 
+### Follow-up (same session): `marketdatagw` is UNREACHABLE from PouyanIt + ParsPack → operator consolidated ALL stacks onto Tebyan
+
+The brand-new `/admin/ha` external monitor flagged `marketdatagw.ephoenix.ir` **down** on its first run — and a full diagnosis confirmed a **per-network routing block**, not DNS/auth:
+- DNS resolves everywhere (`185.115.151.42`, **AS214751**); the OLD `mdapi1` (`185.37.53.59`, different AS) answers from **every** host.
+- **Reachable from all 4 Tebyan hosts** (`.177/.180/.189/.246`) — verified from the BOT RUNTIME (`docker exec <bot> python`, `requests`, `trust_env=False`): **HTTP 401 in ~0.08s** (host answers; 401 = just needs the Bearer the bot already has).
+- **UNREACHABLE from PouyanIt `5.10.248.55` + ParsPack `45.139.10.192`** — TCP **ConnectTimeout** on 443, 6/6 from the bot container; clean host curl = `HTTP=000`. (An early "503 in 0.2s" reading was a shell `*`-glob artifact in a malformed test — discount it.)
+- **mtr / traceroute** (gold for the network engineer; `traceroute` not installed — use **`mtr -rwbzc 5 -T -P 443 <ip>`**, mtr+tracepath are present and `mtr -T` does TCP): from PouyanIt the path enters the `10.201/16` backbone and **dies after `10.201.216.92`** — never reaches AS214751; yet the SAME source reaches `mdapi1` fine (`10.201.250.146 → 10.22.27.x → 185.37.53.59`, hop 10) and Tebyan reaches marketdatagw fine (`10.201.42.x → 185.115.151.42`, hop 9). ⇒ a routing/peering gap (or destination prefix-filter) to **AS214751 for PouyanIt's + ParsPack's egress** — a silently dropped SYN, **unfixable in code**.
+- **RESOLUTION: operator MOVED all stacks to Tebyan**, where marketdatagw works, so the PouyanIt/ParsPack block is moot for the bots. If a stack is ever placed back on PouyanIt/ParsPack, its `market_data` will time out until the broker allowlists those IPs to `185.115.151.42:443`. The mgmt instances still run on PouyanIt+ParsPack, so mgmt-side `verify_isin` (which hits `market_data`) will time out from there — low impact (admin action), revisit if needed.
+- **Lessons**: (1) the external monitor paid for itself on day one — it surfaced a network-path-specific broker block the instant it shipped. (2) "the operator says it's fine, here's a browser curl" does NOT prove the SERVER hosts can reach it — test from the **actual bot runtime** (`docker exec <bot> python` + `requests`), not a cookie-curl from a different network. (3) `marketdatagw` (AS214751) is a DIFFERENT network/AS than the old `mdapi1` — moving a host across ASes can change which egresses can route to it.
+
 ---
 
 ## Session 30 — REAL OCR HA at last: 2nd AVX2 OCR server (`85.133.205.190`) stood up + made the fleet-wide PRIMARY
