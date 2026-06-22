@@ -57,6 +57,15 @@ ALLOWED_COMMANDS: dict[str, tuple[str, ...]] = {
     "run_trading": ("locust -f locustfile_new.py --headless",),
 }
 
+# Default fire times (HH:MM:SS Tehran) seeded onto a freshly-created stack that
+# has no schedule, so a new stack is schedulable out of the box (warmup before
+# market open, trading run a few minutes before the ~08:45 open). Existing jobs
+# are never overwritten — see ``scheduler_jobs.ensure_default_scheduler_jobs``.
+DEFAULT_JOB_TIMES: dict[str, str] = {
+    "cache_warmup": "08:30:00",
+    "run_trading": "08:44:20",
+}
+
 # HH:MM:SS, 24-hour. We do NOT use ``datetime.strptime`` here because we want
 # the bot's wire format byte-exact (zero-padded, colon-separated) — strptime
 # would silently accept ``8:5:3`` and we'd quietly drift away from what the
