@@ -283,4 +283,46 @@
     </table>
   </div>
 </article>
+
+{# ---- External services (broker + market-data backends) ---- #}
+<article class="card" style="margin-top:16px;">
+  <div class="card-header">
+    <h2 class="h3">External services
+      {% if ha.external_down %}<span class="badge badge--down">{{ ha.external_down }} down</span>
+      {% else %}<span class="badge badge--up">all up</span>{% endif %}
+    </h2>
+  </div>
+  <p class="text-muted text-small">
+    Liveness of the broker + market-data backends from this mgmt host — ephoenix
+    (incl. the shared <code>marketdatagw</code>), ibtrader, exir tenants, and the
+    RLC (tadbir) backend. Any HTTP response = up; a connection error/timeout =
+    down. Probed on page load.
+  </p>
+  <div class="table-scroll">
+    <table class="table">
+      <thead>
+        <tr><th>Service</th><th>Endpoint</th><th>Status</th><th>HTTP</th><th>Latency</th></tr>
+      </thead>
+      <tbody>
+        {% for e in ha.external %}
+          <tr>
+            <td class="text-small">{{ e.group }} <span class="text-muted">· {{ e.name }}</span></td>
+            <td><code dir="ltr">{{ e.url }}</code></td>
+            <td>
+              {% if e.reachable %}<span class="badge badge--up">up</span>
+              {% else %}<span class="badge badge--down">down</span>{% endif %}
+            </td>
+            <td class="text-muted text-small">{{ e.status if e.status is not none else '—' }}</td>
+            <td class="text-muted text-small">
+              {% if e.latency_ms is not none %}{{ e.latency_ms }} ms{% else %}—{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        {% if not ha.external %}
+          <tr><td colspan="5" class="text-muted text-small">No external services to probe.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</article>
 {% endblock %}

@@ -23,6 +23,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import db as db_mod
+from app.models.brokers import Broker
 from app.models.health import HealthSignal
 from app.models.servers import Server
 from app.models.stacks import AgentStack
@@ -36,6 +37,60 @@ logger = logging.getLogger(__name__)
 
 _OCR_PROBE_TIMEOUT = 5.0
 _SPARE_PROBE_TIMEOUT = 4.0
+_EXT_PROBE_TIMEOUT = 6.0
+
+
+def _ext_targets(brokers: list[Broker]) -> list[dict]:
+    """Build the external broker/market-data probe list: the shared market-data
+    backends + each enabled broker's OWN API host (so the operator sees which
+    specific broker is unreachable).
+
+    - ephoenix family → ``api-{code}.ephoenix.ir`` (``ib`` lives on ibtrader.ir,
+      covered by the fixed ibtrader probes below — skip it here to avoid a dup).
+    - exir family → ``{tenant}.exirbroker.com``.
+    Fixed: the ephoenix shared market-data host (``marketdatagw``), ibtrader
+    api/mdapi, and the RLC (tadbir) market-data backend that Exir/auto-sell use.
+    """
+    targets: list[dict] = [
+        {"group": "ephoenix", "name": "market-data (marketdatagw)",
+         "url": "https://marketdatagw.ephoenix.ir/"},
+        {"group": "ibtrader", "name": "api", "url": "https://api.ibtrader.ir/"},
+        {"group": "ibtrader", "name": "mdapi", "url": "https://mdapi.ibtrader.ir/"},
+        {"group": "rlc", "name": "tadbir market-data",
+         "url": "https://core.tadbirrlc.com/"},
+    ]
+    for b in brokers:
+        if b.family == "exir":
+            targets.append({"group": "exir", "name": b.label or b.code,
+                            "url": f"https://{b.code}.exirbroker.com/"})
+        elif b.family == "ephoenix" and b.code != "ib":
+            targets.append({"group": "ephoenix", "name": b.label or b.code,
+                            "url": f"https://api-{b.code}.ephoenix.ir/"})
+    return targets
+
+
+async def _probe_external(targets: list[dict]) -> list[dict]:
+    """Probe each external service for liveness. Any HTTP response (even
+    401/403/404/406) = the host answered = reachable; only a transport error /
+    timeout is 'down'. ``trust_env=False`` forces a DIRECT connection — the RLC
+    (tadbir) host times out through a foreign proxy (Session-6 lesson)."""
+    if not targets:
+        return []
+
+    async with httpx.AsyncClient(
+        timeout=_EXT_PROBE_TIMEOUT, trust_env=False, follow_redirects=False
+    ) as client:
+        async def _one(t: dict) -> dict:
+            t0 = time.perf_counter()
+            try:
+                resp = await client.get(t["url"])
+                return {**t, "reachable": True, "status": resp.status_code,
+                        "latency_ms": round((time.perf_counter() - t0) * 1000, 1)}
+            except Exception as exc:  # noqa: BLE001 — display-only, never raise
+                logger.info("ha: external probe down %s: %s", t["url"], str(exc)[:120])
+                return {**t, "reachable": False, "status": None, "latency_ms": None}
+
+        return list(await asyncio.gather(*[_one(t) for t in targets]))
 
 
 def _dsn_host_port(dsn: str) -> tuple[str, int | None]:
@@ -180,13 +235,29 @@ async def build_ha_status(
         ocr_setting = ""
     ocr_urls = _ocr_base_urls(ocr_setting or settings.default_ocr_service_url)
 
-    # The DB probes + OCR probes are independent: main DB uses ``db``, the spare
-    # uses its own connection, OCR uses httpx — safe to run concurrently (only
-    # one task touches ``db``).
-    main_db, spare_db, ocr = await asyncio.gather(
+    # Enabled brokers → external probe targets (uses ``db``, BEFORE the gather).
+    try:
+        brokers = list(
+            (
+                await db.execute(
+                    select(Broker)
+                    .where(Broker.enabled.is_(True))
+                    .order_by(Broker.family, Broker.sort_order)
+                )
+            ).scalars().all()
+        )
+    except Exception:  # noqa: BLE001 — display-only, never 500
+        brokers = []
+    ext_targets = _ext_targets(brokers)
+
+    # The DB probes + OCR + external probes are independent: main DB uses ``db_mod``
+    # engine, the spare uses its own connection, OCR/external use httpx — safe to
+    # run concurrently (none touch the request ``db``).
+    main_db, spare_db, ocr, external = await asyncio.gather(
         _probe_main_db(),
         _probe_spare_db(settings.spare_dsn),
         _probe_ocr(ocr_urls),
+        _probe_external(ext_targets),
     )
 
     # Rollups (sequential, after the gather → ``db`` is free again).
@@ -222,6 +293,8 @@ async def build_ha_status(
         "main_db": main_db,
         "spare_db": spare_db,
         "ocr": ocr,
+        "external": external,
+        "external_down": sum(1 for e in external if e.get("reachable") is False),
         "instances": instances,
         "instances_total": len(instances),
         "servers": servers,
