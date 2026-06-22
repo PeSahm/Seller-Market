@@ -44,12 +44,19 @@ def test_classify_jpeg_real_and_placeholder():
 
 
 def test_classify_json_isin_hit_miss():
+    # Exact ISIN match → real (strongest signal).
     assert svc.classify("json_isin", "200", "application/json",
                         '[{"nc":"IRO1SROD0001","hap":1}]', isin="IRO1SROD0001") == "real"
-    assert svc.classify("json_isin", "200", "application/json",
-                        '[{"nc":"OTHER"}]', isin="IRO1SROD0001") == "degraded"
+    # The live RLC shape: 200 text/plain JSON array whose nc/ISIN sits past the
+    # truncated marker → still real (the genuine handler answered).
+    assert svc.classify("json_isin", "200", "text/plain; charset=UTF-8",
+                        '[{"bv":1.0,"cp":13790,"cn":"سیمان‌شاهرود","bbq":909463}]',
+                        isin="IRO1SROD0001") == "real"
+    # 200 HTML page → placeholder; a non-200 JSON-ish body → degraded.
     assert svc.classify("json_isin", "200", "text/html", "<html>",
                         isin="IRO1SROD0001") == "placeholder"
+    assert svc.classify("json_isin", "500", "application/json",
+                        '[{"err":1}]', isin="IRO1SROD0001") == "degraded"
 
 
 def test_classify_transport_down():
@@ -198,22 +205,51 @@ async def test_probe_server_classifies_and_skips_host_local(monkeypatch):
 
 
 async def test_probe_server_ssh_failure_all_down(monkeypatch):
+    monkeypatch.setattr(svc, "_SSH_RETRY_DELAY", 0)
     targets = [
         svc.Target("a", "ephoenix", "A", "https://a", "json"),
         svc.Target("hl", "ocr", "HL", "http://host.docker.internal:18080/",
                    "any", host_local=True),
     ]
+    calls = {"n": 0}
 
     async def boom(server, cmd, **kw):
+        calls["n"] += 1
         raise RuntimeError("connect failed")
 
     monkeypatch.setattr(svc, "run_command", boom)
 
     out = await svc.probe_server(_server(), targets)
     by = {r["target_key"]: r for r in out}
+    assert calls["n"] == 2  # retried once before giving up
     assert by["a"]["state"] == "down"
     assert by["hl"]["state"] == "skipped"  # host-local always skipped, even on ssh fail
     assert by["_meta:__ssh__"]["state"] == "down"
+
+
+async def test_probe_server_retries_transient_ssh_blip(monkeypatch):
+    """A one-off SSH failure (cold pool / Channel closed) is retried, NOT recorded
+    as a whole-server outage."""
+    monkeypatch.setattr(svc, "_SSH_RETRY_DELAY", 0)
+    targets = [svc.Target("a", "ephoenix", "A", "https://a", "json")]
+    calls = {"n": 0}
+
+    async def flaky(server, cmd, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("Channel closed")
+        return SimpleNamespace(
+            stdout="a\x1f200|application/json|0.10\x1f{\"ok\":1}\n",
+            stderr="", exit_code=0,
+        )
+
+    monkeypatch.setattr(svc, "run_command", flaky)
+
+    out = await svc.probe_server(_server(), targets)
+    by = {r["target_key"]: r for r in out}
+    assert calls["n"] == 2  # first attempt failed, second succeeded
+    assert by["a"]["state"] == "real"  # NOT down — the blip was absorbed
+    assert by["_meta:__ssh__"]["state"] == "up"
 
 
 # --------------------------------------------------------------------------

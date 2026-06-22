@@ -73,6 +73,11 @@ _SSH_META_KEY = "_meta:__ssh__"
 # Groups whose rows are NOT refreshed by the unauthenticated tick (so the tick's
 # stale-row prune must never delete them).
 _AUTH_GROUPS = ("auth-ephoenix", "auth-exir")
+# A single transient SSH blip ("Channel closed" right after a container restart /
+# a cold connection pool) must NOT paint a whole healthy server "down". So the
+# per-server probe retries once after a short pause before declaring all-down —
+# enough for the pool to evict the stale transport and reconnect.
+_SSH_RETRY_DELAY = 1.5
 
 # Single-flight guard for the authenticated deep-check: two concurrent runs (e.g.
 # two button clicks) would defeat the per-(broker, account) serialization and log
@@ -233,7 +238,7 @@ def build_probe_script(targets: list[Target], curl_timeout: int = 6) -> str:
             "-w '%%{http_code}|%%{content_type}|%%{time_total}' \"$3\" 2>/dev/null) "
             "|| m='000||'"
         ) % int(curl_timeout),
-        "  k=$(head -c 200 \"$b\" 2>/dev/null | tr -d '\\000-\\037|')",
+        "  k=$(head -c 400 \"$b\" 2>/dev/null | tr -d '\\000-\\037|')",
         "  printf '%s\\037%s\\037%s\\n' \"$2\" \"$m\" \"$k\" >> \"$d/out\"",
         "}",
     ]
@@ -262,10 +267,17 @@ def classify(
             return "placeholder"
         return "degraded"
     if expect == "json_isin":
+        # An exact ISIN match is the strongest signal, but the public RLC handler
+        # returns a 200 JSON array (text/plain) whose `nc`/ISIN field can sit past
+        # the truncated body marker — so a 200 non-HTML JSON-ish body is itself
+        # proof the genuine handler answered (= real). Only a 200 HTML page is a
+        # placeholder; a non-200 JSON-ish body is degraded.
         if isin and isin in (marker or ""):
             return "real"
         if "html" in ct:
             return "placeholder"
+        if code == "200" and ("json" in ct or m[:1] in ("{", "[")):
+            return "real"
         if "json" in ct or m[:1] in ("{", "["):
             return "degraded"
         return "degraded"
@@ -316,10 +328,15 @@ def _parse_probe_output(text: str) -> dict[str, tuple[str, str, str, str]]:
 
 
 async def probe_server(
-    server, targets: list[Target], *, script_timeout: float = 25.0,
+    server, targets: list[Target], *, script_timeout: float = 20.0,
     curl_timeout: int = 6,
 ) -> list[dict]:
-    """Probe every (non-host-local) target FROM ``server`` in one SSH round-trip."""
+    """Probe every (non-host-local) target FROM ``server`` in one SSH round-trip.
+
+    A transient SSH failure (cold pool / "Channel closed" right after a restart)
+    is retried ONCE after a short pause before the whole server is declared down,
+    so a one-off blip doesn't paint a healthy host's entire column red.
+    """
     skipped = [
         _result(t, "skipped", detail="host-local (per-bot)")
         for t in targets if t.host_local
@@ -331,13 +348,22 @@ async def probe_server(
     script = build_probe_script(remote, curl_timeout)
     b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
     cmd = "echo " + shlex.quote(b64) + " | base64 -d | sh"
-    try:
-        res = await run_command(server, cmd, timeout=script_timeout)
-    except Exception as exc:  # noqa: BLE001 — any SSH failure → all-down for this host
+    res = None
+    last_exc: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            res = await run_command(server, cmd, timeout=script_timeout)
+            last_exc = None
+            break
+        except Exception as exc:  # noqa: BLE001 — retry once, then all-down
+            last_exc = exc
+            if attempt == 0:
+                await asyncio.sleep(_SSH_RETRY_DELAY)
+    if last_exc is not None or res is None:
         return (
             skipped
             + [_result(t, "down", detail="host unreachable (ssh)") for t in remote]
-            + [_ssh_meta("down", str(exc)[:120])]
+            + [_ssh_meta("down", str(last_exc)[:120] if last_exc else "no response")]
         )
 
     parsed = _parse_probe_output(res.stdout)
@@ -413,7 +439,7 @@ async def record_results(
 
 
 async def probe_all_once(
-    db: AsyncSession, *, concurrency: int = 4, per_server_timeout: float = 35.0,
+    db: AsyncSession, *, concurrency: int = 6, per_server_timeout: float = 50.0,
 ) -> int:
     """One unauthenticated tick: probe every server concurrently, upsert results.
 
