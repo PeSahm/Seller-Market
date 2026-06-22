@@ -394,6 +394,7 @@ async def admin_server_detail(
     request: Request,
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
+    delete_error: Optional[str] = None,
 ):
     """Render the per-server detail page with the last 10 clock-skew samples."""
     server = await services_servers.get_server(db, server_id)
@@ -414,6 +415,7 @@ async def admin_server_detail(
     ctx = _ctx(request, user, current_tab="/admin/servers")
     ctx["server"] = server
     ctx["clock_skew_samples"] = skew_samples
+    ctx["delete_error"] = delete_error
     return templates.TemplateResponse("admin/server_detail.html", ctx)
 
 
@@ -463,6 +465,16 @@ async def admin_server_delete(
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except services_servers.ServerInUseError as exc:
+        # Still has customers/stacks — show a clear message, not a 500.
+        from urllib.parse import quote
+
+        target = f"/admin/servers/{server_id}?delete_error={quote(str(exc))}"
+        if request.headers.get("HX-Request"):
+            return Response(status_code=204, headers={"HX-Redirect": target})
+        return Response(
+            status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target}
+        )
 
     redirect_to = "/admin/servers"
     if request.headers.get("HX-Request"):

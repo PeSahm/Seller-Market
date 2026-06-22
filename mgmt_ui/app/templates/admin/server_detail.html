@@ -23,6 +23,12 @@
   </div>
 </div>
 
+{% if delete_error %}
+<div class="flash flash--error" role="alert" style="margin-bottom:12px;">
+  <strong>Can't delete this server.</strong> {{ delete_error }}
+</div>
+{% endif %}
+
 <div id="test-result" class="test-result-slot"></div>
 <div id="test-spinner" class="htmx-indicator text-small text-muted">Testing…</div>
 

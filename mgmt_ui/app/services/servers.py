@@ -45,11 +45,13 @@ from pathlib import Path
 from typing import Optional, Union
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditLog
+from app.models.customers import Customer, DistributionPolicy
 from app.models.servers import Server, ServerClockSkewSample
+from app.models.stacks import AgentStack
 from app.schemas.server import (
     ServerCreatePassword,
     ServerCreatePubkey,
@@ -407,6 +409,11 @@ async def update_server(
 # ---------------------------------------------------------------------------
 
 
+class ServerInUseError(Exception):
+    """A server still has customers or bot stacks placed on it, so it can't be
+    deleted (the FKs are ``ON DELETE RESTRICT``). Move/remove those first."""
+
+
 async def soft_delete_server(
     db: AsyncSession,
     server_id: UUID,
@@ -414,18 +421,57 @@ async def soft_delete_server(
 ) -> None:
     """Hard-delete a server (Phase 2 scope — see module-level TODO).
 
-    Removes the on-disk key file (if pubkey auth) before deleting the row.
-    The order matters: if the row delete fails, the key file is still gone,
-    but the row's reference would be stale anyway. If we did it the other
-    way and the file delete failed, the row would point at a missing file.
+    Four tables FK ``servers.id`` with ``ON DELETE RESTRICT``:
+    ``customers`` + ``agent_stacks`` are real data — if any still reference this
+    server we REFUSE with :class:`ServerInUseError` (the operator must move them
+    first) rather than let the DB raise an opaque IntegrityError → HTTP 500.
+    ``server_clock_skew_samples`` (telemetry) + ``distribution_policies.
+    default_server_id`` (a soft pointer) would ALSO block the delete even after
+    customers/stacks are gone, so we clear them first: the samples are deleted,
+    the policy pointer is nulled. Then the row is deleted and the key file (if
+    pubkey auth) removed.
     """
     server = await get_server(db, server_id)
     if server is None:
         # Idempotent: deleting a non-existent server is a no-op.
         return
 
+    # Block on real data (RESTRICT) — a clear error, not a 500.
+    n_customers = (
+        await db.execute(
+            select(func.count()).select_from(Customer).where(
+                Customer.server_id == server_id
+            )
+        )
+    ).scalar() or 0
+    n_stacks = (
+        await db.execute(
+            select(func.count()).select_from(AgentStack).where(
+                AgentStack.server_id == server_id
+            )
+        )
+    ).scalar() or 0
+    if n_customers or n_stacks:
+        raise ServerInUseError(
+            f"server still has {n_customers} customer(s) and {n_stacks} bot "
+            f"stack(s) on it — move or remove them before deleting the server."
+        )
+
     before = _public_snapshot(server)
     is_pubkey = server.ssh_auth == "pubkey"
+
+    # Clear the blocking soft references (telemetry samples + the policy pointer)
+    # so the RESTRICT FKs don't reject the delete.
+    await db.execute(
+        delete(ServerClockSkewSample).where(
+            ServerClockSkewSample.server_id == server_id
+        )
+    )
+    await db.execute(
+        update(DistributionPolicy)
+        .where(DistributionPolicy.default_server_id == server_id)
+        .values(default_server_id=None)
+    )
 
     await _write_audit(
         db,
@@ -759,6 +805,7 @@ def _first_line(s: str) -> str:
 # call site even though we currently don't double-encode. Kept so a reviewer
 # notices if we ever start storing raw bytes instead of ASCII.
 __all__ = [
+    "ServerInUseError",
     "create_server",
     "get_server",
     "list_servers",
