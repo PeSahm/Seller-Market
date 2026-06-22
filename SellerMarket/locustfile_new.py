@@ -27,6 +27,7 @@ from api_client import EphoenixAPIClient
 from order_tracker import OrderResultTracker, OrderResult
 from cache_manager import TradingCache
 from captcha_utils import decode_captcha
+from cred_errors import InvalidCredentialsError
 
 # Configure logging — archive the PREVIOUS run's log (gzipped, complete) to
 # logs/ then truncate in place. Blind truncation destroyed the morning run's
@@ -317,6 +318,11 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
     try:
         token = api_client.authenticate()
         logger.info("✓ Authentication successful")
+    except InvalidCredentialsError:
+        # Broker positively rejected the password — re-raise silently; the
+        # section loop in _create_user_classes turns this into a clean "skip"
+        # (no scary ERROR, no 100-retry storm).
+        raise
     except Exception as e:
         logger.error(f"❌ Authentication failed for {username}@{broker_code}: {e}")
         if broker_code == 'gs':
@@ -863,10 +869,18 @@ def _create_user_classes():
             user_classes.append(unique_class_name)
             
             logger.info(f"✓ Configured trading user: {unique_class_name}")
-            
+
+        except InvalidCredentialsError:
+            # Broker rejected this account's credentials — skip it (the other
+            # sections on this stack still trade). Mirrors the auto-sell-only
+            # skip; no traceback, this is an expected, recoverable state.
+            logger.warning(
+                f"⚠ skipping {section_name}: invalid credentials "
+                "(broker rejected username/password)"
+            )
         except Exception:
             logger.exception(f"✗ Failed to configure {section_name}")
-    
+
     return user_classes
 
 # Create all user classes

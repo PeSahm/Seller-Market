@@ -43,6 +43,7 @@ import rlc_price
 import runtime_config
 from broker_adapters import BrokerAdapter, PreparedOrder, SellContext
 from captcha_utils import decode_captcha as _default_decode_captcha
+from cred_errors import InvalidCredentialsError, exir_login_is_invalid_credentials
 from exir_token import build_app_n, make_signer, pw_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,14 @@ class ExirAdapter(BrokerAdapter):
                 )
                 return descriptor
 
+            # High-confidence wrong-password reject → skip the account (don't
+            # burn the captcha-retry budget). Conservative: the marker tuple is
+            # empty until a live probe captures it, so today this never fires.
+            description = login_json.get("description") or login_json.get("message")
+            if exir_login_is_invalid_credentials(description):
+                raise InvalidCredentialsError(
+                    f"exir rejected credentials for {self.username}@{self.broker_code}"
+                )
             logger.debug(
                 f"exir login attempt {attempt}: HTTP {rl.status_code}, no `nt` in response"
             )

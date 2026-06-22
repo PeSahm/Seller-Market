@@ -28,6 +28,7 @@ from broker_enum import get_endpoints_for
 from api_client import EphoenixAPIClient
 from cache_manager import TradingCache
 from captcha_utils import decode_captcha
+from cred_errors import InvalidCredentialsError
 from runtime_config import drop_non_customer_sections
 
 # Configure logging — archive the previous warmup's log (gzipped) to logs/
@@ -87,6 +88,12 @@ def _warmup_exir(config_section: Dict[str, str], cache: TradingCache) -> bool:
         )
         logger.info(f"\n✓✓✓ Exir warmup successful for {username}@{broker_code} ✓✓✓\n")
         return True
+    except InvalidCredentialsError:
+        logger.warning(
+            f"⚠ SKIP — invalid credentials for {username}@{broker_code} "
+            "(broker rejected username/password)"
+        )
+        return False
     except Exception as e:
         logger.error(f"❌ Exir warmup failed for {username}@{broker_code}: {e}")
         return False
@@ -151,6 +158,14 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
         try:
             api_client.authenticate()
             logger.info("✓ Token cached (expires in 2 hours)")
+        except InvalidCredentialsError:
+            # Broker positively rejected the username/password — skip this
+            # account (fast: no 100-retry storm) rather than failing late.
+            logger.warning(
+                f"⚠ SKIP — invalid credentials for {username}@{broker_code} "
+                "(broker rejected username/password)"
+            )
+            return False
         except Exception as e:
             logger.error(f"❌ Authentication failed for {username}@{broker_code}: {e}")
             if broker_code == 'gs':
