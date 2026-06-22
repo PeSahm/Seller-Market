@@ -40,6 +40,7 @@ from typing import Any, Callable, Optional
 import requests
 
 import rlc_price
+import runtime_config
 from broker_adapters import BrokerAdapter, PreparedOrder, SellContext
 from captcha_utils import decode_captcha as _default_decode_captcha
 from exir_token import build_app_n, make_signer, pw_fingerprint
@@ -128,7 +129,16 @@ class ExirAdapter(BrokerAdapter):
         # Allow injection for tests; default to the shared OCR helper.
         self.captcha_decoder = captcha_decoder or _default_decode_captcha
         self.cache = cache  # unused for exir (no shared cache schema), kept for signature parity
-        self.base = f"https://{broker_code}.exirbroker.com"
+        # Domain + API paths come from the DB-pushed [runtime] section (fallback =
+        # the historical literal) so they can be redirected fleet-wide with NO
+        # image rebuild. Read at construction — the adapter is rebuilt per run and
+        # per auto-sell trigger, so this is effectively call-time.
+        self.base = f"https://{broker_code}.{runtime_config.get('exir_domain', 'exirbroker.com')}"
+
+    @staticmethod
+    def _path(name: str, default: str) -> str:
+        """An Exir API path from [runtime] (``exir_path_<name>``), else default."""
+        return runtime_config.get(f"exir_path_{name}", default)
 
     # ---- auth / session ---------------------------------------------------
 
@@ -142,11 +152,11 @@ class ExirAdapter(BrokerAdapter):
         ``RuntimeError`` if captcha/login never succeeds.
         """
         # Step 1: cookie bootstrap.
-        session.get(self.base + "/exir", timeout=TIMEOUT)
+        session.get(self.base + self._path("cookie", "/exir"), timeout=TIMEOUT)
 
         # Step 2 + 3: captcha → OCR → login, retried.
         for attempt in range(1, CAPTCHA_RETRIES + 1):
-            rc = session.get(self.base + "/captcha", timeout=TIMEOUT)
+            rc = session.get(self.base + self._path("captcha", "/captcha"), timeout=TIMEOUT)
             client_login_id = rc.headers.get("client_login_id")
             if client_login_id:
                 session.cookies.set("client_login_id", client_login_id)
@@ -166,7 +176,7 @@ class ExirAdapter(BrokerAdapter):
                 "otp": "",
             }
             rl = session.post(
-                self.base + "/api/v2/login",
+                self.base + self._path("login", "/api/v2/login"),
                 json=login_body,
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 timeout=TIMEOUT,
@@ -248,7 +258,7 @@ class ExirAdapter(BrokerAdapter):
         is the account-credit endpoint the web app uses and carries the same
         ``purchaseUpperBound`` the decompiled ``GetBalance`` read.)
         """
-        data = self._get("/api/v1/user/stockInfo", descriptor)
+        data = self._get(self._path("stockinfo", "/api/v1/user/stockInfo"), descriptor)
         return float(data.get("purchaseUpperBound") or 0)
 
     def _buy_fee_rate(self, isin: str, descriptor: dict) -> Optional[float]:
@@ -265,7 +275,8 @@ class ExirAdapter(BrokerAdapter):
         no fee headroom → value + fee exceeded buying power → broker rejection;
         observed live by the operator.)
         """
-        data = self._get(f"/api/v2/wages/instrument/{isin}", descriptor)
+        wages_path = self._path("wages", "/api/v2/wages/instrument/{isin}").replace("{isin}", isin)
+        data = self._get(wages_path, descriptor)
         entry = (data or {}).get(isin) or {}
         raw = entry.get("SIDE_BUY")
         try:
@@ -276,7 +287,7 @@ class ExirAdapter(BrokerAdapter):
 
     def _holdings(self, isin: str, descriptor: dict) -> int:
         """Whole-share holdings for ``isin`` via ``GET /api/v1/user/portfoReport``."""
-        data = self._get("/api/v1/user/portfoReport", descriptor)
+        data = self._get(self._path("portfolio", "/api/v1/user/portfoReport"), descriptor)
         rows = data.get("result") or []
         for row in rows:
             code = row.get("insMaxLcode") or row.get("insMaxLCode")
@@ -314,12 +325,14 @@ class ExirAdapter(BrokerAdapter):
                 bp = self._buying_power(descriptor)
                 fee = self._buy_fee_rate(isin, descriptor)
                 if not fee or fee <= 0:
+                    fallback_fee = runtime_config.get_float(
+                        "exir_fallback_buy_fee", EXIR_FALLBACK_BUY_FEE)
                     logger.warning(
                         f"exir {isin} ({self.username}@{self.broker_code}): buy fee "
                         f"unavailable from wages endpoint — using conservative "
-                        f"fallback {EXIR_FALLBACK_BUY_FEE}"
+                        f"fallback {fallback_fee}"
                     )
-                    fee = EXIR_FALLBACK_BUY_FEE
+                    fee = fallback_fee
                 # floor(BP / (price * (1 + buyFee))) — mirrors the ephoenix
                 # CalculateOrderParam fee-adjustment so the order can't over-spend
                 # the buying power (which the broker would reject).
@@ -384,10 +397,11 @@ class ExirAdapter(BrokerAdapter):
                 "coreType": "c",
             })
 
-            signer = make_signer(descriptor["nt"], "/api/v1/order")
+            order_path = self._path("order", "/api/v1/order")
+            signer = make_signer(descriptor["nt"], order_path)
 
             return PreparedOrder(
-                order_url=self.base + "/api/v1/order",
+                order_url=self.base + order_path,
                 body=body,
                 bearer_token=None,
                 signer=signer,
@@ -457,11 +471,12 @@ class ExirAdapter(BrokerAdapter):
                 "validityType": "VALIDITY_TYPE_DAY",
                 "coreType": "c",
             })
+            order_path = self._path("order", "/api/v1/order")
             return PreparedOrder(
-                order_url=self.base + "/api/v1/order",
+                order_url=self.base + order_path,
                 body=body,
                 bearer_token=None,
-                signer=make_signer(d["nt"], "/api/v1/order"),
+                signer=make_signer(d["nt"], order_path),
                 cookies=d["cookies"],
                 price=floor,
                 volume=int(volume),

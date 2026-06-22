@@ -81,8 +81,127 @@
     </p>
   </div>
 
+  <h2 class="h2" style="margin-top:28px;">Bot runtime / endpoints</h2>
+  <p class="text-small text-muted">
+    Values that used to be <strong>hardcoded in the bot image</strong> — broker /
+    market-data hosts, the exir buy-fee fallback, the auto-sell timing. Editing one
+    here renders it into every stack's <code>config.ini</code> <code>[runtime]</code>
+    section and <strong>pushes it to all stacks in seconds</strong> on Save — no CI,
+    no image rebuild, no container recreate. Each default equals the bot's current
+    built-in value, so nothing changes until you edit it.
+    <strong>Requires the runtime-aware bot image fleet-wide</strong> (older images
+    ignore <code>[runtime]</code> and keep their built-ins).
+  </p>
+
+  <div class="field">
+    <label class="label" for="bot_rt_ephoenix_md_host">ephoenix market-data host</label>
+    <input class="input" id="bot_rt_ephoenix_md_host" name="bot_rt_ephoenix_md_host"
+           value="{{ settings_values.bot_rt_ephoenix_md_host }}" maxlength="255" required>
+    <p class="text-small text-muted">
+      The host serving <code>/api/v2/instruments/full</code> for ephoenix brokers —
+      becomes <code>https://&lt;host&gt;.&lt;ephoenix domain&gt;/…</code>. <strong>This is
+      the field to change when the market-data host moves</strong> (the
+      <code>mdapi1 → marketdatagw</code> incident).
+    </p>
+  </div>
+
+  <div class="field">
+    <label class="label" for="bot_rt_ephoenix_domain">ephoenix domain</label>
+    <input class="input" id="bot_rt_ephoenix_domain" name="bot_rt_ephoenix_domain"
+           value="{{ settings_values.bot_rt_ephoenix_domain }}" maxlength="255" required>
+    <p class="text-small text-muted">Base domain for ephoenix-family brokers
+      (<code>api-&lt;broker&gt;.&lt;domain&gt;</code>, identity, backoffice, …).</p>
+  </div>
+
+  <div class="field-row">
+    <div class="field field--narrow">
+      <label class="label" for="bot_rt_ib_domain">ib domain</label>
+      <input class="input" id="bot_rt_ib_domain" name="bot_rt_ib_domain"
+             value="{{ settings_values.bot_rt_ib_domain }}" maxlength="255" required>
+    </div>
+    <div class="field field--narrow">
+      <label class="label" for="bot_rt_ib_md_host">ib market-data host</label>
+      <input class="input" id="bot_rt_ib_md_host" name="bot_rt_ib_md_host"
+             value="{{ settings_values.bot_rt_ib_md_host }}" maxlength="255" required>
+    </div>
+    <div class="field field--narrow">
+      <label class="label" for="bot_rt_ib_portfolio_shard">ib portfolio shard</label>
+      <input class="input" id="bot_rt_ib_portfolio_shard" name="bot_rt_ib_portfolio_shard"
+             value="{{ settings_values.bot_rt_ib_portfolio_shard }}" maxlength="255" required>
+    </div>
+  </div>
+
+  <div class="field-row">
+    <div class="field field--narrow">
+      <label class="label" for="bot_rt_exir_domain">exir domain</label>
+      <input class="input" id="bot_rt_exir_domain" name="bot_rt_exir_domain"
+             value="{{ settings_values.bot_rt_exir_domain }}" maxlength="255" required>
+    </div>
+    <div class="field field--narrow">
+      <label class="label" for="bot_rt_exir_fallback_buy_fee">exir fallback buy fee</label>
+      <input class="input" id="bot_rt_exir_fallback_buy_fee" name="bot_rt_exir_fallback_buy_fee"
+             type="number" step="0.0001" min="0.0001" max="0.0999"
+             value="{{ settings_values.bot_rt_exir_fallback_buy_fee }}" required>
+    </div>
+  </div>
+
+  <div class="field-row">
+    <div class="field field--narrow">
+      <label class="label" for="bot_rt_auto_sell_window">auto-sell window</label>
+      <input class="input" id="bot_rt_auto_sell_window" name="bot_rt_auto_sell_window"
+             value="{{ settings_values.bot_rt_auto_sell_window }}"
+             placeholder="09:00-12:30" maxlength="32" required>
+      <p class="text-small text-muted">Market-hours gate (HH:MM-HH:MM); hot-reloads.</p>
+    </div>
+    <div class="field field--narrow">
+      <label class="label" for="bot_rt_auto_sell_confirm_secs">auto-sell confirm secs</label>
+      <input class="input" id="bot_rt_auto_sell_confirm_secs" name="bot_rt_auto_sell_confirm_secs"
+             type="number" step="1" min="0"
+             value="{{ settings_values.bot_rt_auto_sell_confirm_secs }}" required>
+      <p class="text-small text-muted">Seconds the buy-queue must stay ≤ threshold
+        before a sell fires; hot-reloads.</p>
+    </div>
+  </div>
+
+  <details style="margin-top:8px;">
+    <summary class="text-small">Advanced runtime overrides (escape hatch)</summary>
+    <div class="field" style="margin-top:8px;">
+      <textarea class="input input--wide" id="bot_rt_advanced" name="bot_rt_advanced"
+                rows="5" spellcheck="false"
+                placeholder="bot_rt_endpoint_ib_order = https://…/api/v3/place&#10;bot_rt_rlc_base_url = https://core.tadbirrlc.com//StockInformationHandler">{{ advanced_runtime_text }}</textarea>
+      <p class="text-small text-muted">
+        One <code>bot_rt_&lt;key&gt; = value</code> per line for the rare case a
+        single API path moves. Supported keys the bot reads: full-URL endpoint
+        overrides <code>bot_rt_endpoint_&lt;broker&gt;_&lt;name&gt;</code> (e.g.
+        <code>bot_rt_endpoint_ib_order</code>), exir paths
+        <code>bot_rt_exir_path_&lt;name&gt;</code>, RLC <code>bot_rt_rlc_base_url</code> /
+        <code>bot_rt_rlc_market_host</code> / <code>bot_rt_rlc_path_*</code> /
+        <code>bot_rt_rlc_ws_scheme</code> / <code>bot_rt_rlc_ws_path</code>.
+        Remove a line to clear that override (the bot falls back to its built-in).
+      </p>
+    </div>
+  </details>
+
   <div class="form-actions">
     <button class="btn btn--primary" type="submit">Save</button>
   </div>
 </form>
+
+<h2 class="h2" style="margin-top:28px;">Fleet config.ini push</h2>
+<p class="text-small text-muted">
+  Saving a runtime value above pushes it to every stack automatically. Use this to
+  re-push on demand (e.g. after a host that was down comes back).
+</p>
+<form method="post" action="/admin/settings/push-all" style="margin-bottom:12px;">
+  {% include "partials/csrf.html" %}
+  <button class="btn" type="submit">Push config.ini to all stacks</button>
+</form>
+
+{% if pushing_run_id %}
+<div id="fleet-push-status"
+     hx-get="/admin/settings/push-status/{{ pushing_run_id }}"
+     hx-trigger="load" hx-swap="outerHTML"></div>
+{% else %}
+<div id="fleet-push-status"></div>
+{% endif %}
 {% endblock %}

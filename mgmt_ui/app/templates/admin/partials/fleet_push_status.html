@@ -1,0 +1,57 @@
+{# Live per-stack result of a fleet config.ini push. While in progress the root
+   re-requests itself every 1.5s; once finished it swaps to a static result so
+   polling stops. #}
+<div id="fleet-push-status"
+     {% if fleet_in_progress %}hx-get="/admin/settings/push-status/{{ run_id }}"
+     hx-trigger="every 1500ms" hx-swap="outerHTML"{% endif %}>
+{% if fleet_missing %}
+  {# nothing to show (server restarted / unknown run) #}
+{% elif fleet_in_progress %}
+  <div class="flash">
+    <strong>⏳ Pushing config.ini to all stacks…</strong>
+    <p class="text-small text-muted">This updates every stack with the new
+      runtime settings. The list appears here when it finishes.</p>
+  </div>
+{% elif fleet_result %}
+  {% set r = fleet_result %}
+  <div class="flash {% if r.failed == 0 %}flash--success{% else %}flash--error{% endif %}">
+    <strong>
+      {% if r.failed == 0 %}✓{% else %}⚠{% endif %}
+      Pushed {{ r.succeeded }}/{{ r.total }} stacks
+      {% if r.failed %} — {{ r.failed }} failed{% endif %}
+    </strong>
+    {% if r.failed %}
+    <form method="post" action="/admin/settings/push-all" style="display:inline; margin-left:8px;">
+      {% include "partials/csrf.html" %}
+      <input type="hidden" name="retry_run_id" value="{{ run_id }}">
+      <button class="btn btn--ghost" type="submit">Retry failed</button>
+    </form>
+    {% endif %}
+  </div>
+  <div class="table-scroll">
+    <table class="table">
+      <thead>
+        <tr><th>Server</th><th>Agent</th><th>Status</th><th>Detail</th></tr>
+      </thead>
+      <tbody>
+        {% for it in r.items %}
+        <tr>
+          <td>{{ it.server_name }}</td>
+          <td><code class="text-small">{{ it.agent_id|string|truncate(8, true, "") }}</code></td>
+          <td>
+            {% if it.status == "pushed" %}
+              <span class="badge badge--up">pushed</span>
+            {% elif it.status in ("host_down", "lock_busy") %}
+              <span class="badge badge--pending">{{ it.status }}</span>
+            {% else %}
+              <span class="badge badge--down">{{ it.status }}</span>
+            {% endif %}
+          </td>
+          <td class="text-small text-muted">{{ it.message }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+</div>

@@ -230,6 +230,20 @@ class TestOCRFailover:
         finally:
             captcha_utils.OCR_SERVICE_URL = orig
 
+    def test_runtime_overrides_ocr_url(self, monkeypatch):
+        # The DB-pushed [runtime] ocr_service_url wins over the env-baked module
+        # constant, so the OCR pool can be changed fleet-wide with no redeploy.
+        import captcha_utils
+        import runtime_config
+        monkeypatch.setattr(runtime_config, "_snapshot",
+                            lambda: {"ocr_service_url": "http://rt:9, http://rt2:9"})
+        orig = captcha_utils.OCR_SERVICE_URL
+        try:
+            captcha_utils.OCR_SERVICE_URL = "http://env-only:8080"
+            assert captcha_utils._ocr_base_urls() == ["http://rt:9", "http://rt2:9"]
+        finally:
+            captcha_utils.OCR_SERVICE_URL = orig
+
     @patch('requests.post')
     def test_single_url_calls_once(self, mock_post):
         """A single URL behaves exactly as before — one POST."""

@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.settings_page import SettingsUpdate
+from app.schemas.settings_page import SettingsUpdate, parse_advanced_runtime
 
 
 def _base(**over):
@@ -75,3 +75,78 @@ def test_bot_market_data_url_rejects_bad_scheme():
 def test_bot_market_data_url_rejects_missing_host():
     with pytest.raises(ValidationError):
         SettingsUpdate(**_base(bot_market_data_url="http://"))
+
+
+# --- bot_rt_* runtime / endpoint fields (disaster set) -----------------------
+
+
+def test_bot_rt_defaults_match_hardcoded():
+    s = SettingsUpdate(**_base())
+    assert s.bot_rt_ephoenix_domain == "ephoenix.ir"
+    assert s.bot_rt_ephoenix_md_host == "marketdatagw"
+    assert s.bot_rt_ib_domain == "ibtrader.ir"
+    assert s.bot_rt_ib_portfolio_shard == "api8"
+    assert s.bot_rt_exir_domain == "exirbroker.com"
+    assert s.bot_rt_auto_sell_window == "09:00-12:30"
+
+
+def test_bot_rt_md_host_override():
+    s = SettingsUpdate(**_base(bot_rt_ephoenix_md_host="newmdgw"))
+    assert s.bot_rt_ephoenix_md_host == "newmdgw"
+
+
+def test_bot_rt_host_rejects_percent_and_space():
+    # % would break the bot's interpolating ConfigParser; whitespace is invalid.
+    with pytest.raises(ValidationError):
+        SettingsUpdate(**_base(bot_rt_ephoenix_domain="ephoenix.ir%"))
+    with pytest.raises(ValidationError):
+        SettingsUpdate(**_base(bot_rt_ephoenix_domain="ephoenix .ir"))
+    with pytest.raises(ValidationError):
+        SettingsUpdate(**_base(bot_rt_ephoenix_md_host="  "))
+
+
+def test_bot_rt_window_format():
+    assert SettingsUpdate(**_base(bot_rt_auto_sell_window="13:00-14:30")).bot_rt_auto_sell_window == "13:00-14:30"
+    with pytest.raises(ValidationError):
+        SettingsUpdate(**_base(bot_rt_auto_sell_window="notawindow"))
+
+
+def test_bot_rt_fee_bounds():
+    assert SettingsUpdate(**_base(bot_rt_exir_fallback_buy_fee=0.01)).bot_rt_exir_fallback_buy_fee == 0.01
+    with pytest.raises(ValidationError):
+        SettingsUpdate(**_base(bot_rt_exir_fallback_buy_fee=0))     # gt=0
+    with pytest.raises(ValidationError):
+        SettingsUpdate(**_base(bot_rt_exir_fallback_buy_fee=0.5))   # lt=0.1
+
+
+# --- Advanced raw editor (escape hatch) --------------------------------------
+
+
+def test_parse_advanced_runtime_ok():
+    out = parse_advanced_runtime(
+        "bot_rt_endpoint_ib_order = https://x/y\n"
+        "# a comment\n"
+        "\n"
+        "bot_rt_rlc_base_url=https://core//H"
+    )
+    assert out == {
+        "bot_rt_endpoint_ib_order": "https://x/y",
+        "bot_rt_rlc_base_url": "https://core//H",
+    }
+
+
+def test_parse_advanced_runtime_empty():
+    assert parse_advanced_runtime("") == {}
+    assert parse_advanced_runtime("   \n# only a comment\n") == {}
+
+
+def test_parse_advanced_runtime_rejects_non_bot_rt_key():
+    with pytest.raises(ValueError):
+        parse_advanced_runtime("evil_key = x")
+
+
+def test_parse_advanced_runtime_rejects_malformed_key():
+    with pytest.raises(ValueError):
+        parse_advanced_runtime("bot_rt_BAD UPPER = x")
+    with pytest.raises(ValueError):
+        parse_advanced_runtime("no_equals_sign")

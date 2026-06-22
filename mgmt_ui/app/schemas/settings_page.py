@@ -8,6 +8,7 @@ every field server-side.
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator
@@ -16,6 +17,40 @@ from pydantic import BaseModel, Field, field_validator
 # tag (it ends up interpolated into a docker-compose.yml literal). This isn't
 # a full Docker reference parser — we just reject the obvious foot-guns.
 _FORBIDDEN_TAG_CHARS = frozenset(" \t;&|$`<>\"'\\")
+
+# Host/domain tokens for the bot ``[runtime]`` overrides. ``%`` is rejected
+# because the value is rendered into config.ini, which the bot's auto-sell
+# monitor reads with an INTERPOLATING ConfigParser (a lone ``%`` would raise).
+_FORBIDDEN_HOSTISH_CHARS = frozenset(" \t;&|$`<>\"'\\%/")
+_WINDOW_RE = re.compile(r"^\d{1,2}:\d{2}-\d{1,2}:\d{2}$")
+# Advanced editor keys: a strict allowlist (prefix-scoped) so the raw textarea
+# can never write an arbitrary settings row.
+_BOT_RT_KEY_RE = re.compile(r"^bot_rt_[a-z0-9_]+$")
+
+
+def parse_advanced_runtime(text: str) -> dict[str, str]:
+    """Parse the Advanced [runtime] editor (``bot_rt_<key> = <value>`` lines).
+
+    Blank lines and ``#`` comments are ignored. Returns ``{setting_key: value}``.
+    Raises ``ValueError`` on a malformed line or a key outside the ``bot_rt_``
+    allowlist (so the raw editor can never write an unrelated settings row).
+    """
+    out: dict[str, str] = {}
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise ValueError(f"invalid line (expected 'key = value'): {line!r}")
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not _BOT_RT_KEY_RE.match(key):
+            raise ValueError(
+                f"invalid runtime key {key!r} (must match bot_rt_<name>, "
+                "lowercase letters/digits/underscores)"
+            )
+        out[key] = value.strip()
+    return out
 
 
 class SettingsUpdate(BaseModel):
@@ -37,6 +72,20 @@ class SettingsUpdate(BaseModel):
     # comma/space-separated FAILOVER pool (the bot tries them in order, preferring
     # the first) so a sidecar outage needs no redeploy.
     bot_market_data_url: str = Field(default="", max_length=512)
+
+    # --- Bot runtime / endpoints (DB-pushed [runtime], disaster set) -------
+    # Every default equals the bot's current hardcoded literal, so behaviour is
+    # unchanged until edited. Stored as bot_rt_<suffix> rows; rendered into the
+    # bot's config.ini [runtime] section and pushed fleet-wide instantly.
+    bot_rt_ephoenix_domain: str = Field(default="ephoenix.ir", max_length=255)
+    bot_rt_ephoenix_md_host: str = Field(default="marketdatagw", max_length=255)
+    bot_rt_ib_domain: str = Field(default="ibtrader.ir", max_length=255)
+    bot_rt_ib_md_host: str = Field(default="mdapi", max_length=255)
+    bot_rt_ib_portfolio_shard: str = Field(default="api8", max_length=255)
+    bot_rt_exir_domain: str = Field(default="exirbroker.com", max_length=255)
+    bot_rt_exir_fallback_buy_fee: float = Field(default=0.005, gt=0, lt=0.1)
+    bot_rt_auto_sell_window: str = Field(default="09:00-12:30", max_length=32)
+    bot_rt_auto_sell_confirm_secs: float = Field(default=5.0, ge=0)
 
     @field_validator("ocr_service_url")
     @classmethod
@@ -84,4 +133,25 @@ class SettingsUpdate(BaseModel):
             raise ValueError("agent_image_tag is required")
         if any(c.isspace() or c in _FORBIDDEN_TAG_CHARS for c in v):
             raise ValueError("agent_image_tag contains invalid characters")
+        return v
+
+    @field_validator(
+        "bot_rt_ephoenix_domain", "bot_rt_ephoenix_md_host", "bot_rt_ib_domain",
+        "bot_rt_ib_md_host", "bot_rt_ib_portfolio_shard", "bot_rt_exir_domain",
+    )
+    @classmethod
+    def _check_hostish(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("must not be empty")
+        if any(c.isspace() or c in _FORBIDDEN_HOSTISH_CHARS for c in v):
+            raise ValueError("contains invalid characters")
+        return v
+
+    @field_validator("bot_rt_auto_sell_window")
+    @classmethod
+    def _check_window(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not _WINDOW_RE.match(v):
+            raise ValueError("window must look like HH:MM-HH:MM")
         return v

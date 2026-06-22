@@ -73,6 +73,17 @@ def test_last_price_bad_payload_zero(monkeypatch):
     assert rlc_market.get_last_price("IRO1SROD0001") == 0
 
 
+def test_market_host_runtime_override(monkeypatch):
+    # The RLC market-data host is redirectable fleet-wide via [runtime].
+    import runtime_config
+    monkeypatch.setattr(runtime_config, "_snapshot",
+                        lambda: {"rlc_market_host": "https://core2.example/"})
+    calls = []
+    _patch(monkeypatch, [{"nc": "IRO1SROD0001", "ltp": 9930}], capture=calls)
+    rlc_market.get_last_price("IRO1SROD0001")
+    assert calls and calls[0].startswith("https://core2.example//StockInformationHandler?")
+
+
 # ---------------------------------------------------------------------------
 # instruments + search
 # ---------------------------------------------------------------------------

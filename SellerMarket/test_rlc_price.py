@@ -61,6 +61,15 @@ def test_build_url_encodes_arr_and_handler():
     assert url.endswith("&jsoncallback=")
 
 
+def test_build_url_runtime_override(monkeypatch):
+    # The RLC base URL is redirectable fleet-wide via [runtime] with no rebuild.
+    import runtime_config
+    monkeypatch.setattr(runtime_config, "_snapshot",
+                        lambda: {"rlc_base_url": "https://core2.example//Handler"})
+    url = rlc_price._build_url(["IRO1SROD0001"])
+    assert url.startswith("https://core2.example//Handler?")
+
+
 def test_parse_rows_maps_ceiling_floor_maxqty():
     out = rlc_price._parse_rows([_ROW_SROD, _ROW_SMBZ])
     assert out["IRO1SROD0001"] == (9930, 9370, 200000)

@@ -19,7 +19,7 @@ from pathlib import Path
 from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -44,7 +44,7 @@ from app.schemas.trade_instruction import (
 from app.schemas.locust import LocustUpsert
 from app.schemas.scheduler import SchedulerJobUpsert
 from app.schemas.server import ServerCreatePassword, ServerCreatePubkey
-from app.schemas.settings_page import SettingsUpdate
+from app.schemas.settings_page import SettingsUpdate, parse_advanced_runtime
 from app.security.deps import require_admin
 from app.services import agents as services_agents
 from app.services import audit as services_audit
@@ -2928,17 +2928,86 @@ async def admin_stack_locust_save(
     return _flash_redirect(request, f"/admin/stacks/{stack_id}/locust")
 
 
+# --- Fleet config.ini push (instant [runtime] propagation) -----------------
+# The bot's runtime overrides live in config.ini's [runtime] section; saving a
+# runtime setting pushes the freshly-rendered config.ini to EVERY stack in the
+# background (SFTP, no recreate) so a disaster change lands fleet-wide in
+# seconds. The result is parked on app.state keyed by a run id; the settings
+# page HTMX-polls /settings/push-status/{run_id} for a live per-stack table.
+
+# The bot_rt_* fields that have a dedicated, validated form input (the disaster
+# set). Any OTHER bot_rt_* row is an Advanced (escape-hatch) override.
+_BOT_RT_FIRST_CLASS = tuple(
+    k for k in SettingsUpdate.model_fields if k.startswith("bot_rt_")
+)
+# Saving any of these (or any bot_rt_* row) means the bot config.ini changed →
+# auto-push to the fleet.
+_RUNTIME_PUSH_TRIGGER_KEYS = ("ocr_service_url", "bot_market_data_url")
+
+
+def _fleet_push_runs(app) -> dict:
+    store = getattr(app.state, "fleet_push_runs", None)
+    if store is None:
+        store = {}
+        app.state.fleet_push_runs = store
+    return store
+
+
+async def _run_fleet_push(app, run_id, actor_id, only_stack_ids=None) -> None:
+    """Background fleet config.ini push; parks the result on app.state."""
+    from app.db import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as bg:
+            result = await services_stacks.push_config_ini_to_all_stacks(
+                bg, actor_id, only_stack_ids=only_stack_ids
+            )
+    except Exception:  # noqa: BLE001 — a background failure must be visible, not silent
+        logger.exception("fleet config.ini push run %s failed", run_id)
+        result = services_stacks.FleetPushResult(
+            total=0, succeeded=0, failed=0, items=[],
+            started_at=None, finished_at=datetime.now(timezone.utc),
+        )
+    _fleet_push_runs(app)[run_id] = result
+
+
+def _kick_fleet_push(request, actor_id, only_stack_ids=None) -> str:
+    run_id = uuid4().hex
+    store = _fleet_push_runs(request.app)
+    store[run_id] = None  # in-progress marker
+    if len(store) > 30:  # bound the in-memory store
+        for stale in list(store)[:-30]:
+            store.pop(stale, None)
+    asyncio.create_task(
+        _run_fleet_push(request.app, run_id, actor_id, only_stack_ids),
+        name=f"fleet-config-push-{run_id}",
+    )
+    return run_id
+
+
+def _advanced_runtime_text(values: dict) -> str:
+    """Render the Advanced editor textarea from the non-first-class bot_rt_* rows."""
+    fc = set(_BOT_RT_FIRST_CLASS)
+    return "\n".join(
+        f"{k} = {v}"
+        for k, v in sorted(values.items())
+        if k.startswith("bot_rt_") and k not in fc and v not in (None, "")
+    )
+
+
 @router.get("/settings")
 async def admin_settings(
     request: Request,
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
+    pushing: Optional[str] = None,
 ):
     """Render the admin Settings page with current values (DB row or default)."""
     values = await settings_store.get_all_settings(db)
     ctx = _ctx(request, user, current_tab="/admin/settings")
     ctx["settings_values"] = values
     ctx["form_error"] = None
+    ctx["advanced_runtime_text"] = _advanced_runtime_text(values)
+    ctx["pushing_run_id"] = pushing
     return templates.TemplateResponse("admin/settings.html", ctx)
 
 
@@ -2951,78 +3020,167 @@ async def admin_settings_save(
     agent_image_tag: str = Form(...),
     agent_locust_processes_cap: int = Form(...),
     bot_market_data_url: str = Form(""),
+    bot_rt_ephoenix_domain: str = Form("ephoenix.ir"),
+    bot_rt_ephoenix_md_host: str = Form("marketdatagw"),
+    bot_rt_ib_domain: str = Form("ibtrader.ir"),
+    bot_rt_ib_md_host: str = Form("mdapi"),
+    bot_rt_ib_portfolio_shard: str = Form("api8"),
+    bot_rt_exir_domain: str = Form("exirbroker.com"),
+    bot_rt_exir_fallback_buy_fee: float = Form(0.005),
+    bot_rt_auto_sell_window: str = Form("09:00-12:30"),
+    bot_rt_auto_sell_confirm_secs: float = Form(5.0),
+    bot_rt_advanced: str = Form(""),
 ):
-    """Persist the admin Settings form.
+    """Persist the admin Settings form, then auto-push config.ini to all stacks.
 
-    Validation lives in :class:`~app.schemas.settings_page.SettingsUpdate`.
-    On failure we re-render the page with the user's typed values and a
-    form-level error (no field-by-field errors yet — the form is small enough
-    that a single banner is fine).
+    Validation lives in :class:`~app.schemas.settings_page.SettingsUpdate` plus
+    :func:`parse_advanced_runtime` for the escape-hatch textarea. On failure we
+    re-render the page with the user's typed values and a single error banner.
 
-    The ``agent_locust_processes_cap`` field (Phase 5) is a fleet-wide ceiling
-    on the per-agent locust ``processes`` value. Per-agent overrides are
-    clamped to this cap by the locust-config editor and the renderer; the cap
-    itself is stored as a string in the ``settings`` table for uniformity with
-    the other rows. Pydantic gives us int → range validation; we re-stringify
-    on the way to ``set_setting``.
-
-    On success we 303-redirect back to the page; HTMX callers see the same
-    redirect via ``HX-Redirect`` so their URL bar updates.
+    When any value that lands in the bot's config.ini ``[runtime]`` section
+    changes (the bot_rt_* fields, the Advanced overrides, ``ocr_service_url`` or
+    ``bot_market_data_url``), a background fleet push is kicked so the change
+    reaches every stack in seconds — no CI, no image, no recreate. The redirect
+    carries ``?pushing=<run_id>`` so the page shows a live per-stack status.
     """
-    try:
-        validated = SettingsUpdate(
-            ocr_service_url=ocr_service_url,
-            agent_image_tag=agent_image_tag,
-            agent_locust_processes_cap=agent_locust_processes_cap,
-            bot_market_data_url=bot_market_data_url,
-        )
-    except (ValidationError, ValueError) as exc:
+    posted = {
+        "ocr_service_url": ocr_service_url,
+        "agent_image_tag": agent_image_tag,
+        "agent_locust_processes_cap": agent_locust_processes_cap,
+        "bot_market_data_url": bot_market_data_url,
+        "bot_rt_ephoenix_domain": bot_rt_ephoenix_domain,
+        "bot_rt_ephoenix_md_host": bot_rt_ephoenix_md_host,
+        "bot_rt_ib_domain": bot_rt_ib_domain,
+        "bot_rt_ib_md_host": bot_rt_ib_md_host,
+        "bot_rt_ib_portfolio_shard": bot_rt_ib_portfolio_shard,
+        "bot_rt_exir_domain": bot_rt_exir_domain,
+        "bot_rt_exir_fallback_buy_fee": bot_rt_exir_fallback_buy_fee,
+        "bot_rt_auto_sell_window": bot_rt_auto_sell_window,
+        "bot_rt_auto_sell_confirm_secs": bot_rt_auto_sell_confirm_secs,
+    }
+
+    def _rerender_error(message: str):
         ctx = _ctx(request, user, current_tab="/admin/settings")
-        # Show what the user typed, not the stored values — they need to be
-        # able to correct their input.
-        ctx["settings_values"] = {
-            "ocr_service_url": ocr_service_url,
-            "agent_image_tag": agent_image_tag,
-            "agent_locust_processes_cap": agent_locust_processes_cap,
-            "bot_market_data_url": bot_market_data_url,
-        }
-        if isinstance(exc, ValidationError):
-            ctx["form_error"] = (
-                "Invalid input. Please review the form fields and try again."
-            )
-        else:
-            ctx["form_error"] = str(exc)
+        ctx["settings_values"] = posted
+        ctx["advanced_runtime_text"] = bot_rt_advanced
+        ctx["pushing_run_id"] = None
+        ctx["form_error"] = message
         return templates.TemplateResponse(
-            "admin/settings.html",
-            ctx,
+            "admin/settings.html", ctx,
             status_code=status.HTTP_400_BAD_REQUEST,
         )
 
-    await settings_store.set_setting(
-        db, "ocr_service_url", validated.ocr_service_url, updated_by=user.id
-    )
-    await settings_store.set_setting(
-        db, "agent_image_tag", validated.agent_image_tag, updated_by=user.id
-    )
-    await settings_store.set_setting(
-        db,
-        "agent_locust_processes_cap",
-        str(validated.agent_locust_processes_cap),
-        updated_by=user.id,
-    )
-    await settings_store.set_setting(
-        db, "bot_market_data_url", validated.bot_market_data_url, updated_by=user.id
-    )
+    try:
+        validated = SettingsUpdate(**posted)
+    except ValidationError:
+        return _rerender_error(
+            "Invalid input. Please review the form fields and try again."
+        )
+    except ValueError as exc:
+        return _rerender_error(str(exc))
+
+    try:
+        advanced = parse_advanced_runtime(bot_rt_advanced)
+    except ValueError as exc:
+        return _rerender_error(f"Advanced overrides: {exc}")
+
+    # Snapshot the pre-save state so we only push when a runtime value changed.
+    before = await settings_store.get_all_settings(db)
+
+    # First-class settings (the float fields stringify for the key/value table).
+    to_set: dict[str, str] = {
+        "ocr_service_url": validated.ocr_service_url,
+        "agent_image_tag": validated.agent_image_tag,
+        "agent_locust_processes_cap": str(validated.agent_locust_processes_cap),
+        "bot_market_data_url": validated.bot_market_data_url,
+        "bot_rt_ephoenix_domain": validated.bot_rt_ephoenix_domain,
+        "bot_rt_ephoenix_md_host": validated.bot_rt_ephoenix_md_host,
+        "bot_rt_ib_domain": validated.bot_rt_ib_domain,
+        "bot_rt_ib_md_host": validated.bot_rt_ib_md_host,
+        "bot_rt_ib_portfolio_shard": validated.bot_rt_ib_portfolio_shard,
+        "bot_rt_exir_domain": validated.bot_rt_exir_domain,
+        "bot_rt_exir_fallback_buy_fee": str(validated.bot_rt_exir_fallback_buy_fee),
+        "bot_rt_auto_sell_window": validated.bot_rt_auto_sell_window,
+        "bot_rt_auto_sell_confirm_secs": str(validated.bot_rt_auto_sell_confirm_secs),
+    }
+    # Advanced escape-hatch overrides + clear any that were removed from the box.
+    to_set.update(advanced)
+    prior_advanced = {
+        k for k in before
+        if k.startswith("bot_rt_") and k not in _BOT_RT_FIRST_CLASS
+        and before[k] not in (None, "")
+    }
+    for removed in prior_advanced - set(advanced):
+        to_set[removed] = ""  # empty ⇒ omitted from [runtime] ⇒ bot uses its fallback
+
+    for key, value in to_set.items():
+        await settings_store.set_setting(db, key, value, updated_by=user.id)
     await db.commit()
+
+    # Did anything that reaches the bot config.ini [runtime] section change?
+    runtime_changed = any(
+        before.get(k) != to_set[k]
+        for k in to_set
+        if k in _RUNTIME_PUSH_TRIGGER_KEYS or k.startswith("bot_rt_")
+    )
+
+    target = "/admin/settings"
+    if runtime_changed:
+        run_id = _kick_fleet_push(request, user.id)
+        target = f"/admin/settings?pushing={run_id}"
+        logger.info("settings save kicked fleet config.ini push %s by %s",
+                    run_id, user.username)
 
     if request.headers.get("HX-Request"):
         return Response(
             status_code=status.HTTP_204_NO_CONTENT,
-            headers={"HX-Redirect": "/admin/settings"},
+            headers={"HX-Redirect": target},
         )
     return Response(
-        status_code=status.HTTP_303_SEE_OTHER,
-        headers={"Location": "/admin/settings"},
+        status_code=status.HTTP_303_SEE_OTHER, headers={"Location": target},
+    )
+
+
+@router.post("/settings/push-all")
+async def admin_settings_push_all(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    retry_run_id: str = Form(""),
+):
+    """Manually (re)push config.ini to all stacks; ``retry_run_id`` retries only
+    the failed stacks of a prior run."""
+    only: Optional[list] = None
+    if retry_run_id.strip():
+        prior = _fleet_push_runs(request.app).get(retry_run_id.strip())
+        if prior is not None:
+            only = [i.stack_id for i in prior.items if not i.ok]
+            if not only:  # nothing failed → nothing to retry
+                only = []
+    run_id = _kick_fleet_push(request, user.id, only_stack_ids=only)
+    target = f"/admin/settings?pushing={run_id}"
+    if request.headers.get("HX-Request"):
+        return Response(status_code=status.HTTP_204_NO_CONTENT,
+                        headers={"HX-Redirect": target})
+    return Response(status_code=status.HTTP_303_SEE_OTHER,
+                    headers={"Location": target})
+
+
+@router.get("/settings/push-status/{run_id}")
+async def admin_settings_push_status(
+    request: Request,
+    run_id: str,
+    user: User = Depends(require_admin),
+):
+    """HTMX partial: the live per-stack result of a fleet config.ini push."""
+    result = _fleet_push_runs(request.app).get(run_id, "missing")
+    ctx = _ctx(request, user, current_tab="/admin/settings")
+    ctx["run_id"] = run_id
+    ctx["fleet_result"] = None if result in (None, "missing") else result
+    ctx["fleet_missing"] = result == "missing"
+    ctx["fleet_in_progress"] = result is None
+    return templates.TemplateResponse(
+        "admin/partials/fleet_push_status.html", ctx
     )
 
 

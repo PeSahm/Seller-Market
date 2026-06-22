@@ -98,6 +98,13 @@ class StackRenderContext:
     # the bot keeps the byte-identical scheduler-only command. Set it to switch the
     # container to bot_entrypoint.py (scheduler + monitor) with MARKET_DATA_URL.
     bot_market_data_url: str = ""
+    # DB-pushed bot ``[runtime]`` overrides: ``{wire_key: value}`` (already
+    # projected from settings via settings_store.build_runtime_section). Rendered
+    # into config.ini's ``[runtime]`` section so values that used to be hardcoded
+    # in the bot image (broker/market-data hosts, exir fee, time windows, ...) can
+    # change fleet-wide with no rebuild. Empty dict ⇒ the section is omitted and
+    # output is byte-identical to before.
+    runtime: dict = field(default_factory=dict)
 
 
 # Re-exports so callers can do

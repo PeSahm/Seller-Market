@@ -46,11 +46,16 @@ import urllib.parse
 
 import requests
 
+import runtime_config
+
 logger = logging.getLogger(__name__)
 
 # The RLC market-data gateway. The doubled slash mirrors the broker client's own
 # URL (the handler is tolerant of it) — kept verbatim to match what the server
-# expects from the official desktop client.
+# expects from the official desktop client. Read at call-time from the DB-pushed
+# [runtime] section (fallback = this literal) so the host can be redirected
+# fleet-wide with NO image rebuild; matters for the long-running sidecar, which
+# would otherwise hold this import-time constant until a restart.
 _BASE_URL = "https://core.tadbirrlc.com//StockInformationHandler"
 # Mirror a browser UA; some RLC edges reject bare clients.
 _UA = (
@@ -73,8 +78,9 @@ _cache: dict[str, tuple[tuple[int, int, int], float]] = {}
 
 def _build_url(isins: list[str]) -> str:
     """Build the StockInformationHandler URL for one or more ISINs."""
+    base = runtime_config.get("rlc_base_url", _BASE_URL)
     blob = "{'Type':'getstockprice2','la':'Fa','arr':'" + ",".join(isins) + "'}"
-    return _BASE_URL + "?" + urllib.parse.quote(blob) + "&jsoncallback="
+    return base + "?" + urllib.parse.quote(blob) + "&jsoncallback="
 
 
 def _parse_rows(rows: object) -> dict[str, tuple[int, int, int]]:

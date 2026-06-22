@@ -41,13 +41,35 @@ import urllib.parse
 import requests
 
 import rlc_price  # reuse the confirmed session + price-band/max-qty helpers
+import runtime_config
 
 logger = logging.getLogger(__name__)
 
+# Fallback host + handler paths. Read at call-time from the DB-pushed [runtime]
+# section (``rlc_market_host`` / ``rlc_path_*``) so the long-running sidecar can
+# be redirected fleet-wide with NO image rebuild. The host keeps its trailing
+# slash and each path its leading slash so the concatenation reproduces the
+# doubled slash the official client uses.
 _HOST = "https://core.tadbirrlc.com/"
-_STOCK_INFO_URL = _HOST + "/StockInformationHandler"
-_STOCKS_URL = _HOST + "/StocksHandler.ashx"
-_FUTURE_INFO_URL = _HOST + "/StockFutureInfoHandler"
+_PATH_STOCK_INFO = "/StockInformationHandler"
+_PATH_STOCKS = "/StocksHandler.ashx"
+_PATH_FUTURE_INFO = "/StockFutureInfoHandler"
+
+
+def _host() -> str:
+    return runtime_config.get("rlc_market_host", _HOST)
+
+
+def _stock_info_url() -> str:
+    return _host() + runtime_config.get("rlc_path_stockinfo", _PATH_STOCK_INFO)
+
+
+def _stocks_url() -> str:
+    return _host() + runtime_config.get("rlc_path_stocks", _PATH_STOCKS)
+
+
+def _future_info_url() -> str:
+    return _host() + runtime_config.get("rlc_path_future", _PATH_FUTURE_INFO)
 
 # Reuse rlc_price's proxy-bypassed session (trust_env=False + browser UA) so we
 # don't open a second connection pool or re-declare the bypass.
@@ -110,7 +132,7 @@ def get_last_price(isin: str, timeout: int = 15) -> int:
         hit = _last_cache.get(isin)
         if hit is not None and (time.monotonic() - hit[1]) < _LAST_TTL_S:
             return hit[0]
-    url = _STOCK_INFO_URL + "?" + _blob(
+    url = _stock_info_url() + "?" + _blob(
         {"Type": "getstockprice2", "la": "Fa", "arr": isin}
     )
     try:
@@ -178,7 +200,7 @@ def get_instruments(timeout: int = 30, force: bool = False) -> list[dict]:
         at = float(_instruments_cache.get("at") or 0.0)
         if rows is not None and not force and (time.monotonic() - at) < _INSTRUMENTS_TTL_S:
             return rows  # type: ignore[return-value]
-    url = _STOCKS_URL + "?" + _blob({"Type": "ALL21"})
+    url = _stocks_url() + "?" + _blob({"Type": "ALL21"})
     try:
         resp = _session.get(url, timeout=timeout)
         resp.raise_for_status()
@@ -282,7 +304,7 @@ def get_queue(isin: str, timeout: int = 10) -> dict | None:
         hit = _queue_cache.get(isin)
         if hit is not None and (time.monotonic() - hit[1]) < _QUEUE_TTL_S:
             return hit[0]
-    url = _STOCK_INFO_URL + "?" + _blob(
+    url = _stock_info_url() + "?" + _blob(
         {"Type": "getstockprice2", "la": "Fa", "arr": isin}
     )
     try:
