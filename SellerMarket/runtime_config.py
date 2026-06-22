@@ -178,6 +178,24 @@ def get_list(key: str, default: Optional[list[str]] = None) -> list[str]:
     return [p for p in raw.replace(",", " ").split() if p.strip()]
 
 
+def drop_non_customer_sections(cp) -> None:
+    """Remove non-account sections from a loaded ``ConfigParser`` in place.
+
+    The mgmt renderer adds a global ``[runtime]`` section (endpoint/host
+    overrides) alongside the per-customer sections. The bot's per-account
+    iterators (``cache_warmup`` main loop, ``locustfile_new`` user-class build +
+    summaries) assume EVERY ``config.sections()`` entry is a customer and read
+    ``section['username']`` directly — a ``[runtime]`` section makes them
+    ``KeyError``. Those modules read the runtime OVERRIDES via this module's
+    :func:`get` (a separate file read), NOT the ``ConfigParser`` object, so it is
+    safe to drop any section lacking a ``username`` (the global ``[runtime]``
+    block, and defensively any future non-account section) right after load.
+    """
+    for name in list(cp.sections()):
+        if not cp.has_option(name, "username"):
+            cp.remove_section(name)
+
+
 def snapshot() -> dict[str, str]:
     """A copy of the current ``[runtime]`` dict (debugging / tests)."""
     return dict(_snapshot())
@@ -193,5 +211,5 @@ def reset_cache() -> None:
 
 __all__ = [
     "get", "get_int", "get_float", "get_bool", "get_list",
-    "snapshot", "reset_cache", "CONFIG_END_SENTINEL",
+    "snapshot", "reset_cache", "drop_non_customer_sections", "CONFIG_END_SENTINEL",
 ]

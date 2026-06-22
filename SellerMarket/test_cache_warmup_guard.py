@@ -74,3 +74,27 @@ def test_buy_volume_positive_still_caches(monkeypatch):
     assert ok is True
     assert len(cache.saved) == 1
     assert cache.saved[0]["volume"] == 200
+
+
+def test_non_customer_section_is_quiet_skip(monkeypatch):
+    # The DB-pushed [runtime] section (endpoint/host overrides) is NOT an account
+    # — it has no 'username'. Iterating it must not KeyError; it's a quiet skip.
+    monkeypatch.setattr(cache_warmup, "EphoenixAPIClient", _HealthyClient)
+    cache = _FakeCache()
+    ok = cache_warmup.warmup_account({"ephoenix_md_host": "marketdatagw"}, cache)
+    assert ok is True          # skipped, never fails the run
+    assert cache.saved == []   # nothing warmed for a non-account section
+
+
+def test_runtime_section_excluded_from_iteration():
+    # The bot loads config.ini then drops [runtime] so the per-account iterators
+    # (cache_warmup main / locustfile) only ever see real customer sections.
+    import configparser
+    cp = configparser.ConfigParser()
+    cp.read_string(
+        "[runtime]\nephoenix_md_host = marketdatagw\n\n"
+        "[a1_c2_bbi_IRO1]\nusername = u\npassword = p\nbroker = bbi\nisin = IRO1\nside = 1\n"
+    )
+    assert "runtime" in cp.sections()
+    cache_warmup.drop_non_customer_sections(cp)
+    assert cp.sections() == ["a1_c2_bbi_IRO1"]

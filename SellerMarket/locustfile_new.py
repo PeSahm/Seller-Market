@@ -759,6 +759,12 @@ def on_test_stop(environment, **kwargs):
 # Load configuration
 config = configparser.ConfigParser()
 config.read('config.ini')
+# Drop the global [runtime] section (endpoint/host overrides) so every per-account
+# iterator below (user-class build, on_test_stop summaries) only sees real
+# customer sections. The overrides are read via runtime_config (get_endpoints_for
+# / decode_captcha), NOT this config object — see runtime_config.
+from runtime_config import drop_non_customer_sections as _drop_non_customer_sections
+_drop_non_customer_sections(config)
 
 if not config.sections():
     logger.error("No configuration found in config.ini!")
