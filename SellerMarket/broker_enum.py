@@ -81,7 +81,7 @@ def get_endpoints_for(code: str) -> dict:
     """
     domain = "ibtrader.ir" if code == "ib" else "ephoenix.ir"
     prefix = "." if code == "ib" else f"-{code}."
-    mdapi = "mdapi" if code == "ib" else "mdapi1"
+    mdapi = "mdapi" if code == "ib" else "marketdatagw"
 
     # Portfolio lives on a different host family than the regular api endpoints.
     # ephoenix family: backofficeexternal-{broker}.ephoenix.ir (verified on ayandeh;

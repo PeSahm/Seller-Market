@@ -25,7 +25,7 @@ def test_standard_ephoenix_urls():
     assert ep["order"] == "https://api-ayandeh.ephoenix.ir/api/v2/orders/NewOrder"
     assert ep["calculate_order"] == "https://api-ayandeh.ephoenix.ir/api/v2/orders/CalculateOrderParam"
     assert ep["open_orders"] == "https://api-ayandeh.ephoenix.ir/api/v2/orders/GetOpenOrders"
-    assert ep["market_data"] == "https://mdapi1.ephoenix.ir/api/v2/instruments/full"
+    assert ep["market_data"] == "https://marketdatagw.ephoenix.ir/api/v2/instruments/full"
     assert ep["portfolio"] == (
         "https://backofficeexternal-ayandeh.ephoenix.ir"
         "/api/portfolio/getrealsecuritypositionbydate"
@@ -50,4 +50,4 @@ def test_new_ephoenix_broker_needs_no_enum_entry():
     ep = get_endpoints_for(code)
     assert ep["order"] == "https://api-newbank.ephoenix.ir/api/v2/orders/NewOrder"
     assert ep["login"] == "https://identity-newbank.ephoenix.ir/api/v2/accounts/login"
-    assert ep["market_data"] == "https://mdapi1.ephoenix.ir/api/v2/instruments/full"
+    assert ep["market_data"] == "https://marketdatagw.ephoenix.ir/api/v2/instruments/full"

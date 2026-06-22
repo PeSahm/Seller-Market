@@ -126,7 +126,7 @@ def _endpoints_for(broker_code: str) -> dict[str, str]:
         }
     # ephoenix family — same prefix shape as the bot. Note that
     # ``market_data`` is a SHARED host across the whole ephoenix family
-    # (``mdapi1.ephoenix.ir``) — no per-broker prefix there.
+    # (``marketdatagw.ephoenix.ir``) — no per-broker prefix there.
     domain = "ephoenix.ir"
     prefix = f"-{broker_code}."
     return {
@@ -136,7 +136,7 @@ def _endpoints_for(broker_code: str) -> dict[str, str]:
             f"https://backofficeexternal{prefix}{domain}"
             "/api/party/getcustomerinfo"
         ),
-        "market_data": "https://mdapi1.ephoenix.ir/api/v2/instruments/full",
+        "market_data": "https://marketdatagw.ephoenix.ir/api/v2/instruments/full",
         # GetOrders is a sibling of NewOrder/GetOpenOrders on the per-broker
         # ``api-{code}.ephoenix.ir`` host. Confirmed to accept the same
         # ``Authorization: Bearer`` token as the bot's order calls.
