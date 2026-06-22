@@ -39,7 +39,11 @@ import httpx
 # app.services.brokers.base (shared across families); re-export them here so
 # existing callers/tests that do ``from app.services.broker_client import
 # VerifyResult`` keep working unchanged.
-from app.services.brokers.base import IsinInfo, VerifyResult  # noqa: F401  (re-export)
+from app.services.brokers.base import (  # noqa: F401  (re-export)
+    CredStatus,
+    IsinInfo,
+    VerifyResult,
+)
 from app.services.brokers import registry
 
 logger = logging.getLogger(__name__)
@@ -49,6 +53,35 @@ logger = logging.getLogger(__name__)
 # uses 100 but that's a batch background job; here the user is staring at a
 # spinner.
 _MAX_LOGIN_RETRIES = 5
+
+# ephoenix-family login `errorCode` discriminator (LIVE-confirmed on bbi +
+# ibtrader — see SellerMarket/scratch/CRED_STATUS_FINDINGS.md). The login is
+# HTTP 200 in every case; the body's numeric `errorCode` separates the cases
+# (language-independent — we deliberately do NOT match the Persian errorMessage):
+#   0     → success (token present)        → VALID
+#   3000  → wrong username/password        → INVALID_CREDENTIALS
+#   -1000 → wrong captcha (OCR misread)    → retry (TRANSIENT)
+# Anything else / missing → TRANSIENT (conservative — a false INVALID would stop
+# a good account from trading).
+_EPH_ERRCODE_INVALID_CREDENTIALS = 3000
+_EPH_ERRCODE_INVALID_CAPTCHA = -1000
+
+
+def _classify_ephoenix_login(status_code: int, body: object) -> Optional[CredStatus]:
+    """Classify an ephoenix-family login response. ``None`` = ambiguous (retry).
+
+    Pure helper (no I/O) so it's trivially unit-testable against captured
+    fixtures. Only a high-confidence reject yields ``INVALID_CREDENTIALS``.
+    """
+    if not isinstance(body, dict):
+        return None
+    if body.get("token"):
+        return CredStatus.VALID
+    code = body.get("errorCode")
+    if code == _EPH_ERRCODE_INVALID_CREDENTIALS:
+        return CredStatus.INVALID_CREDENTIALS
+    # -1000 (bad captcha) and every other code → let the caller keep retrying.
+    return None
 
 # Per-step timeouts in seconds. Generous enough for Iranian-VPS latency but
 # short enough that a hung broker host doesn't pin the button forever.
@@ -215,9 +248,13 @@ async def _login_once(
     username: str,
     password: str,
     ocr_service_url: str,
-) -> Optional[str]:
-    """Fetch one captcha, decode it, POST login. Return token on success, else None.
+) -> tuple[Optional[str], Optional[CredStatus]]:
+    """Fetch one captcha, decode it, POST login.
 
+    Returns ``(token, classification)``: token on success (with
+    ``CredStatus.VALID``), else ``(None, status)`` where ``status`` is
+    ``INVALID_CREDENTIALS`` on the high-confidence reject marker or ``None``
+    when the reason is ambiguous (OCR miss / bad captcha / non-JSON — retry).
     Any HTTP-level failure raises — the retry wrapper distinguishes those
     from "captcha decoded but creds rejected".
     """
@@ -240,7 +277,7 @@ async def _login_once(
     if not captcha_value:
         # Treat OCR returning empty/blank as a "retry" signal (the image
         # may have been ambiguous) rather than a hard failure.
-        return None
+        return None, None
 
     login_resp = await client.post(
         endpoints["login"],
@@ -257,7 +294,7 @@ async def _login_once(
     )
     # Don't raise_for_status here — the broker may return 200 with an
     # error JSON, or 4xx for bad creds. We classify in the caller based
-    # on whether ``token`` is present.
+    # on the body's ``errorCode`` / ``token``.
     if login_resp.status_code >= 500:
         login_resp.raise_for_status()
     try:
@@ -270,8 +307,9 @@ async def _login_once(
             login_resp.status_code,
             login_resp.text[:200] if login_resp.text else "<empty>",
         )
-        return None
-    return body.get("token") or None
+        return None, None
+    token = body.get("token") or None
+    return token, _classify_ephoenix_login(login_resp.status_code, body)
 
 
 async def _get_token_with_retries(
@@ -280,17 +318,22 @@ async def _get_token_with_retries(
     username: str,
     password: str,
     ocr_service_url: str,
-) -> tuple[Optional[str], Optional[str]]:
-    """Drive the captcha-login retry loop. Return (token, last_error).
+) -> tuple[Optional[str], Optional[str], Optional[CredStatus]]:
+    """Drive the captcha-login retry loop. Return (token, last_error, cred_status).
 
     Extracted from ``verify_credentials`` so both verify endpoints (creds
     + isin) can reuse the same path — captcha solves are flaky, so each
     operation gets up to ``_MAX_LOGIN_RETRIES`` attempts of its own.
+
+    ``cred_status`` is ``INVALID_CREDENTIALS`` if any attempt got the broker's
+    high-confidence reject marker (and we short-circuit — no point burning more
+    captcha on a known-bad password); ``None`` otherwise (caller treats a
+    no-token outcome as TRANSIENT).
     """
     last_error: Optional[str] = None
     for attempt in range(1, _MAX_LOGIN_RETRIES + 1):
         try:
-            token = await _login_once(
+            token, status = await _login_once(
                 client, endpoints, username, password, ocr_service_url
             )
         except httpx.HTTPError as exc:
@@ -305,8 +348,11 @@ async def _get_token_with_retries(
             logger.warning(last_error)
             continue
         if token:
-            return token, None
-    return None, last_error
+            return token, None, CredStatus.VALID
+        if status == CredStatus.INVALID_CREDENTIALS:
+            # Broker positively rejected the password — stop retrying captcha.
+            return None, "broker rejected the username/password", status
+    return None, last_error, None
 
 
 async def _get_token(
@@ -318,13 +364,15 @@ async def _get_token(
     ocr_service_url: str,
     *,
     force_refresh: bool = False,
-) -> tuple[Optional[str], Optional[str]]:
+) -> tuple[Optional[str], Optional[str], Optional[CredStatus]]:
     """Cached wrapper around ``_get_token_with_retries``.
 
-    Returns ``(token, last_error)``. Uses an in-process LRU keyed by
-    ``(broker, username, password-fingerprint)`` so repeated UI clicks
+    Returns ``(token, last_error, cred_status)``. Uses an in-process LRU keyed
+    by ``(broker, username, password-fingerprint)`` so repeated UI clicks
     on Verify Credentials / Verify ISIN don't each pay the
-    ~5-second captcha cost.
+    ~5-second captcha cost. A cache HIT implies a previously-successful login
+    → ``CredStatus.VALID``. Only ``verify_credentials`` consumes ``cred_status``;
+    the order/holdings callers ignore it.
 
     Pass ``force_refresh=True`` to skip the cache (used when a
     downstream call returns 401 — the cached token has expired
@@ -337,17 +385,17 @@ async def _get_token(
                 "token cache HIT for %s@%s (skipping captcha+login)",
                 username, broker_code,
             )
-            return cached, None
+            return cached, None, CredStatus.VALID
     logger.debug(
         "token cache MISS for %s@%s (running captcha+login)",
         username, broker_code,
     )
-    token, err = await _get_token_with_retries(
+    token, err, status = await _get_token_with_retries(
         client, endpoints, username, password, ocr_service_url
     )
     if token:
         _token_cache_put(broker_code, username, password, token)
-    return token, err
+    return token, err, status
 
 
 async def _fetch_customer_info(
@@ -384,16 +432,24 @@ async def _ephoenix_verify_credentials(
     endpoints = _endpoints_for(broker_code)
 
     async with httpx.AsyncClient() as client:
-        token, last_error = await _get_token(
+        token, last_error, cred_status = await _get_token(
             client, broker_code, endpoints, username, password, ocr_service_url
         )
         if not token:
+            invalid = cred_status == CredStatus.INVALID_CREDENTIALS
             return VerifyResult(
                 ok=False,
+                status=(
+                    CredStatus.INVALID_CREDENTIALS if invalid else CredStatus.TRANSIENT
+                ),
                 error=(
-                    last_error
-                    or "Authentication failed — check username/password "
-                    f"(captcha solve gave up after {_MAX_LOGIN_RETRIES} attempts)"
+                    "The broker rejected this username/password."
+                    if invalid
+                    else (
+                        last_error
+                        or "Authentication failed — check username/password "
+                        f"(captcha solve gave up after {_MAX_LOGIN_RETRIES} attempts)"
+                    )
                 ),
             )
 
@@ -412,17 +468,27 @@ async def _ephoenix_verify_credentials(
                     username, broker_code,
                 )
                 _token_cache_drop(broker_code, username, password)
-                token, last_error = await _get_token(
+                token, last_error, cred_status = await _get_token(
                     client, broker_code, endpoints, username, password,
                     ocr_service_url, force_refresh=True,
                 )
                 if not token:
+                    invalid = cred_status == CredStatus.INVALID_CREDENTIALS
                     return VerifyResult(
                         ok=False,
+                        status=(
+                            CredStatus.INVALID_CREDENTIALS
+                            if invalid
+                            else CredStatus.TRANSIENT
+                        ),
                         error=(
-                            last_error
-                            or "Authentication failed after token refresh — "
-                            "check username/password"
+                            "The broker rejected this username/password."
+                            if invalid
+                            else (
+                                last_error
+                                or "Authentication failed after token refresh — "
+                                "check username/password"
+                            )
                         ),
                     )
                 info_resp = await _fetch_customer_info(
@@ -447,6 +513,7 @@ async def _ephoenix_verify_credentials(
         result = payload.get("result") or {}
         return VerifyResult(
             ok=True,
+            status=CredStatus.VALID,
             full_name=result.get("fullName") or None,
             national_id=result.get("nationalId") or None,
             bourse_code=result.get("bourseCode") or None,
@@ -510,7 +577,7 @@ async def _ephoenix_verify_isin(
         return None, (last or "market_data exhausted retries")
 
     async with httpx.AsyncClient() as client:
-        token, last_error = await _get_token(
+        token, last_error, _ = await _get_token(
             client, broker_code, endpoints, username, password, ocr_service_url
         )
         if not token:
@@ -532,7 +599,7 @@ async def _ephoenix_verify_isin(
                 username, broker_code,
             )
             _token_cache_drop(broker_code, username, password)
-            token, last_error = await _get_token(
+            token, last_error, _ = await _get_token(
                 client, broker_code, endpoints, username, password,
                 ocr_service_url, force_refresh=True,
             )
@@ -667,7 +734,7 @@ async def _ephoenix_get_orders(
 
     rows: list[dict] = []
     async with httpx.AsyncClient() as client:
-        token, last_error = await _get_token(
+        token, last_error, _ = await _get_token(
             client, broker_code, endpoints, username, password, ocr_service_url
         )
         if not token:
@@ -690,7 +757,7 @@ async def _ephoenix_get_orders(
                         username, broker_code,
                     )
                     _token_cache_drop(broker_code, username, password)
-                    token, last_error = await _get_token(
+                    token, last_error, _ = await _get_token(
                         client, broker_code, endpoints, username, password,
                         ocr_service_url, force_refresh=True,
                     )
@@ -772,7 +839,7 @@ async def _ephoenix_get_holdings(
         )
 
     async with httpx.AsyncClient() as client:
-        token, last_error = await _get_token(
+        token, last_error, _ = await _get_token(
             client, broker_code, endpoints, username, password, ocr_service_url
         )
         if not token:
@@ -791,7 +858,7 @@ async def _ephoenix_get_holdings(
                 username, broker_code,
             )
             _token_cache_drop(broker_code, username, password)
-            token, last_error = await _get_token(
+            token, last_error, _ = await _get_token(
                 client, broker_code, endpoints, username, password,
                 ocr_service_url, force_refresh=True,
             )

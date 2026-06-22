@@ -24,7 +24,7 @@ from typing import Optional
 import httpx
 
 from app.services.brokers._jalali import gregorian_str_to_jalali_str
-from app.services.brokers.base import IsinInfo, VerifyResult
+from app.services.brokers.base import CredStatus, IsinInfo, VerifyResult
 from app.services.brokers.exir_token import build_app_n
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,33 @@ _HTTP_TIMEOUT_S = 20.0
 # Max captcha solve attempts per login. The OCR service is good but not
 # perfect; a handful of retries covers the occasional ambiguous image.
 _MAX_CAPTCHA_ATTEMPTS = 6
+
+# Exir login-failure markers that mean "wrong username/password" (as opposed to
+# a wrong captcha, which must keep retrying). The exir error body carries
+# ``type=="error"`` + a Persian ``description``; the EXACT wrong-password
+# description has NOT yet been captured by a live probe (no local khobregan
+# creds — see SellerMarket/scratch/CRED_STATUS_FINDINGS.md). Until it is, this
+# stays EMPTY so the exir family is always TRANSIENT (never auto-marked invalid)
+# — the conservative default. Filling this tuple with the captured marker
+# substring(s) is the only change needed to enable exir invalid-creds detection.
+_EXIR_INVALID_CREDENTIAL_MARKERS: tuple[str, ...] = ()
+
+
+def _classify_exir_description(description: Optional[str]) -> bool:
+    """Return True iff the broker's failure ``description`` is a high-confidence
+    wrong-username/password reject (vs a wrong-captcha / transient failure).
+
+    Pure helper — unit-testable against captured fixtures. Conservative: with no
+    captured markers it returns False for everything (→ TRANSIENT).
+    """
+    if not description or not _EXIR_INVALID_CREDENTIAL_MARKERS:
+        return False
+    text = description.strip()
+    return any(marker in text for marker in _EXIR_INVALID_CREDENTIAL_MARKERS)
+
+
+class _ExirInvalidCredentials(Exception):
+    """Internal signal: the broker positively rejected the username/password."""
 
 # Skew subtracted from the broker-reported ``validity`` (minutes) so we re-login
 # a little before the session actually expires. Clamped so a tiny / missing
@@ -174,6 +201,11 @@ class ExirAdapter:
                     or body.get("message")
                     or f"login failed (status={login_resp.status_code})"
                 )
+                # If the description is a high-confidence wrong-password reject,
+                # short-circuit (no point retrying captcha on a known-bad
+                # password) so the caller can classify it INVALID_CREDENTIALS.
+                if _classify_exir_description(last_description):
+                    raise _ExirInvalidCredentials(last_description)
                 continue
 
             # Success.
@@ -276,13 +308,23 @@ class ExirAdapter:
             full_name = (f"{first} {last}".strip()) or bourse
             return VerifyResult(
                 ok=True,
+                status=CredStatus.VALID,
                 full_name=full_name,
                 national_id=None,
                 bourse_code=bourse,
                 message="login ok",
             )
+        except _ExirInvalidCredentials as exc:
+            return VerifyResult(
+                ok=False,
+                status=CredStatus.INVALID_CREDENTIALS,
+                error="The broker rejected this username/password.",
+                message=str(exc) or None,
+            )
         except Exception as exc:  # noqa: BLE001 — surface any failure to operator
-            return VerifyResult(ok=False, error=str(exc))
+            # Inconclusive (captcha exhausted, OCR/broker down, business error):
+            # TRANSIENT — never auto-mark a customer invalid on an ambiguous fail.
+            return VerifyResult(ok=False, status=CredStatus.TRANSIENT, error=str(exc))
 
     async def verify_isin(
         self, username: str, password: str, isin: str, ocr_service_url: str
