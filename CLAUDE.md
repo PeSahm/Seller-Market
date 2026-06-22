@@ -1588,3 +1588,56 @@ Operator: the ephoenix family moved the instrument market-data API host from **`
 |---|---|---|
 | — | Stage the new bot image fleet-wide | Make the `marketdatagw` change survive a future `redeploy_stack` (the live-patch is per-container, lost on recreate). The committed image has it; just pull+retag `:latest` on each host. |
 | — | Periodic external-health worker + alerts | `/admin/ha` external probe is on-page-load only; a small worker raising `health_signals` would alert proactively (the operator's "didn't know mdapi1 died until trades failed" pain). |
+
+---
+
+## Session 30 — REAL OCR HA at last: 2nd AVX2 OCR server (`85.133.205.190`) stood up + made the fleet-wide PRIMARY
+
+The long-deferred "buy an AVX2 OCR server" follow-up (open since S23) is **DONE**. Operator bought a new VPS and asked to set up OCR there + wire it into all stacks + mgmt. Stood up a fully working second OCR endpoint, made it the **primary** (PouyanIt now failover), redeployed all 18 stacks, verified end-to-end. **Pure ops — no code/migration.** PouyanIt is no longer the OCR SPOF.
+
+### New OCR host facts
+- **`85.133.205.190`** — hostname **`TG-56743`**, **SSH port 3939** (22 also open), user `root`, Ubuntu 24.04.3. **2 cores / ~3 GB RAM / 30 GB disk (25 GB free)**.
+- **CPU = Intel Xeon E5-2687W v4 → has `avx avx2 fma sse4_2`** (Broadwell, same family as PouyanIt's E5-2695 v4). **This is why it works** — EasyOCR's recognition net needs AVX2 (the whole S23 Tebyan-Ivy-Bridge saga). Tehran time already set + synced out of the box.
+- **My laptop key installed** in `/root/.ssh/authorized_keys` (paramiko one-shot with the password, then key-based). So this host (unlike `.180`) is directly reachable from the workstation on port 3939.
+- **OCR-only box** — NOT added as a `servers` row (it runs no bot stacks; the OCR pool setting is all that's needed to use it).
+
+### Egress on this provider (probe-first, every provider differs)
+- **`download.docker.com` = 200, `archive.ubuntu.com` = 200** → installed Docker the EASY way via the official `get.docker.com` script (Docker **29.6.0** + Compose plugin **v5.1.4** in one shot). No host-to-host compose-binary copy needed (contrast S10 ParsPack).
+- **`ghcr.io` manifest endpoint = 301 (reachable) BUT the blob CDN is BLOCKED** — a `docker pull ghcr.io/pesahm/ocr:latest` connected, listed layers, then **transferred 0 bytes** (`docker system df` stayed `0B` for minutes; earlier attempt got "Connection reset by peer"). **A reachable ghcr.io manifest does NOT mean blobs will download.** → Pulled via the **liara mirror** `ghcr-mirror.liara.ir/pesahm/ocr:latest` (302, works) then `docker tag … ghcr.io/pesahm/ocr:latest`. The mirror transferred fine (layers completed; image = **13.2 GB**).
+- **`ghcr-mirror.liara.ir` fronts GHCR only** (as S26 noted) — fine here since we only needed the ghcr image.
+
+### Gotcha — concurrent `docker pull` of the SAME image DEADLOCKS
+The first pull's SSH session dropped (long transfer, connection reset) but its **`docker pull` child kept running**; a second (nohup) pull of the same image then ran concurrently → **both hung on shared layer-extraction locks** (tail frozen on "Already exists", image never finalized). **Fix: `pkill -9 -f "docker pull"`, then ONE clean detached pull** (`setsid … < /dev/null &`). For a long pull over a flaky link, run it **detached on the server** so an SSH drop doesn't matter, and poll for the tagged image (`docker images … --format '{{.Size}}'`) — `docker system df` shows `0B` until the image is fully finalized, so it's a bad progress signal mid-pull.
+
+### Setup steps (the S23 RUNBOOK-add-ocr-server.md path, confirmed)
+1. Seeded the **94 MB EasyOCR model** from PouyanIt → new host (`ssh PouyanIt 'tar cz … craft_mlt_25k.pth english_g2.pth' | ssh -p3939 new 'tar xz -C /root/easyocr_models'`).
+2. `docker run -d --name seller-market-ocr --restart unless-stopped -p 18080:8080 -v /root/easyocr_models:/root/.EasyOCR/model ghcr.io/pesahm/ocr:latest`. Waited for `EasyOCR model loaded and ready!`. (Internal app is Flask on **5001**, but a server on **8080** answers `/` with 404 → port 8080 is the OCR API; pool URL is `:18080`→8080, matching PouyanIt. PouyanIt also publishes `15001→5001` but only `:18080` is used.)
+3. **VERIFIED WITH A REAL CAPTCHA** (not a blank image — the S23 lesson): generated a `12345` digit PNG **inside the OCR container** (it has PIL; the bot image does NOT) and POSTed to `/ocr/captcha-easy-base64` → **`"12345"` HTTP 200**. The recognition net runs = AVX2 confirmed live.
+4. **Cross-host reachable from EVERY provider network** — PouyanIt, Tebyan-Saeed (`.246`), ParsPack all hit `http://85.133.205.190:18080` at **~4–12 ms** (HTTP 415/400 = server responded). **This host does NOT block inbound :18080** (unlike Tebyan, which blocks it entirely) → it's a real cross-host pool member, not local-only.
+
+### Wired into all stacks + mgmt
+- **OCR pool setting** `ocr_service_url` → **`http://85.133.205.190:18080, http://5.10.248.55:18080`** (set via `settings_store.set_setting` in the api container). **NEW BOX PRIMARY, PouyanIt FAILOVER** — offloads the busy PouyanIt host AND a full PouyanIt death no longer stops captcha-solving (failover is transport-error based, so it works both directions). (Was just `http://5.10.248.55:18080` before — note this differs from the S23 prose which claimed `host.docker.internal, 5.10.248.55`; live was PouyanIt-only.)
+- **mgmt** reads the setting LIVE per request (verify-credentials) → both instances (PouyanIt + ParsPack, `/health=200`) use the pool with **no restart**.
+- **Redeployed all 18 bot stacks** via `redeploy_stack` (api container, `warm_family_cache` first) → **18/18 ok**. Bots read `OCR_SERVICE_URL` from env (baked at compose render), so the pool change needs a redeploy to reach them. Verified the new env on a bot per host (`.180` via the mgmt `run_command` since the workstation key isn't on it — and **`run_command` is async, must `await`**).
+- **End-to-end proof**: a bot container on `.246` decoded a real captcha (`83417` → **HTTP 200**) via the new primary — the exact production path.
+
+### Fleet snapshot (re-derived from `agent_stacks`/`servers` — changed AGAIN since S21)
+**18 bot stacks live entirely on the 4 Tebyan-family hosts**: `185.232.152.177` (6), `.180` (1), `.189` (5), `.246` (6). **PouyanIt (`5.10.248.55`) and ParsPack (`45.139.10.192`) currently run NO bot stacks** — they host mgmt / OCR / DB-spare / market-data / replicas only. (The fleet reshuffles constantly; always re-derive, never trust prose.)
+
+### Safe-redeploy timing (S21 check, applied)
+Redeployed at **12:38 Tehran** — past the 08:44 trading run AND past the 09:00–12:30 auto-sell window, with **0 armed auto-sell positions** fleet-wide → the auto-sell-on-restart hazard didn't apply. Always check the clock + armed-auto-sell count before a fleet redeploy.
+
+### Learnings (Session 30)
+- **A reachable ghcr.io MANIFEST (301) ≠ downloadable BLOBS** — the blob CDN can be blocked separately (0 bytes transferred, `docker system df` stays `0B`). Use the liara mirror + retag; don't wait on a stalled direct pull.
+- **Concurrent `docker pull` of the same image deadlocks** on layer-extraction locks — kill all, run ONE detached pull (`setsid … </dev/null &`) so an SSH drop can't orphan/duplicate it.
+- **VERIFY OCR WITH A REAL DIGIT CAPTCHA, generated in the OCR container** (it has PIL; the bot image doesn't) — a blank image only exercises detection and falsely passes on a broken (non-AVX2) host.
+- **`grep avx2 /proc/cpuinfo` is the gate** — this box passed (E5-2687W v4), the Tebyan Ivy-Bridge boxes never will.
+- **`app.services.ssh.commands.run_command` is async** — `await` it (a bare call returns a coroutine and silently no-ops).
+- **OCR pool ordering is in the bot ENV** (render-time), so changing primary/failover order needs a stack redeploy to reach bots; mgmt picks it up live.
+
+### Open follow-ups (Session 30)
+| # | Title | Why |
+|---|---|---|
+| — | (Optional) flip to PouyanIt-primary | If preferred, set `ocr_service_url` back to PouyanIt-first + redeploy stacks. Current = new-box-primary (offloads PouyanIt + survives its death). |
+| — | Stage the new bot image fleet-wide (carried from S29) | The `marketdatagw` live-patch is per-container, lost on `redeploy_stack` recreate — these 18 redeploys re-rendered compose from the OLD image, so confirm `marketdatagw` is in the running image, not just the live-patched layer. |
+| — | Document `TG-56743` provisioning | Captured above; if it ever needs a fresh OCR image, pull via the liara mirror (ghcr.io blobs are blocked from this host) + retag. |
