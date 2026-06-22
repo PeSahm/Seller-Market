@@ -50,6 +50,8 @@ from typing import Callable, Optional
 
 import requests
 
+import runtime_config
+
 logger = logging.getLogger(__name__)
 
 CAPTCHA_RETRIES = 6
@@ -58,6 +60,20 @@ _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
+# WS URL template; ``{token}`` is replaced with the rlcAuthHeader at connect time.
+_WS_PATH = "/v2/ws?encoding=text&authToken={token}&device=web"
+
+
+def _exir_base(tenant: str) -> str:
+    """Tenant base URL; the exir domain is a DB-pushed [runtime] override."""
+    return f"https://{tenant}.{runtime_config.get('exir_domain', 'exirbroker.com')}"
+
+
+def _ws_url(push_url: str, rlc_auth: str) -> str:
+    """Upstream WS URL; scheme + path are [runtime] escape-hatch overrides."""
+    scheme = runtime_config.get("rlc_ws_scheme", "wss")
+    path = runtime_config.get("rlc_ws_path", _WS_PATH).replace("{token}", rlc_auth)
+    return f"{scheme}://{push_url}{path}"
 
 
 def login(tenant: str, username: str, password: str,
@@ -69,7 +85,7 @@ def login(tenant: str, username: str, password: str,
     Raises ``RuntimeError`` if the OCR/login never succeeds. Direct (``trust_env=
     False``) — reach the Iranian broker without a foreign proxy.
     """
-    base = f"https://{tenant}.exirbroker.com"
+    base = _exir_base(tenant)
     s = requests.Session()
     s.trust_env = False
     s.headers.update({"User-Agent": _UA, "Accept": "*/*"})
@@ -198,14 +214,13 @@ class RlcQueueClient:
             ws = None
             try:
                 push_url, rlc_auth = self._ensure_auth()
-                url = (f"wss://{push_url}/v2/ws"
-                       f"?encoding=text&authToken={rlc_auth}&device=web")
+                url = _ws_url(push_url, rlc_auth)
                 cookie = "; ".join(f"{k}={v}" for k, v in self._cookies.items())
                 # Default TLS verification ON — the WS carries the rlcAuthHeader.
                 ws = websocket.create_connection(
                     url,
                     header=[f"User-Agent: {_UA}",
-                            f"Origin: https://{self.tenant}.exirbroker.com"],
+                            f"Origin: {_exir_base(self.tenant)}"],
                     cookie=cookie,
                     timeout=15,
                 )
@@ -258,4 +273,5 @@ class RlcQueueClient:
         self._stop.set()
 
 
-__all__ = ["RlcQueueClient", "login", "parse_mw", "extract_buy_queue"]
+__all__ = ["RlcQueueClient", "login", "parse_mw", "extract_buy_queue",
+           "_exir_base", "_ws_url"]

@@ -557,6 +557,31 @@ def test_zero_to_armed_transition(tmp_path):
     assert feeds and feeds[-1].started
 
 
+def test_runtime_window_and_confirm_hot_reload(tmp_path, monkeypatch):
+    # The market-hours window + confirm-seconds are DB-pushed [runtime] knobs and
+    # must hot-reload on a supervisor tick — no container restart. No constructor
+    # window is passed, so runtime drives it.
+    import runtime_config
+    snap: dict[str, str] = {}
+    monkeypatch.setattr(runtime_config, "_snapshot", lambda: snap)
+    mon = AutoSellMonitor(
+        [_TGT],
+        now_fn=lambda: datetime(2026, 1, 1, 10, 0, tzinfo=TEHRAN),
+        day_state=DayState("t", directory=str(tmp_path)),
+        status_dir=str(tmp_path),
+    )
+    assert mon.market_open() is True       # default 09:00-12:30, 10:00 is inside
+    assert mon._confirm_seconds == 5.0
+    # Operator pushes a new window + confirm; a tick picks them up.
+    snap["auto_sell_window"] = "13:00-14:00"
+    snap["auto_sell_confirm_secs"] = "9"
+    cfg = tmp_path / "config.ini"
+    cfg.write_text(_cfg_text(), encoding="utf-8")   # header + sentinel, 0 armed
+    mon._tick(str(cfg))
+    assert mon.market_open() is False      # 10:00 now outside 13:00-14:00
+    assert mon._confirm_seconds == 9.0
+
+
 def test_empty_file_tick_skipped(tmp_path):
     mon, cfg = _sup_monitor(tmp_path, _cfg_text(_armed_section("s", "IRO1A", 500)))
     cfg.write_text("", encoding="utf-8")              # torn → empty

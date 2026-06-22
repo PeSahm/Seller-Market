@@ -56,10 +56,12 @@ defaults (no agent sections in config.ini, scheduler disabled, etc.).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Sequence
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -451,6 +453,14 @@ async def _build_render_context(
         users_multiplier = 3
     users_multiplier = max(1, users_multiplier)
 
+    # DB-pushed bot [runtime] overrides (broker/market-data hosts, exir fee, time
+    # windows, OCR pool, ...). Projected from the full settings dict so a single
+    # edit + fleet push redirects them with no image rebuild.
+    from app.services import settings_store as services_settings  # noqa: WPS433
+    runtime_overrides = services_settings.build_runtime_section(
+        await services_settings.get_all_settings(db)
+    )
+
     return StackRenderContext(
         agent_id=stack.agent_id,
         server_base_dir=server.base_dir,
@@ -463,6 +473,7 @@ async def _build_render_context(
         autoscale_locust=autoscale_locust,
         locust_users_multiplier=users_multiplier,
         bot_market_data_url=bot_market_data_url,
+        runtime=runtime_overrides,
     )
 
 
@@ -1603,6 +1614,148 @@ async def push_config_ini_for_stack(
                 logger.exception(
                     "failed to release compose lock key=%s", lock_key
                 )
+
+
+@dataclass
+class FleetPushItem:
+    """Per-stack outcome of a fleet-wide config.ini push."""
+
+    stack_id: UUID
+    agent_id: UUID
+    server_id: UUID
+    server_name: str
+    ok: bool
+    status: str  # "pushed" | "lock_busy" | "host_down" | "error"
+    message: str
+
+
+@dataclass
+class FleetPushResult:
+    """Aggregate outcome of :func:`push_config_ini_to_all_stacks`."""
+
+    total: int
+    succeeded: int
+    failed: int
+    items: list[FleetPushItem] = field(default_factory=list)
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+
+_FLEET_PUSH_TIMEOUT_S = 25.0
+
+
+async def push_config_ini_to_all_stacks(
+    db: AsyncSession,
+    actor_id: Optional[UUID],
+    *,
+    only_stack_ids: Optional[Sequence[UUID]] = None,
+) -> FleetPushResult:
+    """Push the freshly-rendered ``config.ini`` to EVERY stack (best-effort).
+
+    This is what makes a DB-pushed ``[runtime]`` change (broker/market-data
+    hosts, exir fee, time windows, OCR pool) land on the whole fleet in seconds —
+    no CI, no image, no container recreate. Each stack reuses
+    :func:`push_config_ini_for_stack` (its per-server compose advisory lock, its
+    in-place inode-preserving SFTP write).
+
+    Concurrency model: pushes are **sequential within a server** (the per-server
+    lock self-serializes anyway — two concurrent pushes to one host would make
+    one fail ``lock_busy``) and **parallel across servers**. Each push runs in
+    its OWN ``AsyncSessionLocal`` (asyncpg connections aren't safe to share
+    across ``asyncio.gather`` branches); the passed ``db`` is used only for the
+    initial reads + the fleet audit. A per-stack timeout keeps one hung host from
+    stalling the whole result.
+
+    Returns a :class:`FleetPushResult` with a per-stack status so the operator
+    can confirm the disaster change actually landed (and retry the failures).
+    """
+    started = datetime.now(timezone.utc)
+
+    # Warm the broker-family cache ONCE up front: config_ini's family_of()
+    # silently mislabels exir → ephoenix on a cold cache, which would corrupt
+    # every exir customer's section across the whole fleet in one push.
+    try:
+        from app.services.brokers.registry import warm_family_cache  # noqa: WPS433
+        await warm_family_cache(db)
+    except Exception:  # noqa: BLE001 — a cache-warm failure must not abort the push
+        logger.exception("fleet push: warm_family_cache failed (continuing)")
+
+    stacks = await list_stacks(db)
+    if only_stack_ids is not None:
+        wanted = {sid for sid in only_stack_ids}
+        stacks = [s for s in stacks if s.id in wanted]
+
+    # Resolve server display names once (for the status table).
+    server_names: dict[UUID, str] = {}
+    for sid in {s.server_id for s in stacks}:
+        srv = await db.get(Server, sid)
+        server_names[sid] = srv.name if srv is not None else str(sid)
+
+    by_server: dict[UUID, list[AgentStack]] = {}
+    for s in stacks:
+        by_server.setdefault(s.server_id, []).append(s)
+
+    async def _push_one(stack: AgentStack) -> FleetPushItem:
+        name = server_names.get(stack.server_id, str(stack.server_id))
+
+        def _item(ok: bool, status: str, message: str) -> FleetPushItem:
+            return FleetPushItem(
+                stack_id=stack.id, agent_id=stack.agent_id,
+                server_id=stack.server_id, server_name=name,
+                ok=ok, status=status, message=message,
+            )
+
+        try:
+            async with AsyncSessionLocal() as push_db:
+                await asyncio.wait_for(
+                    push_config_ini_for_stack(push_db, stack.id, actor_id),
+                    timeout=_FLEET_PUSH_TIMEOUT_S,
+                )
+            return _item(True, "pushed", "config.ini pushed")
+        except asyncio.TimeoutError:
+            return _item(False, "host_down", "timed out")
+        except RuntimeError as exc:  # compose lock busy
+            return _item(False, "lock_busy", str(exc))
+        except SSHError as exc:
+            return _item(False, "host_down", str(exc))
+        except LookupError as exc:
+            return _item(False, "error", str(exc))
+        except Exception as exc:  # noqa: BLE001 — one stack must never abort the rest
+            logger.exception("fleet push: stack=%s failed", stack.id)
+            return _item(False, "error", str(exc))
+
+    async def _push_server(server_stacks: list[AgentStack]) -> list[FleetPushItem]:
+        results: list[FleetPushItem] = []
+        for st in server_stacks:
+            results.append(await _push_one(st))
+        return results
+
+    groups = await asyncio.gather(*(_push_server(v) for v in by_server.values()))
+    items = [it for group in groups for it in group]
+    items.sort(key=lambda i: (i.server_name, str(i.stack_id)))
+    succeeded = sum(1 for i in items if i.ok)
+    finished = datetime.now(timezone.utc)
+
+    # One fleet-level audit row (the per-stack pushes already audit themselves).
+    try:
+        db.add(AuditLog(
+            actor_user_id=actor_id,
+            action="stack.push_config_ini_fleet",
+            target_type="stack",
+            target_id="fleet",
+            before_json=None,
+            after_json={"total": len(items), "succeeded": succeeded,
+                        "failed": len(items) - succeeded},
+        ))
+        await db.commit()
+    except Exception:  # noqa: BLE001 — audit is best-effort
+        logger.exception("fleet push: audit write failed")
+        await db.rollback()
+
+    return FleetPushResult(
+        total=len(items), succeeded=succeeded, failed=len(items) - succeeded,
+        items=items, started_at=started, finished_at=finished,
+    )
 
 
 async def render_config_ini_for_stack_preview(

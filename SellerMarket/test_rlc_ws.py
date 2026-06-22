@@ -68,6 +68,30 @@ def test_extract_buy_queue_ignores_deeper_levels():
     assert rlc_ws.extract_buy_queue(parts) is None
 
 
+# ---------------------------------------------------------------------------
+# [runtime] overrides — exir domain + WS URL (DB-pushed, no image rebuild)
+# ---------------------------------------------------------------------------
+
+def test_exir_base_default_and_override(monkeypatch):
+    import runtime_config
+    runtime_config.reset_cache()
+    assert rlc_ws._exir_base("khobregan") == "https://khobregan.exirbroker.com"
+    monkeypatch.setattr(runtime_config, "_snapshot",
+                        lambda: {"exir_domain": "exir2.example"})
+    assert rlc_ws._exir_base("khobregan") == "https://khobregan.exir2.example"
+
+
+def test_ws_url_default_and_override(monkeypatch):
+    import runtime_config
+    runtime_config.reset_cache()
+    assert rlc_ws._ws_url("push103.irbroker.com", "TOK") == (
+        "wss://push103.irbroker.com/v2/ws?encoding=text&authToken=TOK&device=web"
+    )
+    monkeypatch.setattr(runtime_config, "_snapshot",
+                        lambda: {"rlc_ws_scheme": "ws", "rlc_ws_path": "/v3/stream?t={token}"})
+    assert rlc_ws._ws_url("h:9", "TOK") == "ws://h:9/v3/stream?t=TOK"
+
+
 if __name__ == "__main__":
     import sys
     import pytest

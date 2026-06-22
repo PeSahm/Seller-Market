@@ -5,6 +5,8 @@ Each broker has a unique code used in API endpoints.
 
 from enum import Enum
 
+import runtime_config
+
 
 class BrokerCode(Enum):
     """Broker codes for ephoenix.ir platform endpoints."""
@@ -79,17 +81,27 @@ def get_endpoints_for(code: str) -> dict:
     (moved here verbatim from ``BrokerCode.get_endpoints`` so they stay
     byte-for-byte identical).
     """
-    domain = "ibtrader.ir" if code == "ib" else "ephoenix.ir"
-    prefix = "." if code == "ib" else f"-{code}."
-    mdapi = "mdapi" if code == "ib" else "marketdatagw"
+    # Domain / market-data host / ib portfolio shard come from the DB-pushed
+    # ``[runtime]`` section (fallback = the historical literal), so they can be
+    # redirected fleet-wide with NO image rebuild (the mdapi1 -> marketdatagw
+    # class of incident). No section ⇒ every read misses ⇒ identical to before.
+    is_ib = code == "ib"
+    if is_ib:
+        domain = runtime_config.get("ib_domain", "ibtrader.ir")
+        mdapi = runtime_config.get("ib_md_host", "mdapi")
+    else:
+        domain = runtime_config.get("ephoenix_domain", "ephoenix.ir")
+        mdapi = runtime_config.get("ephoenix_md_host", "marketdatagw")
+    prefix = "." if is_ib else f"-{code}."
 
     # Portfolio lives on a different host family than the regular api endpoints.
     # ephoenix family: backofficeexternal-{broker}.ephoenix.ir (verified on ayandeh;
     # pattern is assumed identical for the other brokers — confirm per-broker).
     # ib: api8.ibtrader.ir — a separate shard from the regular api.ibtrader.ir.
-    if code == "ib":
-        portfolio = 'https://api8.ibtrader.ir/api/portfolio/getrealsecuritypositionbydate'
-        customer_info = 'https://api8.ibtrader.ir/api/party/getcustomerinfo'
+    if is_ib:
+        shard = runtime_config.get("ib_portfolio_shard", "api8")
+        portfolio = f'https://{shard}.{domain}/api/portfolio/getrealsecuritypositionbydate'
+        customer_info = f'https://{shard}.{domain}/api/party/getcustomerinfo'
     else:
         portfolio = (
             f'https://backofficeexternal{prefix}{domain}'
@@ -100,7 +112,7 @@ def get_endpoints_for(code: str) -> dict:
             '/api/party/getcustomerinfo'
         )
 
-    return {
+    endpoints = {
         'captcha': f'https://identity{prefix}{domain}/api/Captcha/GetCaptcha',
         'login': f'https://identity{prefix}{domain}/api/v2/accounts/login',
         'order': f'https://api{prefix}{domain}/api/v2/orders/NewOrder',
@@ -112,3 +124,10 @@ def get_endpoints_for(code: str) -> dict:
         'portfolio': portfolio,
         'customer_info': customer_info,
     }
+    # Escape hatch: a per-endpoint full-URL override (``endpoint_<code>_<name>``)
+    # redirects a single endpoint verbatim if one path moves on its own.
+    for name in list(endpoints):
+        override = runtime_config.get(f"endpoint_{code}_{name}", "")
+        if override:
+            endpoints[name] = override
+    return endpoints

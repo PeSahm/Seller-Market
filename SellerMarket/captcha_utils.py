@@ -3,6 +3,8 @@ import os
 import requests
 import logging
 
+import runtime_config
+
 logger = logging.getLogger(__name__)
 
 # OCR service URL(s) - uses environment variable for Docker compatibility.
@@ -18,12 +20,16 @@ _OCR_TIMEOUT_S = 10
 
 
 def _ocr_base_urls():
-    """Parse ``OCR_SERVICE_URL`` into an ordered list of base URLs.
+    """Parse the OCR endpoint pool into an ordered list of base URLs.
 
-    Accepts a single URL or a comma/space-separated list; trailing slashes are
-    stripped. A single URL yields a one-element list (backward compatible).
+    Precedence: the DB-pushed ``[runtime] ocr_service_url`` (changeable
+    fleet-wide with no redeploy) wins; otherwise the ``OCR_SERVICE_URL`` env
+    constant (baked into compose). Accepts a single URL or a comma/space-
+    separated list; trailing slashes are stripped. A single URL yields a
+    one-element list (backward compatible).
     """
-    raw = (OCR_SERVICE_URL or '').replace(',', ' ')
+    raw = runtime_config.get("ocr_service_url", "") or OCR_SERVICE_URL
+    raw = (raw or '').replace(',', ' ')
     return [part.rstrip('/') for part in raw.split() if part.strip()]
 
 

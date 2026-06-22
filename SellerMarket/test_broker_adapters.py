@@ -211,6 +211,34 @@ def test_exir_prepare_buy_respects_max_volume(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# ExirAdapter — [runtime] overrides (DB-pushed, no image rebuild)
+# ---------------------------------------------------------------------------
+
+def test_exir_runtime_overrides_domain_and_order_path(monkeypatch):
+    import runtime_config
+    _install_exir_fakes(monkeypatch, asset="1000000")
+    monkeypatch.setattr(
+        runtime_config, "_snapshot",
+        lambda: {"exir_domain": "exir2.example", "exir_path_order": "/api/v3/order"},
+    )
+    a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
+    po = a.prepare_order(isin="IRO3SMBZ0001", side=1, config_section={"price": "200"})
+    assert po.order_url == "https://khobregan.exir2.example/api/v3/order"
+
+
+def test_exir_runtime_overrides_fallback_buy_fee(monkeypatch):
+    import runtime_config
+    # wages returns SIDE_BUY=0.0 → the conservative fallback fee applies.
+    _install_exir_fakes(monkeypatch, asset="1000000", buy_fee=0.0)
+    monkeypatch.setattr(runtime_config, "_snapshot",
+                        lambda: {"exir_fallback_buy_fee": "0.02"})
+    a = exir_adapter.ExirAdapter("khobregan", "1164580090306", "pw")
+    po = a.prepare_order(isin="IRO3SMBZ0001", side=1, config_section={"price": "200"})
+    # volume == int(1000000 / (200 * 1.02)) == 4901
+    assert po.volume == 4901
+
+
+# ---------------------------------------------------------------------------
 # ExirAdapter — SELL
 # ---------------------------------------------------------------------------
 

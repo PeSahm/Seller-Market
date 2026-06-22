@@ -20,7 +20,17 @@ import sys
 import threading
 import time
 
+import runtime_config
+
 logger = logging.getLogger("bot_entrypoint")
+
+
+def _market_data_url() -> str:
+    """Auto-sell feed URL: DB-pushed ``[runtime] market_data_url`` > env
+    ``MARKET_DATA_URL`` > '' (auto-sell off). Read once at start — enabling/
+    changing the feed endpoint still needs a monitor restart (documented
+    limitation; the local sidecar URL essentially never changes)."""
+    return runtime_config.get("market_data_url", "") or os.environ.get("MARKET_DATA_URL", "")
 
 
 def _start_scheduler() -> None:
@@ -50,7 +60,7 @@ def main() -> None:
     from auto_sell_monitor import AutoSellMonitor, load_auto_sell_targets
 
     config_ini = os.environ.get("CONFIG_INI", "/app/config.ini")
-    market_data_url = os.environ.get("MARKET_DATA_URL", "")
+    market_data_url = _market_data_url()
 
     if not market_data_url:
         # No feed wired (env change needs a redeploy anyway) → scheduler-only.

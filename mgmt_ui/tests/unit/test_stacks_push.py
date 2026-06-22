@@ -356,3 +356,100 @@ async def test_render_config_ini_for_stack_preview_handles_missing_file(
 
     assert current == ""
     assert new == "<NEW CONTENT>"
+
+
+# ---------------------------------------------------------------------------
+# 6. Fleet-wide push (push_config_ini_to_all_stacks)
+# ---------------------------------------------------------------------------
+
+
+def _fake_named_server(name: str) -> SimpleNamespace:
+    s = _fake_server()
+    s.name = name
+    return s
+
+
+async def test_fleet_push_reports_per_stack_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Best-effort fleet push: each stack's outcome is mapped to a status and
+    one failure never aborts the rest. Warms the family cache + audits once."""
+    srv1 = _fake_named_server("PouyanIt")
+    srv2 = _fake_named_server("Tebyan")
+    s1 = _fake_stack(server_id=srv1.id)   # success
+    s2 = _fake_stack(server_id=srv1.id)   # host down (SSHError)
+    s3 = _fake_stack(server_id=srv2.id)   # lock busy (RuntimeError)
+    servers = {srv1.id: srv1, srv2.id: srv2}
+
+    db = MagicMock()
+    db.get = AsyncMock(side_effect=lambda _model, sid: servers.get(sid))
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+
+    async def _fake_list(_db):
+        return [s1, s2, s3]
+
+    monkeypatch.setattr(stacks_svc, "list_stacks", _fake_list)
+    monkeypatch.setattr(
+        "app.services.brokers.registry.warm_family_cache", AsyncMock()
+    )
+    _install_lock_session(monkeypatch)  # patches AsyncSessionLocal
+
+    outcomes = {s1.id: None, s2.id: SSHError("down"), s3.id: RuntimeError("busy")}
+
+    async def _fake_push(_push_db, sid, _actor):
+        exc = outcomes[sid]
+        if exc is not None:
+            raise exc
+
+    monkeypatch.setattr(stacks_svc, "push_config_ini_for_stack", _fake_push)
+
+    res = await stacks_svc.push_config_ini_to_all_stacks(db, actor_id=None)
+
+    assert (res.total, res.succeeded, res.failed) == (3, 1, 2)
+    by_stack = {i.stack_id: i for i in res.items}
+    assert by_stack[s1.id].ok and by_stack[s1.id].status == "pushed"
+    assert by_stack[s2.id].status == "host_down" and not by_stack[s2.id].ok
+    assert by_stack[s3.id].status == "lock_busy"
+    assert by_stack[s1.id].server_name == "PouyanIt"
+    # one fleet-level audit row + commit
+    db.add.assert_called_once()
+    db.commit.assert_awaited()
+
+
+async def test_fleet_push_only_stack_ids_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``only_stack_ids`` (retry-failed) pushes just the requested stacks."""
+    srv = _fake_named_server("PouyanIt")
+    s1 = _fake_stack(server_id=srv.id)
+    s2 = _fake_stack(server_id=srv.id)
+
+    db = MagicMock()
+    db.get = AsyncMock(return_value=srv)
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+
+    async def _fake_list(_db):
+        return [s1, s2]
+
+    pushed: list = []
+
+    async def _fake_push(_push_db, sid, _actor):
+        pushed.append(sid)
+
+    monkeypatch.setattr(stacks_svc, "list_stacks", _fake_list)
+    monkeypatch.setattr(
+        "app.services.brokers.registry.warm_family_cache", AsyncMock()
+    )
+    _install_lock_session(monkeypatch)
+    monkeypatch.setattr(stacks_svc, "push_config_ini_for_stack", _fake_push)
+
+    res = await stacks_svc.push_config_ini_to_all_stacks(
+        db, actor_id=None, only_stack_ids=[s2.id]
+    )
+
+    assert pushed == [s2.id]
+    assert res.total == 1 and res.succeeded == 1

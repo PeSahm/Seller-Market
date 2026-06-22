@@ -138,8 +138,15 @@ def _make_db(customer_rows: list[SimpleNamespace] | None = None) -> MagicMock:
     scalars_mock.all = MagicMock(return_value=customer_rows or [])
     customers_result.scalars = MagicMock(return_value=scalars_mock)
 
+    # get_all_settings (bot [runtime]) — empty rows → DEFAULTS → no overrides.
+    all_settings_result = MagicMock()
+    all_settings_scalars = MagicMock()
+    all_settings_scalars.all = MagicMock(return_value=[])
+    all_settings_result.scalars = MagicMock(return_value=all_settings_scalars)
+
     # Order: two settings reads, the customer read, then the two tail settings
-    # reads (enable_locust_autoscale → "false", autobalance_users_multiplier).
+    # reads (enable_locust_autoscale → "false", autobalance_users_multiplier),
+    # then get_all_settings for the [runtime] section.
     # The scheduler-jobs + locust-config service calls are monkeypatched, so
     # they don't consume from this queue.
     db.execute = AsyncMock(
@@ -150,6 +157,7 @@ def _make_db(customer_rows: list[SimpleNamespace] | None = None) -> MagicMock:
             customers_result,
             autoscale_off,     # enable_locust_autoscale
             settings_result,   # autobalance_users_multiplier
+            all_settings_result,  # get_all_settings (bot [runtime])
         ]
     )
     db.get = AsyncMock(return_value=_fake_server())

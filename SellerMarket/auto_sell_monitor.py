@@ -33,6 +33,7 @@ from typing import Callable, Optional
 import auto_sell_engine
 import direct_sell
 import order_fire_log
+import runtime_config
 
 logger = logging.getLogger(__name__)
 
@@ -132,8 +133,14 @@ def parse_window(window: str) -> tuple[dtime, dtime]:
 # real thinning. Env-overridable (AUTO_SELL_CONFIRM_SECONDS); 0 disables (legacy
 # fire-on-first-reading) for emergencies only.
 def _confirm_seconds() -> float:
+    # DB-pushed [runtime] value wins (hot-reloadable fleet-wide), else the env
+    # var (baked into compose), else the default. Either source change is picked
+    # up by the supervisor's per-tick refresh — no container restart.
+    raw = runtime_config.get("auto_sell_confirm_secs", "")
+    if raw == "":
+        raw = os.environ.get("AUTO_SELL_CONFIRM_SECONDS", "5")
     try:
-        v = float(os.environ.get("AUTO_SELL_CONFIRM_SECONDS", "5"))
+        v = float(raw)
         return v if v >= 0 else 5.0
     except (TypeError, ValueError):
         return 5.0
@@ -215,7 +222,13 @@ class AutoSellMonitor:
         self.market_data_url = market_data_url
         self._build_adapter = build_adapter
         self._now = now_fn
-        self._start, self._end = parse_window(window or os.environ.get("AUTO_SELL_WINDOW", ""))
+        # An explicit constructor window (tests) always wins; otherwise the
+        # DB-pushed [runtime] window, then the env var, then the default. Both
+        # the window and confirm-seconds are re-read every supervisor tick
+        # (_refresh_runtime_knobs) so an operator can change market hours /
+        # sensitivity fleet-wide with no container restart.
+        self._window_arg = window
+        self._start, self._end = parse_window(self._window_source())
         self._sleep = sleep
         # Sustained-below confirmation (incident fix): a single sub-threshold push
         # must NOT fire — the queue has to STAY <= threshold for _confirm_seconds.
@@ -260,6 +273,19 @@ class AutoSellMonitor:
             self._day_key = key
             self._day_state = DayState(key)
         return self._day_state
+
+    def _window_source(self) -> str:
+        """Window string: constructor arg > [runtime] > env > (parse_window default)."""
+        return (self._window_arg
+                or runtime_config.get("auto_sell_window", "")
+                or os.environ.get("AUTO_SELL_WINDOW", ""))
+
+    def _refresh_runtime_knobs(self) -> None:
+        """Re-read the hot-reloadable [runtime] knobs (market-hours window +
+        confirm-seconds) and update them in place (GIL-atomic scalar assigns),
+        so a pushed change takes effect without restarting the monitor."""
+        self._start, self._end = parse_window(self._window_source())
+        self._confirm_seconds = _confirm_seconds()
 
     def market_open(self) -> bool:
         t = self._now().time()
@@ -455,6 +481,10 @@ class AutoSellMonitor:
 
     def _tick(self, config_path: str) -> str:
         """One supervisor poll cycle. Returns a short status string (for tests)."""
+        # Hot-reload the market-hours window + confirm-seconds from [runtime]
+        # every tick (cheap — runtime_config is TTL-cached), independent of
+        # whether the armed-target set changed.
+        self._refresh_runtime_knobs()
         content = self._read_content(config_path)
         if content is None:
             return "skip-unreadable"

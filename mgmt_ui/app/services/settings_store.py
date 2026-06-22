@@ -95,7 +95,76 @@ DEFAULTS: dict[str, str] = {
     # position (customer × stock). GLOBAL default in TOMAN; per-agent override
     # lives in agent_fee_configs. The report converts ×10 to Rial. "0" = none.
     "mark_to_market_loss_fee_toman": "0",
+    # --- Bot runtime / endpoints (DB-pushed [runtime] section) -------------
+    # These used to be HARDCODED in the bot's Python image, so changing one (e.g.
+    # the ephoenix market-data host moving mdapi1 -> marketdatagw) needed a full
+    # CI + image-rebuild + fleet-redeploy cycle. They are now rendered into the
+    # bot's config.ini ``[runtime]`` section and pushed to every stack instantly
+    # (no CI, no image, no recreate). Each ``bot_rt_<suffix>`` row renders as the
+    # wire key ``<suffix>`` the bot reads (``runtime_config.get``); EVERY default
+    # equals the previous hardcoded literal, so behaviour is unchanged until
+    # edited. ephoenix family:
+    "bot_rt_ephoenix_domain": "ephoenix.ir",
+    "bot_rt_ephoenix_md_host": "marketdatagw",   # the mdapi1 -> marketdatagw incident
+    # ib (IbTrader) — its own domain + market-data host + portfolio shard:
+    "bot_rt_ib_domain": "ibtrader.ir",
+    "bot_rt_ib_md_host": "mdapi",
+    "bot_rt_ib_portfolio_shard": "api8",
+    # exir / Rayan-HamAfza family:
+    "bot_rt_exir_domain": "exirbroker.com",
+    "bot_rt_exir_fallback_buy_fee": "0.005",
+    # auto-sell timing knobs (hot-reloaded by the monitor's supervisor). The
+    # confirm-secs default is stored as "5.0" (not "5") so it round-trips through
+    # the route's float field — str(5.0) == "5.0" — and an unchanged Save is
+    # correctly detected as "no change" (no spurious fleet push).
+    "bot_rt_auto_sell_window": "09:00-12:30",
+    "bot_rt_auto_sell_confirm_secs": "5.0",
 }
+
+# Settings whose value is rendered into the bot's config.ini ``[runtime]``
+# section. ``bot_rt_*`` rows render under the suffix wire key; the two aliases
+# below carry existing settings into [runtime] under the names the bot reads.
+BOT_RUNTIME_PREFIX = "bot_rt_"
+_BOT_RUNTIME_ALIASES: dict[str, str] = {
+    # setting key -> [runtime] wire key
+    "ocr_service_url": "ocr_service_url",
+    "bot_market_data_url": "market_data_url",
+}
+
+
+def build_runtime_section(all_settings: dict[str, str]) -> dict[str, str]:
+    """Project the settings dict onto the bot config.ini ``[runtime]`` wire dict.
+
+    * ``bot_rt_<wire>`` rows render as ``<wire>`` (the name the bot's
+      ``runtime_config.get`` reads). This covers both the validated first-class
+      fields AND the Advanced raw-editor escape-hatch keys
+      (``endpoint_*`` / ``exir_path_*`` / ``rlc_*`` / ``rlc_ws_*``).
+    * ``ocr_service_url`` and ``bot_market_data_url`` also flow in (as
+      ``ocr_service_url`` / ``market_data_url``) so the OCR pool + auto-sell feed
+      become instantly changeable too.
+
+    A value still at its built-in DEFAULT is OMITTED: the bot's hardcoded
+    fallback is identical, so config.ini stays byte-for-byte the same as the
+    pre-feature output until an operator actually changes something (no churn on
+    the file that's pushed on every customer edit, and the renderer skips the
+    whole section when nothing is overridden). Escape-hatch keys (no default) are
+    rendered whenever set. Empty values are always omitted.
+    """
+    out: dict[str, str] = {}
+
+    def _is_override(setting_key: str, value: object) -> bool:
+        if value in (None, ""):
+            return False
+        return setting_key not in DEFAULTS or value != DEFAULTS[setting_key]
+
+    for key, value in all_settings.items():
+        if key.startswith(BOT_RUNTIME_PREFIX) and _is_override(key, value):
+            out[key[len(BOT_RUNTIME_PREFIX):]] = value
+    for setting_key, wire_key in _BOT_RUNTIME_ALIASES.items():
+        value = all_settings.get(setting_key, "")
+        if _is_override(setting_key, value):
+            out[wire_key] = value
+    return out
 
 
 async def get_setting(db: AsyncSession, key: str) -> str:

@@ -183,6 +183,7 @@ def _make_db(customer_rows: list[SimpleNamespace]) -> MagicMock:
             locust_result,
             settings_result,  # enable_locust_autoscale
             settings_result,  # autobalance_users_multiplier
+            _scalars_result([]),  # get_all_settings (bot [runtime]); empty → defaults
         ]
     )
     db.get = AsyncMock(return_value=_fake_server())

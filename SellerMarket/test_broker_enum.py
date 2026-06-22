@@ -9,7 +9,27 @@ Locks two guarantees:
 """
 from __future__ import annotations
 
+import pytest
+
+import runtime_config
 from broker_enum import BrokerCode, get_endpoints_for
+
+
+@pytest.fixture(autouse=True)
+def _clean_runtime():
+    # No stale [runtime] snapshot leaking between tests; default path doesn't
+    # exist so an un-injected test sees an empty section (== hardcoded fallback).
+    runtime_config.reset_cache()
+    yield
+    runtime_config.reset_cache()
+
+
+@pytest.fixture
+def runtime(monkeypatch):
+    """Inject a fake [runtime] section so endpoints read overrides, no file I/O."""
+    data: dict[str, str] = {}
+    monkeypatch.setattr(runtime_config, "_snapshot", lambda: data)
+    return data
 
 
 def test_enum_delegates_to_get_endpoints_for():
@@ -51,3 +71,43 @@ def test_new_ephoenix_broker_needs_no_enum_entry():
     assert ep["order"] == "https://api-newbank.ephoenix.ir/api/v2/orders/NewOrder"
     assert ep["login"] == "https://identity-newbank.ephoenix.ir/api/v2/accounts/login"
     assert ep["market_data"] == "https://marketdatagw.ephoenix.ir/api/v2/instruments/full"
+
+
+# ---------------------------------------------------------------------------
+# [runtime] overrides — change endpoints fleet-wide with no image rebuild
+# ---------------------------------------------------------------------------
+
+def test_runtime_override_ephoenix_md_host(runtime):
+    # Replays the S29 incident: the ephoenix market-data host moves, and a
+    # single setting redirects every stack with no CI/image/redeploy.
+    runtime["ephoenix_md_host"] = "newmdgw"
+    ep = get_endpoints_for("ayandeh")
+    assert ep["market_data"] == "https://newmdgw.ephoenix.ir/api/v2/instruments/full"
+    # other endpoints unaffected
+    assert ep["order"] == "https://api-ayandeh.ephoenix.ir/api/v2/orders/NewOrder"
+
+
+def test_runtime_override_ephoenix_domain(runtime):
+    runtime["ephoenix_domain"] = "ephoenix2.ir"
+    ep = get_endpoints_for("ayandeh")
+    assert ep["order"] == "https://api-ayandeh.ephoenix2.ir/api/v2/orders/NewOrder"
+    assert ep["market_data"] == "https://marketdatagw.ephoenix2.ir/api/v2/instruments/full"
+
+
+def test_runtime_override_ib(runtime):
+    runtime["ib_domain"] = "ibtrader2.ir"
+    runtime["ib_md_host"] = "mdapi2"
+    runtime["ib_portfolio_shard"] = "api9"
+    ep = get_endpoints_for("ib")
+    assert ep["order"] == "https://api.ibtrader2.ir/api/v2/orders/NewOrder"
+    assert ep["market_data"] == "https://mdapi2.ibtrader2.ir/api/v2/instruments/full"
+    assert ep["portfolio"] == "https://api9.ibtrader2.ir/api/portfolio/getrealsecuritypositionbydate"
+
+
+def test_endpoint_escape_hatch_full_url(runtime):
+    # A single API path moved → override just that one endpoint, verbatim.
+    runtime["endpoint_ib_order"] = "https://custom-host.example/api/v3/place"
+    ep = get_endpoints_for("ib")
+    assert ep["order"] == "https://custom-host.example/api/v3/place"
+    # siblings untouched
+    assert ep["login"] == "https://identity.ibtrader.ir/api/v2/accounts/login"
