@@ -36,43 +36,135 @@ _DEFAULT_INTERVAL = 600  # wake every ~10 min; cheap when not firing
 _DEFAULT_HOUR = 12  # noon Tehran
 
 
-async def _sweep_once() -> tuple[int, int, int]:
-    """Verify every customer once. Returns (checked, valid, invalid)."""
-    from app.db import AsyncSessionLocal
+async def _verify_one(db, cust, ocr_service_url):
+    """Verify one customer against its broker and persist the verdict; return
+    the :class:`CredStatus`."""
     from app.services import broker_client
     from app.services import customers as customers_svc
-    from app.services import settings_store
-    from app.services.brokers.base import CredStatus, resolve_cred_status
+    from app.services.brokers.base import resolve_cred_status
+
+    password = await customers_svc.decrypt_password(cust)
+    result = await broker_client.verify_credentials(
+        broker_code=cust.broker,
+        username=cust.username,
+        password=password,
+        ocr_service_url=ocr_service_url,
+    )
+    status = resolve_cred_status(result)
+    await customers_svc.set_credential_status(
+        db, cust.id, status, result.error or result.message
+    )
+    return status
+
+
+async def _verify_batch(customers, ocr_service_url, *, pace_seconds, sleep_fn):
+    """Verify a list of customers, each in its own short-lived session (so one
+    failure/rollback can't poison the others) and paced between calls to ease
+    the broker identity-service rate limit that a bulk sweep otherwise trips.
+
+    Returns ``(checked, valid, invalid, still_transient_ids)`` — an account that
+    erred or came back inconclusive is reported as still-transient so the retry
+    pass can pick it up.
+    """
+    from app.db import AsyncSessionLocal
+    from app.services.brokers.base import CredStatus
 
     checked = valid = invalid = 0
-    async with AsyncSessionLocal() as db:
-        ocr_service_url = await settings_store.get_setting(db, "ocr_service_url")
-        customers = await customers_svc.list_customers(db)
-
+    still_transient: list = []
     for cust in customers:
         try:
-            # Each customer gets its own short-lived session so one failure /
-            # rollback can't poison the others.
             async with AsyncSessionLocal() as db:
-                password = await customers_svc.decrypt_password(cust)
-                result = await broker_client.verify_credentials(
-                    broker_code=cust.broker,
-                    username=cust.username,
-                    password=password,
-                    ocr_service_url=ocr_service_url,
-                )
-                status = resolve_cred_status(result)
-                message = result.error or result.message
-                await customers_svc.set_credential_status(
-                    db, cust.id, status, message
-                )
+                status = await _verify_one(db, cust, ocr_service_url)
             checked += 1
             if status == CredStatus.VALID:
                 valid += 1
             elif status == CredStatus.INVALID_CREDENTIALS:
                 invalid += 1
+            else:
+                still_transient.append(cust.id)
         except Exception:  # noqa: BLE001 — isolate per-customer failures
             logger.exception("credential check failed for customer %s", cust.id)
+            still_transient.append(cust.id)
+        if pace_seconds > 0:
+            await sleep_fn(pace_seconds)
+    return checked, valid, invalid, still_transient
+
+
+async def recheck_transients(
+    *,
+    rounds: int,
+    cooldown_seconds: float,
+    pace_seconds: float = 0.0,
+    sleep_fn=asyncio.sleep,
+) -> dict:
+    """Re-verify ONLY the customers currently ``transient``.
+
+    A ``transient`` verdict means the last check couldn't decide — almost always
+    a rate-limit casualty of the bulk sweep, not a real problem. This re-verifies
+    just that set, up to ``rounds`` passes each preceded by ``cooldown_seconds``
+    so the rate limit clears. A transient that now resolves to valid/invalid is
+    overwritten (the sticky rule only protects valid/invalid FROM a transient,
+    not the reverse); one still undecided stays for the next round / next daily
+    sweep. Bounded so a genuinely-unreachable broker can't loop forever.
+    """
+    from app.db import AsyncSessionLocal
+    from app.services import customers as customers_svc
+    from app.services import settings_store
+
+    rounds_run = resolved = 0
+    for _ in range(max(0, rounds)):
+        async with AsyncSessionLocal() as db:
+            ocr_service_url = await settings_store.get_setting(db, "ocr_service_url")
+            transients = await customers_svc.list_customers(
+                db, credential_status="transient"
+            )
+        if not transients:
+            break
+        if cooldown_seconds > 0:
+            await sleep_fn(cooldown_seconds)  # let the broker rate limit clear
+        before = len(transients)
+        _, _, _, still = await _verify_batch(
+            transients, ocr_service_url, pace_seconds=pace_seconds, sleep_fn=sleep_fn
+        )
+        rounds_run += 1
+        resolved += before - len(still)
+        logger.info(
+            "transient recheck round %d: %d rechecked, %d resolved, %d still transient",
+            rounds_run, before, before - len(still), len(still),
+        )
+        if not still:
+            break
+    return {"rounds": rounds_run, "resolved": resolved}
+
+
+async def _sweep_once(
+    *,
+    pace_seconds: float = 0.0,
+    retry_rounds: int = 0,
+    retry_cooldown_seconds: float = 0.0,
+    sleep_fn=asyncio.sleep,
+) -> tuple[int, int, int]:
+    """Verify every customer once (paced), then re-check the transients so a
+    rate-limit casualty of this very sweep self-heals. Returns the FIRST-pass
+    ``(checked, valid, invalid)``; ``recheck_transients`` logs its own progress.
+    """
+    from app.db import AsyncSessionLocal
+    from app.services import customers as customers_svc
+    from app.services import settings_store
+
+    async with AsyncSessionLocal() as db:
+        ocr_service_url = await settings_store.get_setting(db, "ocr_service_url")
+        customers = await customers_svc.list_customers(db)
+    checked, valid, invalid, _still = await _verify_batch(
+        customers, ocr_service_url, pace_seconds=pace_seconds, sleep_fn=sleep_fn
+    )
+    if retry_rounds > 0:
+        await recheck_transients(
+            rounds=retry_rounds,
+            cooldown_seconds=retry_cooldown_seconds,
+            pace_seconds=pace_seconds,
+            sleep_fn=sleep_fn,
+        )
     return checked, valid, invalid
 
 
@@ -99,12 +191,18 @@ async def run_credential_checker(
             try:
                 now = datetime.now(_TEHRAN)
                 if now.hour == target_hour and now.date() != last_run_date:
+                    from app.settings import get_settings
+                    s = get_settings()
                     logger.info("credential checker: starting daily sweep")
-                    checked, valid, invalid = await _sweep_once()
+                    checked, valid, invalid = await _sweep_once(
+                        pace_seconds=s.credential_check_pace_seconds,
+                        retry_rounds=s.credential_check_retry_rounds,
+                        retry_cooldown_seconds=s.credential_check_retry_cooldown_seconds,
+                    )
                     last_run_date = now.date()
                     logger.info(
                         "credential checker swept %d customer(s): "
-                        "%d valid, %d invalid",
+                        "%d valid, %d invalid (transients re-checked after cooldown)",
                         checked, valid, invalid,
                     )
             except Exception:  # noqa: BLE001 — never let one tick kill the worker
