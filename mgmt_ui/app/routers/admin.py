@@ -51,7 +51,6 @@ from app.services import audit as services_audit
 from app.services import auto_sell_view as services_auto_sell_view
 from app.services import autobalance as services_autobalance
 from app.services import broker_client
-from app.services.brokers.base import CredStatus
 from app.services import broker_orders as services_broker_orders
 from app.services import brokers_admin
 from app.services import close_positions_view as services_close_positions
@@ -745,9 +744,14 @@ async def admin_customers(
             # Bad UUID in the query string — treat as "no filter" rather
             # than 422 the page.
             agent_uuid = None
-    status = status or None
+    # Whitelist the enum-backed filters: `assignment_status` and
+    # `credential_status` are native Postgres ENUMs, so an out-of-range value
+    # (e.g. a hand-edited ``?cred=garbage``) would fail the enum cast and 500.
+    # An unknown value degrades to "no filter" (same forgiving UX as the
+    # bad-UUID handling above and the agent route).
+    status = status if status in {"pending", "assigned", "active"} else None
     broker = broker or None
-    cred = cred or None
+    cred = cred if cred in {"unknown", "valid", "invalid", "transient"} else None
     q = q or None
     customers = await services_customers.list_customers(
         db,
@@ -836,7 +840,6 @@ async def admin_customer_create(
     broker: str = Form(...),
     username: str = Form(...),
     password: str = Form(...),
-    verified: str = Form(""),
 ):
     """Create a new account-shaped customer owned by ``agent_id``.
 
@@ -844,9 +847,6 @@ async def admin_customer_create(
     those move to the per-trade-instruction form on the customer detail
     page. Service layer enforces the composite UNIQUE on
     ``(agent_id, broker, username)`` (one credential set per account).
-
-    ``verified=1`` (set by the verify-on-save flow) persists
-    ``credential_status=valid`` so the dashboard reflects it immediately.
     """
     sticky = {
         "agent_id": str(agent_id),
@@ -904,15 +904,6 @@ async def admin_customer_create(
             status_code=status.HTTP_400_BAD_REQUEST,
         )
 
-    if verified == "1":
-        try:
-            await services_customers.set_credential_status(
-                db, customer.id, CredStatus.VALID,
-                "verified on save", actor_id=user.id,
-            )
-        except Exception:  # noqa: BLE001 — never block creation on a metadata write
-            logger.exception("persist credential_status for %s failed", customer.id)
-
     return _flash_redirect(request, f"/admin/customers/{customer.id}")
 
 
@@ -958,6 +949,19 @@ async def admin_customer_verify_credentials(
         ctx["result"] = broker_client.VerifyResult(
             ok=False,
             error="No broker selected — pick one in the Broker dropdown above.",
+        )
+        ctx["typed_username"] = effective_username
+        return templates.TemplateResponse(
+            "admin/partials/customer_verify_result.html", ctx
+        )
+
+    if not effective_username:
+        # No point hitting the broker (a captcha solve + up to 5 login attempts)
+        # with a blank username — it can only be rejected.
+        ctx = _ctx(request, user, current_tab="/admin/customers")
+        ctx["result"] = broker_client.VerifyResult(
+            ok=False,
+            error="Enter the account username above before clicking Verify.",
         )
         ctx["typed_username"] = effective_username
         return templates.TemplateResponse(
@@ -1183,7 +1187,6 @@ async def admin_customer_update(
     username: Optional[str] = Form(None),
     password: Optional[str] = Form(None),
     version: int = Form(...),
-    verified: str = Form(""),
 ):
     """Apply an optimistic-locked update to a Customer (account) row.
 
@@ -1288,15 +1291,6 @@ async def admin_customer_update(
     # but don't fail the redirect — the customer change has already
     # committed and an operator can re-trigger the push from the stack
     # page if the SSH layer is having a moment.
-    if verified == "1":
-        try:
-            await services_customers.set_credential_status(
-                db, customer_id, CredStatus.VALID,
-                "verified on save", actor_id=user.id,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("persist credential_status for %s failed", customer_id)
-
     await _push_customer_stack_config(db, customer_id, actor_id=user.id)
 
     return _flash_redirect(request, f"/admin/customers/{customer_id}")
