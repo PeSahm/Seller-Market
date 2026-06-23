@@ -140,6 +140,23 @@ class Settings(BaseSettings):
     credential_check_hour_tehran: int = Field(
         default=12, alias="CREDENTIAL_CHECK_HOUR_TEHRAN", ge=0, le=23
     )
+    # Pace between per-customer broker logins in a sweep (seconds). A bulk sweep
+    # otherwise trips the broker identity-service rate limit and the rate-limited
+    # accounts land as ``transient`` (couldn't decide). A small delay markedly
+    # reduces that. 0 = no pacing.
+    credential_check_pace_seconds: float = Field(
+        default=1.0, alias="CREDENTIAL_CHECK_PACE_SECONDS", ge=0
+    )
+    # After the full sweep, re-verify ONLY the still-``transient`` customers up to
+    # this many extra rounds (a transient is almost always a rate-limit casualty
+    # of the sweep, not a real failure). Each round waits the cooldown below so
+    # the limit clears. 0 = no retry. Bounded so an unreachable broker can't loop.
+    credential_check_retry_rounds: int = Field(
+        default=2, alias="CREDENTIAL_CHECK_RETRY_ROUNDS", ge=0
+    )
+    credential_check_retry_cooldown_seconds: float = Field(
+        default=300.0, alias="CREDENTIAL_CHECK_RETRY_COOLDOWN_SECONDS", ge=0
+    )
 
     enable_janitor: bool = Field(default=True, alias="ENABLE_JANITOR")
     janitor_interval_seconds: int = Field(
