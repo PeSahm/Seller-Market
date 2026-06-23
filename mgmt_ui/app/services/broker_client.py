@@ -431,7 +431,7 @@ async def _ephoenix_verify_credentials(
     """
     endpoints = _endpoints_for(broker_code)
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         token, last_error, cred_status = await _get_token(
             client, broker_code, endpoints, username, password, ocr_service_url
         )
@@ -576,7 +576,7 @@ async def _ephoenix_verify_isin(
                 logger.warning(last)
         return None, (last or "market_data exhausted retries")
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         token, last_error, _ = await _get_token(
             client, broker_code, endpoints, username, password, ocr_service_url
         )
@@ -733,7 +733,7 @@ async def _ephoenix_get_orders(
         )
 
     rows: list[dict] = []
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         token, last_error, _ = await _get_token(
             client, broker_code, endpoints, username, password, ocr_service_url
         )
@@ -838,7 +838,7 @@ async def _ephoenix_get_holdings(
             timeout=_HTTP_TIMEOUT_S,
         )
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         token, last_error, _ = await _get_token(
             client, broker_code, endpoints, username, password, ocr_service_url
         )

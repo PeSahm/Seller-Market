@@ -251,7 +251,7 @@ class ExirAdapter:
         # Fresh login on a throwaway client (cookies are snapshotted into the
         # returned session dict, so the client itself need not survive).
         async with httpx.AsyncClient(
-            follow_redirects=True, timeout=_HTTP_TIMEOUT_S
+            follow_redirects=True, timeout=_HTTP_TIMEOUT_S, trust_env=False
         ) as client:
             session = await self._login(client, username, password, ocr_service_url)
 
@@ -292,7 +292,7 @@ class ExirAdapter:
         """Log in once; report success/failure. Uses one fresh client."""
         try:
             async with httpx.AsyncClient(
-                follow_redirects=True, timeout=_HTTP_TIMEOUT_S
+                follow_redirects=True, timeout=_HTTP_TIMEOUT_S, trust_env=False
             ) as client:
                 session = await self._login(
                     client, username, password, ocr_service_url
@@ -395,7 +395,7 @@ class ExirAdapter:
                 session = await self._session(username, password, ocr_service_url)
                 nt = session["nt"]
                 async with httpx.AsyncClient(
-                    follow_redirects=True, timeout=_HTTP_TIMEOUT_S
+                    follow_redirects=True, timeout=_HTTP_TIMEOUT_S, trust_env=False
                 ) as client:
                     for name, value in session["cookies"].items():
                         client.cookies.set(name, value)
@@ -443,7 +443,7 @@ class ExirAdapter:
             session = await self._session(username, password, ocr_service_url)
             nt = session["nt"]
             async with httpx.AsyncClient(
-                follow_redirects=True, timeout=_HTTP_TIMEOUT_S
+                follow_redirects=True, timeout=_HTTP_TIMEOUT_S, trust_env=False
             ) as client:
                 for name, value in session["cookies"].items():
                     client.cookies.set(name, value)
