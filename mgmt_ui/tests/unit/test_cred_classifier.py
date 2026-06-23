@@ -60,24 +60,22 @@ def test_classify_ephoenix_never_invalid_on_unknown():
 
 
 # --------------------------------------------------------------------------
-# exir — pure description classifier (conservative; marker pending)
+# exir — pure login classifier (keys on numeric errorCode, LIVE-confirmed)
 # --------------------------------------------------------------------------
-def test_classify_exir_empty_markers_never_invalid():
-    """With no captured markers (current state), exir never classifies invalid."""
-    assert exir_mod._EXIR_INVALID_CREDENTIAL_MARKERS == ()
-    for desc in (None, "", "نام کاربری یا رمز عبور اشتباه است", "کد امنیتی نادرست"):
-        assert exir_mod._classify_exir_description(desc) is False
-
-
-def test_classify_exir_marker_match(monkeypatch):
-    """When a marker IS configured, a matching description classifies invalid
-    and a non-matching one (e.g. wrong-captcha) does not."""
-    monkeypatch.setattr(
-        exir_mod, "_EXIR_INVALID_CREDENTIAL_MARKERS", ("رمز عبور اشتباه",)
-    )
-    assert exir_mod._classify_exir_description("نام کاربری یا رمز عبور اشتباه است") is True
-    assert exir_mod._classify_exir_description("کد امنیتی نادرست") is False
-    assert exir_mod._classify_exir_description(None) is False
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ({"errorCode": 40037, "type": "error"}, True),   # wrong password (HTTP 403)
+        ({"errorCode": 9002, "type": "error"}, False),   # wrong captcha (HTTP 401)
+        ({"nt": "seed"}, False),                         # success
+        ({"errorCode": 99999}, False),                   # unknown
+        ({}, False),
+        (None, False),
+        ("نام کاربری یا کلمه عبور اشتباه است", False),    # a bare string is not a body
+    ],
+)
+def test_classify_exir_login(body, expected):
+    assert exir_mod._classify_exir_login(body) is expected
 
 
 # --------------------------------------------------------------------------

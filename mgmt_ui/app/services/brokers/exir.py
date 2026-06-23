@@ -35,28 +35,23 @@ _HTTP_TIMEOUT_S = 20.0
 # perfect; a handful of retries covers the occasional ambiguous image.
 _MAX_CAPTCHA_ATTEMPTS = 6
 
-# Exir login-failure markers that mean "wrong username/password" (as opposed to
-# a wrong captcha, which must keep retrying). The exir error body carries
-# ``type=="error"`` + a Persian ``description``; the EXACT wrong-password
-# description has NOT yet been captured by a live probe (no local khobregan
-# creds — see SellerMarket/scratch/CRED_STATUS_FINDINGS.md). Until it is, this
-# stays EMPTY so the exir family is always TRANSIENT (never auto-marked invalid)
-# — the conservative default. Filling this tuple with the captured marker
-# substring(s) is the only change needed to enable exir invalid-creds detection.
-_EXIR_INVALID_CREDENTIAL_MARKERS: tuple[str, ...] = ()
+# Exir login-failure discriminator (LIVE-confirmed on khobregan — see
+# SellerMarket/scratch/CRED_STATUS_FINDINGS.md). The error body carries a numeric
+# ``errorCode``:
+#   40037 (HTTP 403) → wrong username/password → INVALID_CREDENTIALS
+#   9002  (HTTP 401) → wrong captcha           → retry (TRANSIENT)
+# We key on the numeric code (language-independent) rather than the Persian
+# ``description`` (which has a trailing space + yeh-spelling variants).
+_EXIR_ERRCODE_INVALID_CREDENTIALS = 40037
 
 
-def _classify_exir_description(description: Optional[str]) -> bool:
-    """Return True iff the broker's failure ``description`` is a high-confidence
-    wrong-username/password reject (vs a wrong-captcha / transient failure).
-
-    Pure helper — unit-testable against captured fixtures. Conservative: with no
-    captured markers it returns False for everything (→ TRANSIENT).
-    """
-    if not description or not _EXIR_INVALID_CREDENTIAL_MARKERS:
-        return False
-    text = description.strip()
-    return any(marker in text for marker in _EXIR_INVALID_CREDENTIAL_MARKERS)
+def _classify_exir_login(body: object) -> bool:
+    """Return True iff an exir login body is a high-confidence wrong-password
+    reject. Pure helper — conservative: only ``errorCode == 40037`` qualifies."""
+    return (
+        isinstance(body, dict)
+        and body.get("errorCode") == _EXIR_ERRCODE_INVALID_CREDENTIALS
+    )
 
 
 class _ExirInvalidCredentials(Exception):
@@ -194,17 +189,17 @@ class ExirAdapter:
 
             if body.get("type") == "error" or not body.get("nt"):
                 # Wrong captcha / rejected creds / business error — retry the
-                # captcha loop (a wrong-creds error will simply exhaust the
+                # captcha loop (a wrong-captcha error will simply exhaust the
                 # attempts and surface the description below).
                 last_description = (
                     body.get("description")
                     or body.get("message")
                     or f"login failed (status={login_resp.status_code})"
                 )
-                # If the description is a high-confidence wrong-password reject,
-                # short-circuit (no point retrying captcha on a known-bad
-                # password) so the caller can classify it INVALID_CREDENTIALS.
-                if _classify_exir_description(last_description):
+                # errorCode 40037 = wrong username/password → short-circuit (no
+                # point retrying captcha on a known-bad password) so the caller
+                # classifies it INVALID_CREDENTIALS. Wrong captcha (9002) retries.
+                if _classify_exir_login(body):
                     raise _ExirInvalidCredentials(last_description)
                 continue
 
