@@ -28,7 +28,6 @@ import json
 import os
 import sys
 import time
-from typing import Optional
 
 import requests
 
@@ -41,6 +40,11 @@ MARKER_KEYS = (
 )
 SECRET_KEYS = ("token", "authToken", "rlcAuthHeader", "nt", "jwt", "accessToken")
 
+# Reach the Iranian broker / OCR hosts DIRECTLY — never via an /etc/environment
+# proxy. A foreign-exit proxy can't reach Iranian hosts and would skew the probe.
+_S = requests.Session()
+_S.trust_env = False
+
 
 def _ocr_url() -> str:
     raw = (os.getenv("OCR_SERVICE_URL", "") or "").replace(",", " ").split()
@@ -51,8 +55,8 @@ def _ocr_url() -> str:
 
 def solve_captcha(b64: str) -> str:
     url = f"{_ocr_url()}/ocr/captcha-easy-base64"
-    r = requests.post(url, json={"base64": b64}, timeout=TIMEOUT,
-                      headers={"accept": "text/plain", "Content-Type": "application/json"})
+    r = _S.post(url, json={"base64": b64}, timeout=TIMEOUT,
+                headers={"accept": "text/plain", "Content-Type": "application/json"})
     r.raise_for_status()
     s = r.text.strip()
     if s.startswith('"') and s.endswith('"'):
@@ -96,13 +100,13 @@ def eph_endpoints(code: str) -> dict:
 
 def eph_login_attempt(ep: dict, username: str, password: str,
                       *, force_wrong_captcha: bool) -> dict:
-    cr = requests.get(ep["captcha"], timeout=TIMEOUT)
+    cr = _S.get(ep["captcha"], timeout=TIMEOUT)
     cr.raise_for_status()
     cd = cr.json()
     captcha_val = "00000" if force_wrong_captcha else solve_captcha(cd["captchaByteData"])
     if not captcha_val:
         return {"http": None, "note": "ocr-empty"}
-    lr = requests.post(ep["login"], timeout=TIMEOUT, json={
+    lr = _S.post(ep["login"], timeout=TIMEOUT, json={
         "loginName": username,
         "password": password,
         "captcha": {"hash": cd["hashedCaptcha"], "salt": cd["salt"], "value": captcha_val},
@@ -125,10 +129,12 @@ def probe_ephoenix(code: str, username: str, password: str) -> None:
         try:
             v = eph_login_attempt(ep, username, password, force_wrong_captcha=False)
         except Exception as e:
-            print(f"  attempt {i+1}: EXC {type(e).__name__}: {e}"); break
+            print(f"  attempt {i+1}: EXC {type(e).__name__}: {e}")
+            break
         print(f"  attempt {i+1}: {json.dumps(v, ensure_ascii=False)}")
         if v.get("has_token"):
-            base_ok = v; break
+            base_ok = v
+            break
         time.sleep(1)
     print(f"  -> baseline {'OK (token seen)' if base_ok else 'NOT established'}")
 
@@ -160,6 +166,7 @@ def probe_ephoenix(code: str, username: str, password: str) -> None:
 def exir_login_attempt(base: str, username: str, password: str,
                        *, force_wrong_captcha: bool) -> dict:
     s = requests.Session()
+    s.trust_env = False  # reach the Iranian broker host directly, not via a proxy
     s.get(base + "/exir", timeout=TIMEOUT)
     rc = s.get(base + "/captcha", timeout=TIMEOUT)
     cli = rc.headers.get("client_login_id")
@@ -195,10 +202,12 @@ def probe_exir(tenant: str, username: str, password: str) -> None:
         try:
             v = exir_login_attempt(base, username, password, force_wrong_captcha=False)
         except Exception as e:
-            print(f"  attempt {i+1}: EXC {type(e).__name__}: {e}"); break
+            print(f"  attempt {i+1}: EXC {type(e).__name__}: {e}")
+            break
         print(f"  attempt {i+1}: {json.dumps(v, ensure_ascii=False)}")
         if v.get("has_token"):
-            base_ok = v; break
+            base_ok = v
+            break
         time.sleep(1)
     print(f"  -> baseline {'OK (nt seen)' if base_ok else 'NOT established'}")
 
@@ -228,8 +237,10 @@ def main() -> None:
     for code in [c.strip() for c in os.getenv("EPH_BROKERS", "").split(",") if c.strip()]:
         pw = os.getenv(f"EPH_PASS__{code}") or os.getenv("EPH_PASS")
         if not (user and pw):
-            print(f"skip ephoenix {code}: missing EPH_USER / password"); continue
-        probe_ephoenix(code, user, pw); did = True
+            print(f"skip ephoenix {code}: missing EPH_USER / password")
+            continue
+        probe_ephoenix(code, user, pw)
+        did = True
 
     if os.getenv("EXIR_PASS"):
         probe_exir(os.getenv("EXIR_TENANT", "khobregan"),

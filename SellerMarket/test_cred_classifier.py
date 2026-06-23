@@ -13,7 +13,6 @@ from __future__ import annotations
 import pytest
 
 import api_client
-import cred_errors
 from cred_errors import (
     InvalidCredentialsError,
     ephoenix_login_is_invalid_credentials,
@@ -126,3 +125,30 @@ def test_authenticate_propagates_invalid_creds_without_retry_storm(monkeypatch):
     with pytest.raises(InvalidCredentialsError):
         client.authenticate()
     assert calls["n"] == 1  # one attempt, no 100x storm
+
+
+# --------------------------------------------------------------------------
+# exir ExirAdapter.prepare_order must let InvalidCredentialsError through (not
+# re-wrap it into RuntimeError), else the caller's skip branch never fires.
+# --------------------------------------------------------------------------
+def _raise(exc):
+    def _f(*_a, **_k):
+        raise exc
+    return _f
+
+
+def test_exir_prepare_order_propagates_invalid_credentials(monkeypatch):
+    import exir_adapter
+    a = exir_adapter.ExirAdapter("khobregan", "user", "pw")
+    monkeypatch.setattr(a, "_session", _raise(InvalidCredentialsError("rejected")))
+    with pytest.raises(InvalidCredentialsError):
+        a.prepare_order(isin="IRO3SMBZ0001", side=1, config_section={"price": "200"})
+
+
+def test_exir_prepare_order_still_wraps_generic_errors(monkeypatch):
+    """A genuine network/parse failure is still wrapped in RuntimeError."""
+    import exir_adapter
+    a = exir_adapter.ExirAdapter("khobregan", "user", "pw")
+    monkeypatch.setattr(a, "_session", _raise(ConnectionError("network down")))
+    with pytest.raises(RuntimeError):
+        a.prepare_order(isin="IRO3SMBZ0001", side=1, config_section={"price": "200"})

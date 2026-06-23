@@ -417,8 +417,12 @@ class ExirAdapter(BrokerAdapter):
                 price=price,
                 volume=volume,
             )
-        except ValueError:
-            # Domain errors (missing price / no holdings) propagate as-is.
+        except (ValueError, InvalidCredentialsError):
+            # Domain errors (missing price / no holdings) AND the credential
+            # reject propagate AS-IS. The generic wrap below would turn an
+            # InvalidCredentialsError into a RuntimeError, so the caller's
+            # `except InvalidCredentialsError` skip branch (cache_warmup /
+            # locustfile) would never fire and the account wouldn't skip cleanly.
             raise
         except Exception as e:
             # Any network/auth/parse failure → a clear, actionable exception.
