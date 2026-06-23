@@ -41,18 +41,19 @@ def ephoenix_login_is_invalid_credentials(body: object) -> bool:
     )
 
 
-# exir / Rayan HamAfza: the failure body carries ``type=="error"`` + a Persian
-# ``description``. The EXACT wrong-password description has not yet been captured
-# by a live probe (no local khobregan creds — see CRED_STATUS_FINDINGS.md), so
-# this stays EMPTY and exir is never auto-skipped (conservative default).
-# Filling this tuple with the captured marker substring(s) is the only change
-# needed to enable exir invalid-creds skipping.
-_EXIR_INVALID_CREDENTIAL_MARKERS: tuple[str, ...] = ()
+# exir / Rayan HamAfza: the failure body carries ``type=="error"`` + a numeric
+# ``errorCode`` (LIVE-confirmed on khobregan — see CRED_STATUS_FINDINGS.md):
+#   40037 (HTTP 403) → wrong username/password → INVALID_CREDENTIALS
+#   9002  (HTTP 401) → wrong captcha           → retry
+# We key on the numeric code (language-independent) rather than the Persian
+# ``description`` (which has a trailing space + yeh-spelling variants).
+_EXIR_ERRCODE_INVALID_CREDENTIALS = 40037
 
 
-def exir_login_is_invalid_credentials(description: object) -> bool:
-    """True iff an exir login ``description`` is a high-confidence wrong-password
-    reject. Conservative: with no captured markers, always False."""
-    if not isinstance(description, str) or not _EXIR_INVALID_CREDENTIAL_MARKERS:
-        return False
-    return any(m in description for m in _EXIR_INVALID_CREDENTIAL_MARKERS)
+def exir_login_is_invalid_credentials(body: object) -> bool:
+    """True iff an exir login body is a high-confidence wrong-password reject.
+    Conservative: only ``errorCode == 40037`` qualifies."""
+    return (
+        isinstance(body, dict)
+        and body.get("errorCode") == _EXIR_ERRCODE_INVALID_CREDENTIALS
+    )

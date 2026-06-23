@@ -213,11 +213,10 @@ class ExirAdapter(BrokerAdapter):
                 )
                 return descriptor
 
-            # High-confidence wrong-password reject → skip the account (don't
-            # burn the captcha-retry budget). Conservative: the marker tuple is
-            # empty until a live probe captures it, so today this never fires.
-            description = login_json.get("description") or login_json.get("message")
-            if exir_login_is_invalid_credentials(description):
+            # High-confidence wrong-password reject (errorCode 40037) → skip the
+            # account (don't burn the captcha-retry budget). A wrong captcha
+            # (9002) falls through to the retry below.
+            if exir_login_is_invalid_credentials(login_json):
                 raise InvalidCredentialsError(
                     f"exir rejected credentials for {self.username}@{self.broker_code}"
                 )

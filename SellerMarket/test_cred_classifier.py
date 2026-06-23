@@ -42,18 +42,20 @@ def test_ephoenix_classifier(body, expected):
     assert ephoenix_login_is_invalid_credentials(body) is expected
 
 
-def test_exir_classifier_conservative_by_default():
-    assert cred_errors._EXIR_INVALID_CREDENTIAL_MARKERS == ()
-    for d in (None, "", "رمز عبور اشتباه است", "کد امنیتی نادرست", 123):
-        assert exir_login_is_invalid_credentials(d) is False
-
-
-def test_exir_classifier_marker_match(monkeypatch):
-    monkeypatch.setattr(
-        cred_errors, "_EXIR_INVALID_CREDENTIAL_MARKERS", ("رمز عبور اشتباه",)
-    )
-    assert exir_login_is_invalid_credentials("نام کاربری یا رمز عبور اشتباه است") is True
-    assert exir_login_is_invalid_credentials("کد امنیتی نادرست") is False
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ({"errorCode": 40037, "type": "error"}, True),    # wrong password
+        ({"errorCode": 9002, "type": "error"}, False),    # wrong captcha
+        ({"nt": "seed"}, False),                          # success
+        ({"errorCode": 99999}, False),                    # unknown
+        ({}, False),
+        (None, False),
+        ("نام کاربری یا کلمه عبور اشتباه است", False),     # a bare string is not a body
+    ],
+)
+def test_exir_classifier(body, expected):
+    assert exir_login_is_invalid_credentials(body) is expected
 
 
 # --------------------------------------------------------------------------

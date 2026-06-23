@@ -32,12 +32,24 @@ separable on `errorCode` and never conflated.
 (language-independent, stable). The bot's `api_client._login_with_captcha` does
 `raise_for_status()` — but login is HTTP 200 here, so the body is available before any raise.
 
-## exir / Rayan HamAfza — PENDING (no local khobregan creds; capture on a VPS)
+## exir / Rayan HamAfza — DISCRIMINATOR = top-level `errorCode` (numeric, language-independent)
 
 Login `POST https://{tenant}.exirbroker.com/api/v2/login {username,password,captcha:<int>,otp:""}`.
-Success marker = `nt` present (see EXIR_FINDINGS.md). On failure the body carries
-`type=="error"` + a Persian `description`/`message`. Need a live probe to capture the
-EXACT wrong-password description vs wrong-captcha description. Until captured, the exir
-classifier stays conservative (always TRANSIENT → never auto-marks invalid).
-TODO: run `cred_probe.py` with `EXIR_TENANT/EXIR_USER/EXIR_PASS` on a host that has
-khobregan creds + broker + OCR reachability.
+Captured live on khobregan (2026-06-23):
+
+| case | HTTP | `errorCode` | `type` | description (Persian) |
+|---|---|---|---|---|
+| **VALID** (good captcha + good password) | 200 | — | — | (`nt` present) |
+| **INVALID CAPTCHA** | 401 | `9002` | `error` | "خطا:‌ کد امنیتی وارد شده صحیح نیست" |
+| **INVALID CREDENTIALS** (wrong password) | 403 | `40037` | `error` | "نام کاربری یا کلمه عبور اشتباه است " |
+
+Robustness proof: in the wrong-password run, an OCR-misread attempt returned `9002`
+while the correctly-solved one returned `40037` — cleanly separable on `errorCode`.
+
+**Classifier rule (exir):**
+- `errorCode == 40037` → **INVALID_CREDENTIALS** (skip / block).
+- `errorCode == 9002` (bad captcha) and every other code / non-error → **TRANSIENT** (retry).
+- `nt` present → **VALID**.
+
+We key on the numeric `errorCode` (not the Persian `description`, which has a trailing
+space + yeh-spelling variants). The body also carries `descriptionEn` if ever needed.
