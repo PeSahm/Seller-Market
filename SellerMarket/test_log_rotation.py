@@ -70,6 +70,36 @@ def test_prune_keeps_only_n_archives(tmp_path):
     assert contents == {b"run 2\n", b"run 3\n"}
 
 
+def test_prune_breaks_mtime_ties_by_creation_order(tmp_path):
+    """Deterministic even when archives share an mtime (the same-second case that
+    flaked on fast runners): the collision suffix -N (base=0, then -1, -2, …
+    in creation order) breaks the tie, so the NEWEST `keep` always survive."""
+    from log_rotation import _prune
+
+    d = tmp_path / "logs"
+    d.mkdir()
+    stem, stamp = "cache_warmup", "20260101_000000"
+    # base (oldest) then -1, -2, -3 (newest) — write in creation order…
+    names = [
+        f"{stem}_{stamp}.log.gz",
+        f"{stem}_{stamp}-1.log.gz",
+        f"{stem}_{stamp}-2.log.gz",
+        f"{stem}_{stamp}-3.log.gz",
+    ]
+    for n in names:
+        (d / n).write_bytes(b"x")
+    # …then FORCE an identical mtime on all four, so the suffix is the only
+    # discriminator (mtime-only sorting would be arbitrary here).
+    tie = 1_700_000_000.0
+    for n in names:
+        os.utime(d / n, (tie, tie))
+
+    _prune(str(d), stem, keep=2)
+
+    survivors = sorted(p.name for p in d.glob(f"{stem}_*.log.gz"))
+    assert survivors == [f"{stem}_{stamp}-2.log.gz", f"{stem}_{stamp}-3.log.gz"]
+
+
 def test_archive_dir_collision_degrades_quietly(tmp_path):
     """archive_dir path occupied by a FILE → no exception, no truncation."""
     log = tmp_path / "trading_bot.log"
