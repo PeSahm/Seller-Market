@@ -40,6 +40,7 @@ from app.schemas.customer import CustomerCreate, CustomerUpdate
 from app.security.crypto import decrypt as fernet_decrypt
 from app.security.crypto import encrypt as fernet_encrypt
 from app.services import brokers_admin
+from app.services.brokers.base import CredStatus
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,12 @@ def _public_snapshot(customer: Customer) -> dict:
         "username": customer.username,
         "broker": customer.broker,
         "fee_percent": str(customer.fee_percent) if customer.fee_percent is not None else None,
+        "credential_status": customer.credential_status,
+        "credential_checked_at": (
+            customer.credential_checked_at.isoformat()
+            if customer.credential_checked_at
+            else None
+        ),
         "version": customer.version,
     }
 
@@ -167,6 +174,7 @@ async def list_customers(
     status: Optional[str] = None,
     server_id: Optional[UUID] = None,
     broker: Optional[str] = None,
+    credential_status: Optional[str] = None,
     q: Optional[str] = None,
 ) -> list[Customer]:
     """List customers with optional filters.
@@ -187,6 +195,8 @@ async def list_customers(
         stmt = stmt.where(Customer.server_id == server_id)
     if broker is not None:
         stmt = stmt.where(Customer.broker == broker)
+    if credential_status is not None:
+        stmt = stmt.where(Customer.credential_status == credential_status)
     if q is not None and q.strip():
         pat = f"%{_escape_ilike(q.strip())}%"
         stmt = stmt.where(
@@ -439,6 +449,64 @@ async def set_fee_percent(
         db,
         actor_id=actor_id,
         action="customer.fee_config",
+        target_id=customer.id,
+        before=before,
+        after=_public_snapshot(customer),
+    )
+    await db.commit()
+    await db.refresh(customer)
+    return customer
+
+
+# CredStatus -> the stored enum column value.
+_CRED_STATUS_TO_COL = {
+    CredStatus.VALID: "valid",
+    CredStatus.INVALID_CREDENTIALS: "invalid",
+    CredStatus.TRANSIENT: "transient",
+}
+
+
+async def set_credential_status(
+    db: AsyncSession,
+    customer_id: UUID,
+    status: CredStatus,
+    message: Optional[str] = None,
+    *,
+    actor_id: Optional[UUID] = None,
+) -> Customer:
+    """Record a credential-verification outcome on a customer (system metadata).
+
+    Always stamps ``credential_checked_at`` and ``credential_message``. The
+    stored ``credential_status`` follows the verdict EXCEPT the sticky-transient
+    rule: a ``TRANSIENT`` result (OCR/broker down — inconclusive) must NOT
+    downgrade a prior ``valid``/``invalid`` verdict, so on TRANSIENT we keep the
+    existing status when it's already a real verdict and only refresh the
+    timestamp/message. ``VALID``/``INVALID`` always win.
+
+    Deliberately does NOT bump ``version`` (this is system metadata, not a user
+    edit — bumping would collide with the optimistic lock on concurrent agent
+    edits) and does NOT touch ``updated_at``. Audited as ``customer.cred_status``.
+    Raises ``LookupError`` if the customer is gone.
+    """
+    customer = await get_customer(db, customer_id)
+    if customer is None:
+        raise LookupError(f"customer {customer_id} not found")
+    before = _public_snapshot(customer)
+
+    sticky = (
+        status == CredStatus.TRANSIENT
+        and customer.credential_status in ("valid", "invalid")
+    )
+    if not sticky:
+        customer.credential_status = _CRED_STATUS_TO_COL[status]
+    customer.credential_checked_at = _now_utc()
+    customer.credential_message = (message or None) and message[:512]
+
+    await db.flush()
+    await _write_audit(
+        db,
+        actor_id=actor_id,
+        action="customer.cred_status",
         target_id=customer.id,
         before=before,
         after=_public_snapshot(customer),

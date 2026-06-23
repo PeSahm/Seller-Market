@@ -96,6 +96,10 @@
     </p>
   </div>
 
+  {# --- Verify credentials + mandatory verify-on-save (shared partial) --- #}
+  {% set verify_url = "/agent/customers/verify-credentials" %}
+  {% include "partials/customer_verify_credentials.html" %}
+
   {% if is_edit %}
   <input type="hidden" name="version" value="{{ customer.version }}">
   {% endif %}

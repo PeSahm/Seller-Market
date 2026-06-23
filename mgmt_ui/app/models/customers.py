@@ -45,6 +45,20 @@ distribution_policy_enum = SAEnum(
     create_type=False,
 )
 
+# Per-customer credential health. ``unknown`` = never checked (existing rows /
+# before the first verify); ``valid``/``invalid`` = high-confidence verdicts;
+# ``transient`` = the last check couldn't decide (OCR/broker down) — kept
+# distinct from ``unknown`` so a blip doesn't read as "never checked". The
+# dashboard "needs attention" metric counts ONLY ``invalid``.
+customer_credential_status_enum = SAEnum(
+    "unknown",
+    "valid",
+    "invalid",
+    "transient",
+    name="customer_credential_status",
+    create_type=False,
+)
+
 
 class Customer(Base):
     """A brokerage account: one credential set per (agent, broker, username).
@@ -103,6 +117,18 @@ class Customer(Base):
     # Per-customer profit-share fee % override (#116). NULL = no override; the
     # report falls back to the agent override → global setting → default.
     fee_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 4), nullable=True)
+    # Credential health (set by verify-on-save + the daily noon checker). System
+    # metadata — NOT bumped by the optimistic-lock ``version`` (so a status write
+    # never collides with a concurrent agent edit).
+    credential_status: Mapped[str] = mapped_column(
+        customer_credential_status_enum,
+        nullable=False,
+        server_default=text("'unknown'"),
+    )
+    credential_checked_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.TIMESTAMP(timezone=True), nullable=True
+    )
+    credential_message: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(
         sa.TIMESTAMP(timezone=True),

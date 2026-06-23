@@ -34,6 +34,8 @@
     <dt>Broker username</dt>
     <dd dir="auto"><code>{{ customer.username }}</code></dd>
 
+    {% include "partials/credential_status_row.html" %}
+
     <dt>Status</dt>
     <dd>
       {% if customer.assignment_status == "active" %}

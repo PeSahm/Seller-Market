@@ -124,6 +124,23 @@ class Settings(BaseSettings):
         default="Mostafa", alias="MONITOR_PROBE_AGENT_USERNAME"
     )
 
+    # Daily credential checker: re-verifies every customer's broker credentials
+    # once per day (default noon Tehran) and updates customers.credential_status,
+    # powering the dashboard "needs attention" metric. Makes an external broker
+    # login per customer (captcha/OCR cost), so OFF by default like the broker
+    # order reconciler — enable once the mgmt host can reach the broker hosts.
+    # The loop wakes every ``interval`` seconds and fires when the Tehran hour
+    # matches ``hour`` and it hasn't run yet today.
+    enable_credential_checker: bool = Field(
+        default=False, alias="ENABLE_CREDENTIAL_CHECKER"
+    )
+    credential_check_interval_seconds: int = Field(
+        default=600, alias="CREDENTIAL_CHECK_INTERVAL_SECONDS", ge=60
+    )
+    credential_check_hour_tehran: int = Field(
+        default=12, alias="CREDENTIAL_CHECK_HOUR_TEHRAN", ge=0, le=23
+    )
+
     enable_janitor: bool = Field(default=True, alias="ENABLE_JANITOR")
     janitor_interval_seconds: int = Field(
         default=3600, alias="JANITOR_INTERVAL_SECONDS", ge=1

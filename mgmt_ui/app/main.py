@@ -31,6 +31,7 @@ from app.workers.scheduled_run_ingestor import run_scheduled_run_ingest_worker
 from app.workers.service_probe import run_service_probe_worker
 from app.workers.trade_ingestor import run_trade_ingest_worker
 from app.workers.broker_order_reconciler import run_broker_order_reconcile_worker
+from app.workers.credential_checker import run_credential_checker
 from app.workers.fire_log_ingestor import run_fire_log_ingest_worker
 from app.services.leader import (
     acquire_worker_leadership,
@@ -257,6 +258,8 @@ def create_app() -> FastAPI:
     # current. Off by default (external broker calls) — see settings.
     app.state.broker_order_reconcile_stop = asyncio.Event()
     app.state.broker_order_reconcile_task = None  # type: Optional[asyncio.Task[None]]
+    app.state.credential_check_stop = asyncio.Event()
+    app.state.credential_check_task = None  # type: Optional[asyncio.Task[None]]
     # P3: bot fire-log ingestor. Pulls order_fires_*.jsonl into order_fires and
     # reconciles broker_orders.is_bot. Internal SSH only — default on.
     app.state.fire_log_ingest_stop = asyncio.Event()
@@ -539,6 +542,39 @@ def create_app() -> FastAPI:
         if task is None:
             return
         app.state.broker_order_reconcile_stop.set()
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    @app.on_event("startup")
+    async def _start_credential_checker() -> None:
+        if not app.state.is_worker_leader:
+            logger.info("worker startup skipped: not the worker leader")
+            return
+        if not settings.enable_credential_checker:
+            logger.info("credential checker disabled via settings")
+            return
+        app.state.credential_check_stop = asyncio.Event()
+        app.state.credential_check_task = asyncio.create_task(
+            run_credential_checker(
+                app.state.credential_check_stop,
+                interval_seconds=settings.credential_check_interval_seconds,
+                target_hour=settings.credential_check_hour_tehran,
+            ),
+            name="credential-checker-worker",
+        )
+
+    @app.on_event("shutdown")
+    async def _stop_credential_checker() -> None:
+        task: Optional[asyncio.Task[None]] = app.state.credential_check_task
+        if task is None:
+            return
+        app.state.credential_check_stop.set()
         try:
             await asyncio.wait_for(task, timeout=5.0)
         except asyncio.TimeoutError:

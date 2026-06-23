@@ -24,7 +24,7 @@ from typing import Optional
 import httpx
 
 from app.services.brokers._jalali import gregorian_str_to_jalali_str
-from app.services.brokers.base import IsinInfo, VerifyResult
+from app.services.brokers.base import CredStatus, IsinInfo, VerifyResult
 from app.services.brokers.exir_token import build_app_n
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,28 @@ _HTTP_TIMEOUT_S = 20.0
 # Max captcha solve attempts per login. The OCR service is good but not
 # perfect; a handful of retries covers the occasional ambiguous image.
 _MAX_CAPTCHA_ATTEMPTS = 6
+
+# Exir login-failure discriminator (LIVE-confirmed on khobregan — see
+# SellerMarket/scratch/CRED_STATUS_FINDINGS.md). The error body carries a numeric
+# ``errorCode``:
+#   40037 (HTTP 403) → wrong username/password → INVALID_CREDENTIALS
+#   9002  (HTTP 401) → wrong captcha           → retry (TRANSIENT)
+# We key on the numeric code (language-independent) rather than the Persian
+# ``description`` (which has a trailing space + yeh-spelling variants).
+_EXIR_ERRCODE_INVALID_CREDENTIALS = 40037
+
+
+def _classify_exir_login(body: object) -> bool:
+    """Return True iff an exir login body is a high-confidence wrong-password
+    reject. Pure helper — conservative: only ``errorCode == 40037`` qualifies."""
+    return (
+        isinstance(body, dict)
+        and body.get("errorCode") == _EXIR_ERRCODE_INVALID_CREDENTIALS
+    )
+
+
+class _ExirInvalidCredentials(Exception):
+    """Internal signal: the broker positively rejected the username/password."""
 
 # Skew subtracted from the broker-reported ``validity`` (minutes) so we re-login
 # a little before the session actually expires. Clamped so a tiny / missing
@@ -167,13 +189,18 @@ class ExirAdapter:
 
             if body.get("type") == "error" or not body.get("nt"):
                 # Wrong captcha / rejected creds / business error — retry the
-                # captcha loop (a wrong-creds error will simply exhaust the
+                # captcha loop (a wrong-captcha error will simply exhaust the
                 # attempts and surface the description below).
                 last_description = (
                     body.get("description")
                     or body.get("message")
                     or f"login failed (status={login_resp.status_code})"
                 )
+                # errorCode 40037 = wrong username/password → short-circuit (no
+                # point retrying captcha on a known-bad password) so the caller
+                # classifies it INVALID_CREDENTIALS. Wrong captcha (9002) retries.
+                if _classify_exir_login(body):
+                    raise _ExirInvalidCredentials(last_description)
                 continue
 
             # Success.
@@ -276,13 +303,23 @@ class ExirAdapter:
             full_name = (f"{first} {last}".strip()) or bourse
             return VerifyResult(
                 ok=True,
+                status=CredStatus.VALID,
                 full_name=full_name,
                 national_id=None,
                 bourse_code=bourse,
                 message="login ok",
             )
+        except _ExirInvalidCredentials as exc:
+            return VerifyResult(
+                ok=False,
+                status=CredStatus.INVALID_CREDENTIALS,
+                error="The broker rejected this username/password.",
+                message=str(exc) or None,
+            )
         except Exception as exc:  # noqa: BLE001 — surface any failure to operator
-            return VerifyResult(ok=False, error=str(exc))
+            # Inconclusive (captcha exhausted, OCR/broker down, business error):
+            # TRANSIENT — never auto-mark a customer invalid on an ambiguous fail.
+            return VerifyResult(ok=False, status=CredStatus.TRANSIENT, error=str(exc))
 
     async def verify_isin(
         self, username: str, password: str, isin: str, ocr_service_url: str

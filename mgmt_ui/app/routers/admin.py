@@ -181,6 +181,9 @@ async def admin_dashboard(
         "active": sum(1 for c in all_customers if c.assignment_status == "active"),
         "assigned": sum(1 for c in all_customers if c.assignment_status == "assigned"),
         "pending": sum(1 for c in all_customers if c.assignment_status == "pending"),
+        "invalid_credentials": sum(
+            1 for c in all_customers if c.credential_status == "invalid"
+        ),
     }
 
     # Phase 6: recent-runs roll-up. We pull the most recent 200 runs and
@@ -719,6 +722,7 @@ async def admin_customers(
     agent_id: Optional[str] = None,
     status: Optional[str] = None,
     broker: Optional[str] = None,
+    cred: Optional[str] = None,
     q: Optional[str] = None,
 ):
     """List all customers (accounts) with optional filters + search.
@@ -740,14 +744,21 @@ async def admin_customers(
             # Bad UUID in the query string — treat as "no filter" rather
             # than 422 the page.
             agent_uuid = None
-    status = status or None
+    # Whitelist the enum-backed filters: `assignment_status` and
+    # `credential_status` are native Postgres ENUMs, so an out-of-range value
+    # (e.g. a hand-edited ``?cred=garbage``) would fail the enum cast and 500.
+    # An unknown value degrades to "no filter" (same forgiving UX as the
+    # bad-UUID handling above and the agent route).
+    status = status if status in {"pending", "assigned", "active"} else None
     broker = broker or None
+    cred = cred if cred in {"unknown", "valid", "invalid", "transient"} else None
     q = q or None
     customers = await services_customers.list_customers(
         db,
         agent_id=agent_uuid,
         status=status,
         broker=broker,
+        credential_status=cred,
         q=q,
     )
     trade_counts = await services_customers.get_customer_trade_counts(
@@ -766,6 +777,7 @@ async def admin_customers(
     ctx["filter_agent_id"] = agent_id
     ctx["filter_status"] = status
     ctx["filter_broker"] = broker
+    ctx["filter_cred"] = cred
     ctx["filter_q"] = q or ""
     ctx["all_agents"] = list(agents.values())
     # The LIST filter must include disabled brokers so operators can still
@@ -937,6 +949,19 @@ async def admin_customer_verify_credentials(
         ctx["result"] = broker_client.VerifyResult(
             ok=False,
             error="No broker selected — pick one in the Broker dropdown above.",
+        )
+        ctx["typed_username"] = effective_username
+        return templates.TemplateResponse(
+            "admin/partials/customer_verify_result.html", ctx
+        )
+
+    if not effective_username:
+        # No point hitting the broker (a captcha solve + up to 5 login attempts)
+        # with a blank username — it can only be rejected.
+        ctx = _ctx(request, user, current_tab="/admin/customers")
+        ctx["result"] = broker_client.VerifyResult(
+            ok=False,
+            error="Enter the account username above before clicking Verify.",
         )
         ctx["typed_username"] = effective_username
         return templates.TemplateResponse(

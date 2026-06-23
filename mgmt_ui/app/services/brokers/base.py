@@ -14,7 +14,25 @@ the verify partials/templates that read ``.full_name`` / ``.national_id`` /
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional, Protocol, runtime_checkable
+
+
+class CredStatus(str, Enum):
+    """Classification of a credential-verification outcome.
+
+    The point of this enum is to distinguish a broker POSITIVELY rejecting the
+    username/password (``INVALID_CREDENTIALS`` — actionable: the agent must fix
+    it / the bot should skip the account) from an inconclusive failure
+    (``TRANSIENT`` — OCR down, broker down, captcha misread, non-JSON, 5xx, …;
+    keep retrying, never alarm). It is intentionally CONSERVATIVE: anything that
+    is not a high-confidence reject collapses to ``TRANSIENT``, because a false
+    ``INVALID_CREDENTIALS`` would stop a *good* account from trading.
+    """
+
+    VALID = "valid"
+    INVALID_CREDENTIALS = "invalid_credentials"
+    TRANSIENT = "transient"
 
 
 @dataclass
@@ -26,6 +44,12 @@ class VerifyResult:
     populated only on success — and may be ``None`` for families (e.g. Exir)
     that don't expose a ``getcustomerinfo`` record; the verify partials must
     degrade gracefully when they're ``None``.
+
+    ``status`` carries the conservative classification (see :class:`CredStatus`).
+    It defaults to ``TRANSIENT`` so any pre-existing constructor that doesn't set
+    it stays safe (never falsely "invalid"); the verify functions set it to
+    ``VALID`` on success and ``INVALID_CREDENTIALS`` only on the captured
+    high-confidence broker reject marker.
     """
 
     ok: bool
@@ -35,6 +59,22 @@ class VerifyResult:
     type_: Optional[str] = None
     message: Optional[str] = None  # broker's human-readable status, even on success
     error: Optional[str] = None  # operator-facing error explanation
+    status: CredStatus = CredStatus.TRANSIENT
+
+
+def resolve_cred_status(result: "VerifyResult") -> CredStatus:
+    """Collapse a :class:`VerifyResult` to its :class:`CredStatus`.
+
+    ``ok`` wins (a success is VALID regardless of the default ``status``); a
+    non-ok result is INVALID only on the explicit high-confidence marker, else
+    TRANSIENT. Single source of truth so the on-save path, the daily worker, and
+    any future caller agree.
+    """
+    if result.ok:
+        return CredStatus.VALID
+    if result.status == CredStatus.INVALID_CREDENTIALS:
+        return CredStatus.INVALID_CREDENTIALS
+    return CredStatus.TRANSIENT
 
 
 @dataclass
