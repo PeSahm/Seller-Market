@@ -43,6 +43,7 @@ import rlc_price
 import runtime_config
 from broker_adapters import BrokerAdapter, PreparedOrder, SellContext
 from captcha_utils import decode_captcha as _default_decode_captcha
+from cred_errors import InvalidCredentialsError, exir_login_is_invalid_credentials
 from exir_token import build_app_n, make_signer, pw_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,13 @@ class ExirAdapter(BrokerAdapter):
                 )
                 return descriptor
 
+            # High-confidence wrong-password reject (errorCode 40037) → skip the
+            # account (don't burn the captcha-retry budget). A wrong captcha
+            # (9002) falls through to the retry below.
+            if exir_login_is_invalid_credentials(login_json):
+                raise InvalidCredentialsError(
+                    f"exir rejected credentials for {self.username}@{self.broker_code}"
+                )
             logger.debug(
                 f"exir login attempt {attempt}: HTTP {rl.status_code}, no `nt` in response"
             )
@@ -409,8 +417,12 @@ class ExirAdapter(BrokerAdapter):
                 price=price,
                 volume=volume,
             )
-        except ValueError:
-            # Domain errors (missing price / no holdings) propagate as-is.
+        except (ValueError, InvalidCredentialsError):
+            # Domain errors (missing price / no holdings) AND the credential
+            # reject propagate AS-IS. The generic wrap below would turn an
+            # InvalidCredentialsError into a RuntimeError, so the caller's
+            # `except InvalidCredentialsError` skip branch (cache_warmup /
+            # locustfile) would never fire and the account wouldn't skip cleanly.
             raise
         except Exception as e:
             # Any network/auth/parse failure → a clear, actionable exception.

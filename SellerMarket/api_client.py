@@ -9,6 +9,10 @@ import time
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 from cache_manager import TradingCache
+from cred_errors import (
+    InvalidCredentialsError,
+    ephoenix_login_is_invalid_credentials,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,15 +118,30 @@ class EphoenixAPIClient:
             }
             response = requests.post(self.endpoints['login'], json=login_data, timeout=10)
             response.raise_for_status()
-            
-            token = response.json().get('token')
+
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+            # Broker positively rejected the password (errorCode 3000, HTTP 200)
+            # — skip this account rather than burning 100 captcha retries on a
+            # password that will never work. (Wrong captcha is -1000 → keep
+            # retrying via the None path below.)
+            if ephoenix_login_is_invalid_credentials(body):
+                raise InvalidCredentialsError(
+                    f"broker rejected credentials for {self.username}@{self.broker_code}"
+                )
+            token = body.get('token')
             if token:
                 logger.info(f"Login successful for {self.username}@{self.broker_code}")
                 return token
             else:
                 logger.warning(f"Login response missing token for {self.username}@{self.broker_code}")
                 return None
-                
+
+        except InvalidCredentialsError:
+            # Propagate — must NOT be swallowed by the broad handler below.
+            raise
         except Exception as e:
             logger.error(f"Login failed for {self.username}@{self.broker_code}: {e}")
             return None
