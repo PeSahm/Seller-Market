@@ -63,9 +63,13 @@ def _decimal_from(value: Any) -> Optional[Decimal]:
     if value is None:
         return None
     try:
-        return Decimal(str(value))
+        dec = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
+    # Reject NaN/Infinity: ``Decimal("NaN")`` parses fine and is truthy, so a
+    # malformed broker price would otherwise sail into a money column (and
+    # poison the fee arithmetic). A real price is always finite.
+    return dec if dec.is_finite() else None
 
 
 def _parse_dt(value: Optional[str]) -> Optional[datetime]:
@@ -222,6 +226,12 @@ def _map_exir_row(row: dict, customer: Customer) -> dict:
         entry_dt = entry_dt.replace(tzinfo=timezone.utc)
     # remainingQuantity == 0 means fully filled (ephoenix's isDone equivalent).
     is_done = _int_or_zero(row.get("remainingQuantity")) == 0
+    # Fee math wants the ACTUAL traded price, not the (limit) order price — a
+    # ceiling buy may fill below its limit. ``averageTradedPrice`` is the
+    # realized fill price; fall back to the order ``price`` when it's absent/0.
+    fill_price = _decimal_from(row.get("averageTradedPrice")) or _decimal_from(
+        row.get("price")
+    )
     return {
         "customer_id": customer.id,
         "agent_id": customer.agent_id,
@@ -243,7 +253,7 @@ def _map_exir_row(row: dict, customer: Customer) -> dict:
         "symbol": isin or None,
         "symbol_title": row.get("farsiName") or None,
         "order_side": order_side,
-        "price": _decimal_from(row.get("price")),
+        "price": fill_price,
         "volume": _int_or_zero(row.get("quantity")),
         "executed_volume": _int_or_zero(row.get("tradedQuantity")),
         # Exir reports no per-order fee in the orderbook; the fee report
