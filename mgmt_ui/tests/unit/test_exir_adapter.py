@@ -8,11 +8,14 @@ Phase-0 spike against khobregan.exirbroker.com).
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 
+import app.services.brokers.exir as exir_mod
 from app.services.brokers import registry
 from app.services.brokers._jalali import (
     gregorian_str_to_jalali_str,
@@ -197,9 +200,9 @@ def test_map_exir_and_ephoenix_same_keyset(family_map):
 
 
 async def test_exir_get_orders_rejects_non_filled_status():
-    """Phase-1 adapter is filled-only: a request that excludes status 3 returns
-    an error WITHOUT touching the network (the check precedes any login), so the
-    mapper's hardcoded state=3 can never mis-label an active/cancelled row."""
+    """The adapter is canonical-filled-only: a request that excludes status 3
+    returns an error WITHOUT touching the network (the check precedes any login),
+    so the mapper's stamped state=3 can never mis-label a non-traded row."""
     rows, err = await ExirAdapter("khobregan").get_orders(
         "u",
         "p",
@@ -210,3 +213,147 @@ async def test_exir_get_orders_rejects_non_filled_status():
     )
     assert rows == []
     assert err is not None and "status 3" in err
+
+
+# --------------------------------------------------------------------------
+# get_orders: executed-only, no wire status filter
+# --------------------------------------------------------------------------
+class _FakeResp:
+    status_code = 200
+    text = ""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+async def test_exir_get_orders_keeps_only_traded_rows(monkeypatch):
+    """The on-wire order status is unreliable (the spike's ``orderStatusId=3``
+    returns nothing historically), so get_orders fetches WITHOUT a status filter
+    and keeps only rows that actually traded (``tradedQuantity > 0``)."""
+    captured: dict = {}
+
+    async def fake_session(self, u, p, o):
+        return {"nt": "3" + "0123456789" * 12 + "012345678", "cookies": {}}
+
+    payload = {"result": [
+        {"mmtpOrderId": 1, "insMaxLCode": "IRO1AAA00001",
+         "tradedQuantity": 100, "orderSideName": "خريد"},
+        {"mmtpOrderId": 2, "insMaxLCode": "IRO1BBB00001",
+         "tradedQuantity": 0, "orderSideName": "خريد"},     # placed, never traded
+        {"mmtpOrderId": 3, "insMaxLCode": "IRO1CCC00001",
+         "orderSideName": "فروش"},                           # no traded qty at all
+        {"mmtpOrderId": 4, "insMaxLCode": "IRO1DDD00001",
+         "tradedQuantity": 50, "orderSideName": "فروش"},
+    ]}
+
+    async def fake_signed_get(self, client, nt, path):
+        captured["path"] = path
+        return _FakeResp(payload)
+
+    monkeypatch.setattr(ExirAdapter, "_session", fake_session)
+    monkeypatch.setattr(ExirAdapter, "_signed_get", fake_signed_get)
+
+    rows, err = await ExirAdapter("khobregan").get_orders(
+        "u", "p", "http://ocr",
+        from_date="2026/06/01", to_date="2026/06/24", include_status=[3],
+    )
+    assert err is None
+    # No wire status filter (the bug was hardcoding orderStatusId=3).
+    assert "orderStatusId" not in captured["path"]
+    # Only the rows that traded survive.
+    assert sorted(r["mmtpOrderId"] for r in rows) == [1, 4]
+
+
+async def test_exir_get_orders_isin_filter(monkeypatch):
+    async def fake_session(self, u, p, o):
+        return {"nt": "3" + "0123456789" * 12 + "012345678", "cookies": {}}
+
+    payload = {"result": [
+        {"mmtpOrderId": 1, "insMaxLCode": "IRO1AAA00001", "tradedQuantity": 100},
+        {"mmtpOrderId": 4, "insMaxLCode": "IRO1DDD00001", "tradedQuantity": 50},
+    ]}
+
+    async def fake_signed_get(self, client, nt, path):
+        return _FakeResp(payload)
+
+    monkeypatch.setattr(ExirAdapter, "_session", fake_session)
+    monkeypatch.setattr(ExirAdapter, "_signed_get", fake_signed_get)
+
+    rows, err = await ExirAdapter("khobregan").get_orders(
+        "u", "p", "http://ocr",
+        from_date="2026/06/01", to_date="2026/06/24",
+        include_status=[3], isin="IRO1DDD00001",
+    )
+    assert err is None
+    assert [r["mmtpOrderId"] for r in rows] == [4]
+
+
+# --------------------------------------------------------------------------
+# _map_exir_row: realized fill price
+# --------------------------------------------------------------------------
+def test_map_exir_row_uses_average_traded_price(family_map):
+    """Fee math wants the realized fill price (``averageTradedPrice``), not the
+    limit ``price`` — a ceiling buy can fill below its limit."""
+    from app.services.broker_orders import _map_exir_row
+
+    customer = SimpleNamespace(id=uuid4(), agent_id=uuid4(), broker="khobregan", username="x")
+    row = _exir_row()
+    row["price"] = 9690        # limit price
+    row["averageTradedPrice"] = 9650  # realized fill
+    out = _map_exir_row(row, customer)
+    assert out["price"] == Decimal("9650")
+
+
+def test_map_exir_row_price_falls_back_to_order_price(family_map):
+    from app.services.broker_orders import _map_exir_row
+
+    customer = SimpleNamespace(id=uuid4(), agent_id=uuid4(), broker="khobregan", username="x")
+    row = _exir_row()
+    row["averageTradedPrice"] = None
+    row["price"] = 9690
+    out = _map_exir_row(row, customer)
+    assert out["price"] == Decimal("9690")
+
+
+# --------------------------------------------------------------------------
+# verify_isin via the public RLC market-data backend
+# --------------------------------------------------------------------------
+async def test_exir_verify_isin_ok(monkeypatch):
+    row = {
+        "nc": "IRO1SROD0001", "sf": "سرود", "cn": "سيمان شاهرود",
+        "hap": "9930.00", "lap": "9370.00", "ltp": "9700", "mxqo": "50000",
+    }
+    monkeypatch.setattr(exir_mod, "_rlc_instrument", AsyncMock(return_value=row))
+    info = await ExirAdapter("khobregan").verify_isin("u", "p", "IRO1SROD0001", "http://ocr")
+    assert info.ok is True
+    assert info.isin == "IRO1SROD0001"
+    assert info.symbol == "سرود"
+    assert info.title == "سيمان شاهرود"
+    assert info.max_price == 9930.0
+    assert info.min_price == 9370.0
+    assert info.last_price == 9700.0
+    assert info.max_volume == 50000
+
+
+async def test_exir_verify_isin_unknown(monkeypatch):
+    monkeypatch.setattr(exir_mod, "_rlc_instrument", AsyncMock(return_value=None))
+    info = await ExirAdapter("khobregan").verify_isin("u", "p", "IRO1XXXX0001", "http://ocr")
+    assert info.ok is False
+    assert "not found" in (info.message or "").lower()
+
+
+async def test_exir_verify_isin_unreachable(monkeypatch):
+    monkeypatch.setattr(
+        exir_mod, "_rlc_instrument", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    info = await ExirAdapter("khobregan").verify_isin("u", "p", "IRO1SROD0001", "http://ocr")
+    assert info.ok is False
+    assert "could not reach" in (info.message or "").lower()
+
+
+async def test_exir_verify_isin_blank():
+    info = await ExirAdapter("khobregan").verify_isin("u", "p", "   ", "http://ocr")
+    assert info.ok is False

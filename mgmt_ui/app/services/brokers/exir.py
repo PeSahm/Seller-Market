@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 import time
+import urllib.parse
 from typing import Optional
 
 import httpx
@@ -30,6 +32,61 @@ from app.services.brokers.exir_token import build_app_n
 logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT_S = 20.0
+
+# Public RLC / Tadbir market-data backend — the SAME source the bot prices Exir
+# orders on (``SellerMarket/rlc_price`` / ``rlc_market``). ``getstockprice2`` is
+# public (no auth) and keyed by ISIN (``nc``), returning the symbol (``sf``),
+# Persian name (``cn``), price band (``hap`` ceiling / ``lap`` floor), max order
+# qty (``mxqo``) and prices (``ltp``/``cp``/``pcp``). The doubled slash after the
+# host reproduces the official client's URL exactly. ``trust_env=False`` (set on
+# the client) so a foreign HTTP proxy on the mgmt host never intercepts the
+# Iranian endpoint.
+_RLC_STOCK_INFO_URL = "https://core.tadbirrlc.com//StockInformationHandler"
+_RLC_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+def _rlc_blob(params: dict) -> str:
+    """RLC-style single-quoted JSON-ish blob, URL-encoded, with the trailing
+    ``&jsoncallback=`` (mirrors ``SellerMarket/rlc_market._blob``)."""
+    inner = "{" + ",".join(f"'{k}':'{v}'" for k, v in params.items()) + "}"
+    return urllib.parse.quote(inner) + "&jsoncallback="
+
+
+async def _rlc_instrument(isin: str) -> Optional[dict]:
+    """Return the public ``getstockprice2`` market-data row for ``isin`` (the
+    dict whose ``nc`` equals the ISIN), or ``None`` if the backend doesn't know
+    it. Raises on a transport/HTTP failure (the caller turns that into a
+    graceful ``ok=False`` rather than a 500)."""
+    url = _RLC_STOCK_INFO_URL + "?" + _rlc_blob(
+        {"Type": "getstockprice2", "la": "Fa", "arr": isin}
+    )
+    async with httpx.AsyncClient(
+        timeout=_HTTP_TIMEOUT_S, trust_env=False
+    ) as client:
+        resp = await client.get(url, headers={"User-Agent": _RLC_UA})
+        resp.raise_for_status()
+        rows = json.loads(resp.text)
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if isinstance(row, dict) and row.get("nc") == isin:
+            return row
+    return None
+
+
+def _traded_qty(row: object) -> int:
+    """Executed quantity of an ``orderbookReport`` row (``tradedQuantity``),
+    0 on junk/None. Used to keep only orders that ACTUALLY TRADED, since Exir's
+    on-wire order status is unreliable (see :meth:`ExirAdapter.get_orders`)."""
+    if not isinstance(row, dict):
+        return 0
+    try:
+        return int(float(row.get("tradedQuantity")))
+    except (TypeError, ValueError):
+        return 0
 
 # Max captcha solve attempts per login. The OCR service is good but not
 # perfect; a handful of retries covers the occasional ambiguous image.
@@ -324,22 +381,59 @@ class ExirAdapter:
     async def verify_isin(
         self, username: str, password: str, isin: str, ocr_service_url: str
     ) -> IsinInfo:
-        """Exir does NOT validate instruments in Phase 1.
+        """Validate an ISIN against the public RLC market-data backend.
 
-        We deliberately do NOT contact the broker (no login, no fetch). Because
-        we cannot confirm the ISIN exists, we report ``ok=False`` rather than a
-        false ``ok=True`` — otherwise a typo'd ISIN would look verified. The
-        ISIN is still used as-is downstream; this just stops claiming it was
-        validated.
+        Exir/RLC instruments are keyed by ISIN (``insMaxLCode``), so we look the
+        code up on the SAME public ``getstockprice2`` handler the bot prices Exir
+        orders on — no login or captcha needed. On a hit we return the
+        broker-confirmed symbol, Persian name, price band (ceiling/floor), last
+        price and max order qty. An unknown ISIN (or an unreachable backend)
+        returns ``ok=False`` so a typo'd code can never look verified.
+
+        ``username``/``password``/``ocr_service_url`` are unused (the market-data
+        endpoint is public) but kept for the :class:`BrokerAdapter` contract.
         """
+        isin = (isin or "").strip()
+        if not isin:
+            return IsinInfo(ok=False, isin=isin, message="No ISIN provided.")
+        try:
+            row = await _rlc_instrument(isin)
+        except Exception as exc:  # noqa: BLE001 — never raise out of verify
+            return IsinInfo(
+                ok=False,
+                isin=isin,
+                message=f"Could not reach market data to validate the ISIN: {exc}",
+            )
+        if row is None:
+            return IsinInfo(
+                ok=False,
+                isin=isin,
+                message="ISIN not found in market data — check the code.",
+            )
+
+        def _num(*keys: str) -> Optional[float]:
+            for k in keys:
+                try:
+                    val = float(row.get(k))
+                except (TypeError, ValueError):
+                    continue
+                if val > 0:
+                    return val
+            return None
+
+        symbol = str(row.get("sf")).strip() or None if row.get("sf") is not None else None
+        title = str(row.get("cn")).strip() or None if row.get("cn") is not None else None
+        mxqo = _num("mxqo")
         return IsinInfo(
-            ok=False,
+            ok=True,
             isin=isin,
-            symbol=None,
-            message=(
-                "Exir instrument verification is not supported in Phase 1 — "
-                "the ISIN is used as-is, not validated."
-            ),
+            symbol=symbol,
+            title=title,
+            last_price=_num("ltp", "cp", "pcp"),
+            min_price=_num("lap"),
+            max_price=_num("hap"),
+            max_volume=int(mxqo) if mxqo else None,
+            message="Instrument confirmed via market data.",
         )
 
     async def get_orders(
@@ -356,38 +450,53 @@ class ExirAdapter:
         page_size: int = 100,
         max_pages: int = 500,
     ) -> tuple[list[dict], Optional[str]]:
-        """Fetch filled orders from Exir's ``orderbookReport``.
+        """Fetch EXECUTED orders from Exir's ``orderbookReport``.
 
         ``from_date``/``to_date`` arrive as Gregorian ``"YYYY/MM/DD"`` (the
         dispatcher passes ``date.strftime("%Y/%m/%d")``); they are converted to
-        Jalali for the wire. Phase 1 supports FILLED orders only (status 3) —
-        what the bot report needs, and what lets the mapper safely stamp
-        ``state=3``. A request that excludes 3 returns an explicit error rather
-        than silently fetching another status and mis-labeling it as filled.
-        If ``isin`` is given, rows are filtered client-side on ``insMaxLCode``.
-        On a non-200 (e.g. the broker expired our session) the cached session is
-        dropped and the login+fetch is retried once before giving up.
+        Jalali for the wire.
+
+        **Status taxonomy (learned the hard way — 2026-06):** the Phase-0 spike
+        GUESSED ``orderStatusId=3`` meant "filled", but live that filter returns
+        NOTHING — executed orders carry ``mmtpOrderStatusName == "انجام کلي"``
+        (fully executed) and are NOT returned by ``orderStatusId=3`` (an order is
+        only briefly status 3 on its own trade day, then settles to status 4),
+        so the old query silently fetched ZERO historical fills and exir trades
+        never reached ``broker_orders`` / the fee report. Rather than re-guess a
+        status code, we fetch EVERY order in the date range (no
+        ``orderStatusId`` filter) and keep only the rows that ACTUALLY TRADED
+        (``tradedQuantity > 0``) — full fills, partial fills, and
+        partial-fill-then-cancel all count for the fee report. The mapper stamps
+        ``state=3`` (our canonical "filled") on what we return.
+
+        ``include_status`` is the mgmt-side canonical filter (the dispatcher
+        passes ``[3]`` = filled); a request for anything other than ``{3}`` is
+        rejected, and ``side`` filtering is unsupported. If ``isin`` is given,
+        rows are filtered client-side on ``insMaxLCode``. On a non-200 (e.g. the
+        broker expired our session) the cached session is dropped and the
+        login+fetch is retried once before giving up.
         """
-        # Phase-1 contract: filled-only, no side filter. Reject ANYTHING outside
-        # that subset up front, loudly, instead of silently fetching only the
-        # filled rows (and stamping state=3, which would corrupt the report) or
-        # ignoring a side filter we never apply.
+        # Contract: our canonical "filled" only (state 3), no side filter. Reject
+        # anything else up front so the mapper's stamped state=3 can't mis-label.
         if include_status is not None and set(include_status) != {3}:
             return [], (
-                "exir adapter (Phase 1) supports filled orders (status 3) only; "
+                "exir adapter supports filled orders (status 3) only; "
                 f"got include_status={include_status}"
             )
         if side is not None:
-            return [], "exir adapter (Phase 1) does not support a side filter"
+            return [], "exir adapter does not support a side filter"
+        # Upper bound on a single fetch — the report has no pagination, so a very
+        # wide range on a heavy account could truncate; we WARN (never silently
+        # drop) if the cap is hit so the operator can narrow the range.
+        size = 5000
         try:
             jstart = gregorian_str_to_jalali_str(from_date)
             jend = gregorian_str_to_jalali_str(to_date)
             path = (
-                "/api/v1/user/orderbookReport?size=1000"
+                f"/api/v1/user/orderbookReport?size={size}"
                 f"&startDate={jstart}"
                 "&mmtpTypeId=null"
                 f"&endDate={jend}"
-                "&orderStatusId=3"
             )
 
             last_err: Optional[str] = None
@@ -402,7 +511,16 @@ class ExirAdapter:
                     resp = await self._signed_get(client, nt, path)
 
                 if resp.status_code == 200:
-                    rows = resp.json().get("result") or []
+                    raw = resp.json().get("result") or []
+                    if len(raw) >= size:
+                        logger.warning(
+                            "exir orderbookReport hit the %d-row cap for %s "
+                            "(%s..%s) — results may be truncated; use a narrower "
+                            "date range",
+                            size, username, from_date, to_date,
+                        )
+                    # Keep only orders that actually traded (any wire status).
+                    rows = [r for r in raw if _traded_qty(r) > 0]
                     if isin:
                         rows = [r for r in rows if r.get("insMaxLCode") == isin]
                     return rows, None
