@@ -395,20 +395,22 @@ class ExirAdapter:
         """
         isin = (isin or "").strip()
         if not isin:
-            return IsinInfo(ok=False, isin=isin, message="No ISIN provided.")
+            return IsinInfo(ok=False, isin=isin, error="No ISIN provided.")
         try:
             row = await _rlc_instrument(isin)
         except Exception as exc:  # noqa: BLE001 — never raise out of verify
+            # ``error`` (not ``message``) — the verify partial renders ``.error``
+            # for a failed lookup.
             return IsinInfo(
                 ok=False,
                 isin=isin,
-                message=f"Could not reach market data to validate the ISIN: {exc}",
+                error=f"Could not reach market data to validate the ISIN: {exc}",
             )
         if row is None:
             return IsinInfo(
                 ok=False,
                 isin=isin,
-                message="ISIN not found in market data — check the code.",
+                error="ISIN not found in market data — check the code.",
             )
 
         def _num(*keys: str) -> Optional[float]:
@@ -513,11 +515,13 @@ class ExirAdapter:
                 if resp.status_code == 200:
                     raw = resp.json().get("result") or []
                     if len(raw) >= size:
+                        # Log the broker CODE + range, not the account username
+                        # (a customer identifier), on this routine path.
                         logger.warning(
-                            "exir orderbookReport hit the %d-row cap for %s "
-                            "(%s..%s) — results may be truncated; use a narrower "
-                            "date range",
-                            size, username, from_date, to_date,
+                            "exir orderbookReport hit the %d-row cap for broker "
+                            "%s (%s..%s) — results may be truncated; use a "
+                            "narrower date range",
+                            size, self.code, from_date, to_date,
                         )
                     # Keep only orders that actually traded (any wire status).
                     rows = [r for r in raw if _traded_qty(r) > 0]

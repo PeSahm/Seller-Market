@@ -63,9 +63,13 @@ def _decimal_from(value: Any) -> Optional[Decimal]:
     if value is None:
         return None
     try:
-        return Decimal(str(value))
+        dec = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
+    # Reject NaN/Infinity: ``Decimal("NaN")`` parses fine and is truthy, so a
+    # malformed broker price would otherwise sail into a money column (and
+    # poison the fee arithmetic). A real price is always finite.
+    return dec if dec.is_finite() else None
 
 
 def _parse_dt(value: Optional[str]) -> Optional[datetime]:

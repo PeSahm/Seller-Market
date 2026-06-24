@@ -342,7 +342,8 @@ async def test_exir_verify_isin_unknown(monkeypatch):
     monkeypatch.setattr(exir_mod, "_rlc_instrument", AsyncMock(return_value=None))
     info = await ExirAdapter("khobregan").verify_isin("u", "p", "IRO1XXXX0001", "http://ocr")
     assert info.ok is False
-    assert "not found" in (info.message or "").lower()
+    # The verify partial renders ``.error`` on a failed lookup, not ``.message``.
+    assert "not found" in (info.error or "").lower()
 
 
 async def test_exir_verify_isin_unreachable(monkeypatch):
@@ -351,9 +352,25 @@ async def test_exir_verify_isin_unreachable(monkeypatch):
     )
     info = await ExirAdapter("khobregan").verify_isin("u", "p", "IRO1SROD0001", "http://ocr")
     assert info.ok is False
-    assert "could not reach" in (info.message or "").lower()
+    assert "could not reach" in (info.error or "").lower()
 
 
 async def test_exir_verify_isin_blank():
     info = await ExirAdapter("khobregan").verify_isin("u", "p", "   ", "http://ocr")
     assert info.ok is False
+    assert (info.error or "").strip() != ""
+
+
+def test_map_exir_row_rejects_nonfinite_price(family_map):
+    """A malformed ('NaN'/'Infinity') traded price must NOT reach the money
+    column — it falls back to the order price (and None if both are bad)."""
+    from app.services.broker_orders import _map_exir_row
+
+    customer = SimpleNamespace(id=uuid4(), agent_id=uuid4(), broker="khobregan", username="x")
+    row = _exir_row()
+    row["averageTradedPrice"] = "NaN"
+    row["price"] = 9690
+    assert _map_exir_row(row, customer)["price"] == Decimal("9690")
+
+    row["price"] = "Infinity"
+    assert _map_exir_row(row, customer)["price"] is None
