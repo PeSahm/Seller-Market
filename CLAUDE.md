@@ -1931,3 +1931,51 @@ Admin → Brokers → **New**: **Code** = the short tenant name (`hafez`, `dnovi
 | — | OTP-enabled OnlinePlus accounts | `ActiveOtp`/`ActiveSms`/`MustChangePassword` → adapter raises (creds valid but not auto-tradable, skipped). Mostafa's is OFF. No OTP-step support (would need an SMS flow). |
 | — | F5 cookie rotation on the auto-sell chunk ladder | `direct_sell` posts the snapshot cookies per chunk; if F5 rotates mid-ladder a late chunk could 401 (exir is immune via its signature). Watch in the canary; spaced ~350ms so unlikely. |
 | — | Confirm GetOrderList row fields against a REAL fill | `_map_onlineplus_row` field names (OrderId/SymbolIsin/ExcutedAmount/OrderState/Jalali OrderDate) are from the decompiled client; the live spike's account had no Hafez trades. Confirm after the first executed order. |
+
+---
+
+## Session 36 — `ideal` broker "can't verify credentials" root-caused = AS214751 routing block; fixed with a trading-host VERIFY PROXY (PR #175), both mgmt instances deployed, 2 live ideal customers fixed
+
+Operator: *"ideal broker (ephoenix type) could not verify user credential… `https://identity-ideal.ephoenix.ir/api/Captcha/GetCaptcha` could not connect."* Root-caused, built the durable fix (PR **#175** `f46a34f`), deployed both mgmt instances, and re-verified the 2 live ideal customers (now `valid`). **mgmt-UI only — NO bot redeploy, NO migration.** This RESOLVES the carried S34 "ideal unreachable from mgmt" follow-up.
+
+### Root cause — same per-network routing block as S29 (`marketdatagw`)
+`identity-ideal.ephoenix.ir` → **`185.115.151.77`** (the `185.115.151.0/24` / **AS214751** block, the SAME network as `marketdatagw.ephoenix.ir` `185.115.151.42`). That AS is **unroutable from the mgmt hosts** (PouyanIt `5.10.248.55` + ParsPack `45.139.10.192`) — SYN silently dropped → `ConnectTimeout` → "no content" from `GetCaptcha`. Working ephoenix brokers sit in `185.78.21.0/24` (different AS, routable everywhere). Evidence table (probed live):
+
+| Source | identity-ideal (185.115.151.77) | marketdatagw (.42, control-blocked) | identity-ayandeh (185.78.21.x, control-ok) |
+|---|---|---|---|
+| this Windows host | 200 / 0.14s | — | 200 |
+| **PouyanIt mgmt host + api container** | **ConnectTimeout** | **ConnectTimeout** | 200 / 0.07s |
+| **Tebyan host (185.232.152.5, bots)** | **200 / 0.09s** | — | 200 |
+
+So: NOT a credential problem, NOT DNS, NOT the broker being down. The credential **checker/verify-button run on the mgmt host** → ConnectTimeout → the 2 `ideal` customers (hamid's `1263381952` + `0011786892`) sat stuck `credential_status=transient` (msg `login attempt 5 failed (ConnectTimeout on https://identity-ideal.ephoenix.ir/api…)`). **Trading was UNAFFECTED** — the bots live on Tebyan, which reach `ideal` fine; the conservative classifier correctly kept them `transient` (never false-`invalid`).
+
+### The fix (PR #175) — `app/services/broker_verify.py`
+New `verify_credentials_resilient(*, db, broker_code, username, password, ocr_service_url, isin=None)` — drop-in for `broker_client.verify_credentials` (+ a `db`), preserves the three-way `CredStatus`:
+1. **Reachability pre-check** (`_reachable_from_mgmt`): a 4s `httpx.get` (trust_env=False) to the broker's primary host (ephoenix/ib → `_endpoints_for(code)["captcha"]`; exir → `{code}.exirbroker.com/captcha`). Only `ConnectError`/`ConnectTimeout` → unreachable; any HTTP response/redirect → reachable. Skips the doomed 5×ConnectTimeout retry loop for AS214751 brokers (keeps the button fast).
+2. **Reachable** → `broker_client.verify_credentials` (mgmt-direct, fast path, byte-identical for ~all brokers); only on a TRANSIENT (inconclusive) verdict fall back to the proxy and use it if decisive.
+3. **Unreachable** → `verify_via_trading_host`: iterate managed servers (all Tebyan), find one with a running bot container, run a bounded **three-way verify script INSIDE it** via `run_command` + `docker exec -i <bot> python -c <script>` (creds on stdin) — **reusing the S32 deep-check SSH+docker-exec path**. The inline script reuses the BOT image's own broker code: ephoenix → `EphoenixAPIClient.authenticate()` (raises `InvalidCredentialsError` on errorCode 3000 = wrong password, PR #168) then `get_customer_info()` for the confirmed name; a successful LOGIN is `valid` even if the bonus customer-info call fails (its host may itself be AS214751-blocked). exir → adapter `prepare_order` (login first). First DECISIVE (valid/invalid) host wins; a transient host falls through to the next.
+
+Wired into: the **daily credential checker** (`_verify_one`), the **admin** + **agent** verify-on-save routes (operator chose "button also proxies" — accepts the ~10–30s SSH+exec+captcha cost). **MGMT-ONLY**: the verify script is sent INLINE; the bot image already carries `api_client`/`broker_adapters`/`cred_errors` (PR #168, deployed fleet-wide) → no bot redeploy, no migration.
+
+### TDD + verification
+13 new `test_broker_verify` (payload→VerifyResult mapping, host-iteration: skip-no-bot / invalid-immediately / transient-falls-through / run_command-error-tries-next / no-bot-host, and the orchestration: reachable-valid/invalid skip proxy, reachable-transient→proxy, both-transient keeps original, unreachable→straight-to-proxy). Updated `test_credential_checker` + `test_credential_routes` (new happy-path route test asserting the button calls resilient, not direct). Full suite **810 passed, 2 skipped**.
+
+### Deploy + LIVE verification (all confirmed)
+- **Both mgmt instances on `f46a34f`** (PouyanIt + ParsPack via `ghcr-mirror.liara.ir` mirror-pull-by-tag → verify revision label == merge SHA → retag → `compose up -d api`; ghcr blocked from PouyanIt=000, mirror=401). Both `/health=200`, `broker_verify` imports in-container, alembic head **`0022_broker_base_domain`** (NO new migration in this PR — that head came from the OnlinePlus base_domain work).
+- **The 2 live ideal customers re-verified THROUGH the proxy → both `valid`** (broker-confirmed names محسن قاسمی ارمکی / آتنا محمودی returned via the Tebyan-host `get_customer_info`). Fleet `credential_status`: **0 transient** (85 valid / 3 invalid; the invalid/valid split is normal daily-checker movement). DB is external Windows PG18 (S23) — read back via the api container, not the local postgres.
+
+### Learnings (Session 36)
+- **Diagnose a "can't connect to broker X" by comparing the IP/AS, not just DNS.** `ideal` → `185.115.151.x` = **AS214751** = the same block S29 found unroutable from PouyanIt/ParsPack (vs the routable `185.78.21.x`). A new ephoenix broker on AS214751 will hit this again — the resilient proxy now auto-covers it with zero config.
+- **The S32 deep-check infra is reusable as a verify proxy** — running a real broker login inside a Tebyan bot container via `run_command` + `docker exec` is the same capability; I just needed a three-way (valid/invalid/transient) variant of the inline script. Because the bot image already had `cred_errors` (PR #168), the whole fix is mgmt-only (inline script, no bot redeploy).
+- **`.format()` on a string containing the inline python script breaks** — the script has literal `{` `}` (JSON dicts) → `KeyError: '"status"'`. Build the `docker exec … python -c …` command by concatenation, never `str.format`.
+- **`set_credential_status` maps `CredStatus.INVALID_CREDENTIALS` → the DB enum value `"invalid"`** (`_CRED_STATUS_TO_COL`); the `customer_credential_status` enum has no `invalid_credentials` label. A raw `WHERE credential_status='invalid_credentials'` query throws `InvalidTextRepresentationError` — use `'invalid'`.
+- **A successful LOGIN proves the credentials even if the follow-up customer-info call fails** — `get_customer_info` hits a *different* host (`backofficeexternal-…`) that could itself be network-blocked, so the verify script returns `valid` on login success and treats the name as a best-effort bonus.
+- **`Optional[...]` is the house idiom** in the peer broker modules (service_monitor 12×, broker_client 42×) and **CI does not run ruff** (only `pytest tests/unit`), so UP007 isn't a gate — matched the siblings rather than converting only the new file.
+- **github connectivity from this Windows host flapped hard this session** (push/PR/merge each needed 2–3 retries; `dial tcp …:443 refused`) — wrap every `git push`/`gh` in a retry loop; confirm a merge via the API `merged` boolean, then `git fetch && reset --hard origin/main` and check `git log -1` is the merge commit.
+
+### Open follow-ups (Session 36)
+| # | Title | Why |
+|---|---|---|
+| — | `verify_isin` for ideal still mgmt-direct | Only credential verification was made resilient (operator's ask). `broker_client.verify_isin` for an AS214751 broker would still ConnectTimeout from mgmt (it hits `market_data`/captcha from the mgmt host). Low impact (admin instrument-check); apply the same proxy if it bites. |
+| — | Manual "recheck transients now" UI button | Still a carried S34 follow-up — `recheck_transients()`/`verify_credentials_resilient` are standalone callables (ran ad-hoc via the api container this session); a button would let the operator self-serve without waiting for the noon sweep. |
+| — | Secure the DB link / AVX2 OCR HA | Unchanged carried items (S23/S25). |
