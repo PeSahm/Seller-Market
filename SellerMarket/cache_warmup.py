@@ -50,27 +50,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _warmup_exir(config_section: Dict[str, str], cache: TradingCache) -> bool:
-    """Warm up / validate an Exir (Rayan-HamAfza) account.
+def _warmup_via_adapter(config_section: Dict[str, str], cache: TradingCache) -> bool:
+    """Warm up / validate a non-ephoenix (broker-adapter) account: exir or onlineplus.
 
-    Exir uses a cookie + per-request ``X-App-N`` session (not the ephoenix Bearer
-    token cache), and its prices come from the broker's own RLC band handler —
-    none of which is market-hours gated. We exercise the FULL prepare path
-    (login → buying power → RLC price band → buy fee → volume) exactly as the
-    locust run will, WITHOUT placing an order, so the account can be validated
-    ahead of the open. The adapter keeps its own in-memory session/price caches
-    (it does not use the on-disk ``TradingCache``), so this is a health check /
-    validation rather than a cross-process pre-cache.
+    These families use a cookie session (exir adds a per-request ``X-App-N``
+    signature; onlineplus is cookie-only) rather than the ephoenix Bearer token
+    cache, and their prices come from the broker's own RLC band handler — none of
+    which is market-hours gated. We exercise the FULL prepare path (login →
+    buying power → RLC price band → fee → volume) exactly as the locust run will,
+    WITHOUT placing an order, so the account can be validated ahead of the open.
+    The adapter keeps its own in-memory session/price caches (it does not use the
+    on-disk ``TradingCache``), so this is a health check / validation rather than
+    a cross-process pre-cache.
     """
-    from broker_adapters import get_adapter
+    from broker_adapters import get_adapter, resolve_family
 
     username = config_section['username']
     broker_code = config_section['broker']
     password = config_section['password']
     isin = config_section['isin']
     side = int(config_section['side'])
+    family = resolve_family(broker_code, config_section)
 
-    logger.info("Exir family — validating via adapter (login + buying power + RLC price band + fee)...")
+    logger.info(
+        f"{family} family — validating via adapter (login + buying power + RLC price band)..."
+    )
     try:
         adapter = get_adapter(
             broker_code,
@@ -82,11 +86,11 @@ def _warmup_exir(config_section: Dict[str, str], cache: TradingCache) -> bool:
         )
         prepared = adapter.prepare_order(isin=isin, side=side, config_section=config_section)
         logger.info(
-            f"✓ Exir prepare OK: {username}@{broker_code} "
+            f"✓ {family} prepare OK: {username}@{broker_code} "
             f"{'Buy' if side == 1 else 'Sell'} {isin} "
             f"price={prepared.price:,} vol={prepared.volume:,}"
         )
-        logger.info(f"\n✓✓✓ Exir warmup successful for {username}@{broker_code} ✓✓✓\n")
+        logger.info(f"\n✓✓✓ {family} warmup successful for {username}@{broker_code} ✓✓✓\n")
         return True
     except InvalidCredentialsError:
         logger.warning(
@@ -95,7 +99,10 @@ def _warmup_exir(config_section: Dict[str, str], cache: TradingCache) -> bool:
         )
         return False
     except Exception as e:
-        logger.error(f"❌ Exir warmup failed for {username}@{broker_code}: {e}")
+        # Also catches the onlineplus OTP / must-change-password RuntimeError
+        # (creds valid but not auto-tradable) — the account is skipped with the
+        # reason logged, keeping the run green.
+        logger.error(f"❌ {family} warmup failed for {username}@{broker_code}: {e}")
         return False
 
 
@@ -129,13 +136,14 @@ def warmup_account(config_section: Dict[str, str], cache: TradingCache) -> bool:
     logger.info(f"{'='*80}")
     
     try:
-        # Exir (Rayan HamAfza) uses a different protocol; divert to the adapter
-        # (mirrors locustfile_new.py's order path). Family is data-driven from the
-        # rendered config's broker_family, falling back to ephoenix for legacy
-        # configs that predate it.
+        # Non-ephoenix families (exir cookie+X-App-N, onlineplus cookie-only) use
+        # a different protocol; divert to the adapter (mirrors locustfile_new.py's
+        # order path). Family is data-driven from the rendered config's
+        # broker_family; the negative test future-proofs new adapter families,
+        # falling back to ephoenix for legacy configs that predate broker_family.
         from broker_adapters import resolve_family
-        if resolve_family(broker_code, config_section) == "exir":
-            return _warmup_exir(config_section, cache)
+        if resolve_family(broker_code, config_section) != "ephoenix":
+            return _warmup_via_adapter(config_section, cache)
 
         # ephoenix family — endpoints are DATA-DRIVEN from the broker code (no
         # hardcoded enum gate), so a new standard ephoenix broker validates here

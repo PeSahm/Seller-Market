@@ -255,11 +255,14 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
     logger.info(f"Preparing order for {username}@{broker_code} - ISIN: {isin}")
     logger.info(f"{'='*80}")
 
-    # --- exir family (Rayan HamAfza): cookie + X-App-N adapter. The ephoenix
-    # path below is left BYTE-FOR-BYTE unchanged; only non-ephoenix codes divert
-    # here. Family is data-driven from the rendered config (broker_family).
+    # --- non-ephoenix families (exir cookie+X-App-N, onlineplus cookie-only):
+    # divert to the broker adapter. The ephoenix path below is left
+    # BYTE-FOR-BYTE unchanged; only non-ephoenix codes divert here. Family is
+    # data-driven from the rendered config (broker_family); the negative test
+    # future-proofs new adapter families.
     from broker_adapters import get_adapter, resolve_family
-    if resolve_family(broker_code, config_section) == "exir":
+    _family = resolve_family(broker_code, config_section)
+    if _family != "ephoenix":
         adapter = get_adapter(
             broker_code,
             username=username,
@@ -270,7 +273,7 @@ def prepare_order_data(config_section: dict) -> Dict[str, Any]:
         )
         prepared = adapter.prepare_order(isin=isin, side=side, config_section=config_section)
         logger.info(
-            f"✓ Exir order prepared: {username}@{broker_code} "
+            f"✓ {_family} order prepared: {username}@{broker_code} "
             f"{'Buy' if side == 1 else 'Sell'} {isin} "
             f"price={prepared.price:,} vol={prepared.volume:,}"
         )
@@ -491,15 +494,7 @@ class TradingUser(HttpUser):
         try:
             task_logger.info(f"Placing order for {self.username}@{self.broker_code}")
 
-            if self.signer is None:
-                # EPHOENIX — static Bearer header (unchanged from before the split).
-                headers = {
-                    "authorization": f"Bearer {self.token}",
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-            else:
+            if self.signer is not None:
                 # EXIR — cookie auth (carried onto self.client in on_start) plus a
                 # FRESH per-request X-App-N signature (pure arithmetic, no I/O).
                 headers = {
@@ -508,6 +503,22 @@ class TradingUser(HttpUser):
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 }
                 headers.update(self.signer())
+            elif self.exir_cookies:
+                # ONLINEPLUS — cookie session only (carried onto self.client in
+                # on_start). NO Bearer, NO signer; a vanilla JSON POST.
+                headers = {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                }
+            else:
+                # EPHOENIX — static Bearer header (unchanged from before the split).
+                headers = {
+                    "authorization": f"Bearer {self.token}",
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
 
             response = self.client.request(
                 method="POST",

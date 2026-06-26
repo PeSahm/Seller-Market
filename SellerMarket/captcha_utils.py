@@ -33,7 +33,7 @@ def _ocr_base_urls():
     return [part.rstrip('/') for part in raw.split() if part.strip()]
 
 
-def decode_captcha(im: str) -> str:
+def decode_captcha(im: str, *, ocr_path: str = "/ocr/captcha-easy-base64") -> str:
     """
     Decode a captcha image using the OCR service pool.
 
@@ -45,6 +45,10 @@ def decode_captcha(im: str) -> str:
 
     Args:
         im: Base64 encoded image
+        ocr_path: The OCR endpoint path. Default is the 5-digit EasyOCR route
+            used by ephoenix/exir; the OnlinePlus family passes
+            ``/ocr/onlineplusplatforms-base64`` (the 4-digit CNN route). Keyword-
+            only so existing positional callers are unaffected.
 
     Returns:
         Decoded captcha text, or ``""`` if the decode was empty or every
@@ -63,7 +67,7 @@ def decode_captcha(im: str) -> str:
 
     last_error = None
     for base in endpoints:
-        url = f'{base}/ocr/captcha-easy-base64'
+        url = f'{base}{ocr_path}'
         try:
             response = requests.post(url, headers=headers, json=data, timeout=_OCR_TIMEOUT_S)
             response.raise_for_status()
