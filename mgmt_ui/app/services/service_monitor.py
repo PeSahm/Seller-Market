@@ -185,11 +185,13 @@ async def build_targets(db: AsyncSession) -> list[Target]:
                 f"https://{b.code}.exirbroker.com/captcha", "jpeg",
             ))
         elif b.family == "onlineplus":
-            # OnlinePlus serves its JSON API on api.{code}broker.ir; any HTTP
-            # response there = the host answered = reachable.
+            # OnlinePlus serves its JSON API on api.{domain}; use the per-broker
+            # base_domain (tenants don't share a convention), falling back to the
+            # legacy {code}broker.ir. Any HTTP response there = reachable.
+            _domain = b.base_domain or f"{b.code}broker.ir"
             targets.append(Target(
                 f"onlineplus:{b.code}", "onlineplus", b.label or b.code,
-                f"https://api.{b.code}broker.ir/", "any",
+                f"https://api.{_domain}/", "any",
             ))
         elif b.family == "ephoenix" and b.code != "ib":
             label = b.label or b.code

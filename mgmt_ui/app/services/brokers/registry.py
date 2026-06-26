@@ -34,12 +34,21 @@ class UnknownBrokerError(KeyError):
 
 # None == never loaded. A dict (possibly empty) == loaded.
 _FAMILY_CACHE: Optional[dict[str, str]] = None
+# {code: base_domain or None} — the per-broker OnlinePlus tenant host, warmed
+# alongside the family cache. Empty until the first warm.
+_BASE_DOMAIN_CACHE: dict[str, Optional[str]] = {}
 
 
 def set_family_map(mapping: dict[str, str]) -> None:
     """Replace the family cache directly (used by tests / seed scripts)."""
     global _FAMILY_CACHE
     _FAMILY_CACHE = dict(mapping)
+
+
+def set_base_domain_map(mapping: dict[str, Optional[str]]) -> None:
+    """Replace the base-domain cache directly (used by tests / seed scripts)."""
+    global _BASE_DOMAIN_CACHE
+    _BASE_DOMAIN_CACHE = dict(mapping)
 
 
 def _is_loaded() -> bool:
@@ -52,12 +61,18 @@ async def warm_family_cache(db=None) -> dict[str, str]:
     If ``db`` is None a short-lived session is opened. Safe to call repeatedly
     (e.g. on every broker CRUD mutation) — it fully replaces the cache.
     """
-    global _FAMILY_CACHE
+    global _FAMILY_CACHE, _BASE_DOMAIN_CACHE
     from app.models.brokers import Broker  # local import avoids cycle at import time
 
     async def _load(session) -> dict[str, str]:
-        rows = (await session.execute(select(Broker.code, Broker.family))).all()
-        return {code: family for code, family in rows}
+        global _BASE_DOMAIN_CACHE
+        rows = (
+            await session.execute(
+                select(Broker.code, Broker.family, Broker.base_domain)
+            )
+        ).all()
+        _BASE_DOMAIN_CACHE = {code: (bd or None) for code, _family, bd in rows}
+        return {code: family for code, family, _bd in rows}
 
     if db is not None:
         _FAMILY_CACHE = await _load(db)
@@ -94,6 +109,14 @@ def family_of(code: str) -> str:
         return _FAMILY_CACHE[code]
     except KeyError as exc:
         raise UnknownBrokerError(f"unknown broker code: {code!r}") from exc
+
+
+def base_domain_of(code: str) -> Optional[str]:
+    """Return the per-broker ``base_domain`` (OnlinePlus tenant host) from the
+    warm cache, or ``None`` (unknown code / not set / cache not warmed). Unlike
+    :func:`family_of` this never raises — a missing base_domain just means the
+    OnlinePlus adapter falls back to the ``{code}broker.ir`` convention."""
+    return _BASE_DOMAIN_CACHE.get(code)
 
 
 def get_adapter(code: str):

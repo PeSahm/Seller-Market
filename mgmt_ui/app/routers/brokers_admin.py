@@ -84,6 +84,7 @@ async def admin_broker_create(
     label: str = Form(...),
     enabled: Optional[str] = Form(None),
     sort_order: int = Form(0),
+    base_domain: Optional[str] = Form(None),
 ):
     """Create a broker. On validation/dup error, re-render the form."""
     # Unchecked HTML checkboxes are simply absent from the form body, so a
@@ -95,6 +96,7 @@ async def admin_broker_create(
         "label": label,
         "enabled": enabled_bool,
         "sort_order": sort_order,
+        "base_domain": base_domain,
     }
 
     def _rerender(message: str) -> Response:
@@ -115,6 +117,7 @@ async def admin_broker_create(
             label=label,
             enabled=enabled_bool,
             sort_order=sort_order,
+            base_domain=base_domain,
         )
     except ValidationError:
         return _rerender(
@@ -158,6 +161,7 @@ async def admin_broker_edit(
         "label": broker.label,
         "enabled": broker.enabled,
         "sort_order": broker.sort_order,
+        "base_domain": broker.base_domain or "",
     }
     ctx["broker"] = broker
     ctx["mode"] = "edit"
@@ -174,6 +178,7 @@ async def admin_broker_update(
     label: str = Form(...),
     enabled: Optional[str] = Form(None),
     sort_order: int = Form(0),
+    base_domain: Optional[str] = Form(None),
 ):
     """Update a broker's mutable fields. ``code`` is immutable (not accepted)."""
     enabled_bool = enabled is not None
@@ -187,6 +192,7 @@ async def admin_broker_update(
         "label": label,
         "enabled": enabled_bool,
         "sort_order": sort_order,
+        "base_domain": base_domain,
     }
 
     def _rerender(message: str) -> Response:
@@ -207,6 +213,7 @@ async def admin_broker_update(
             label=label,
             enabled=enabled_bool,
             sort_order=sort_order,
+            base_domain=base_domain,
         )
     except ValidationError:
         return _rerender(

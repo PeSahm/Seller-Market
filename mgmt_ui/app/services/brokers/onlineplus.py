@@ -39,7 +39,7 @@ from typing import Optional
 
 import httpx
 
-from app.services.brokers import _rlc
+from app.services.brokers import _rlc, registry
 from app.services.brokers.base import CredStatus, IsinInfo, VerifyResult
 
 logger = logging.getLogger(__name__)
@@ -129,8 +129,18 @@ class OnlinePlusAdapter:
 
     def __init__(self, code: str):
         self.code = code
-        # Web host embeds the API base URL; the convention is the fallback.
-        self._web_base = f"https://online.{code}broker.ir"
+        # OnlinePlus tenants don't share one host convention (Hafez =
+        # hafezbroker.ir, but e.g. dnovin = dnovinbr.ir). Prefer the per-broker
+        # ``base_domain`` (warm registry cache); fall back to the legacy
+        # ``{code}broker.ir`` convention when it's unset. The web host embeds the
+        # API base URL (scraped in _resolve_api_base); api.{...} is the fallback.
+        domain = registry.base_domain_of(code)
+        if domain:
+            self._web_base = f"https://online.{domain}"
+            self._api_convention = f"https://api.{domain}"
+        else:
+            self._web_base = f"https://online.{code}broker.ir"
+            self._api_convention = f"https://api.{code}broker.ir"
 
     # -- host discovery ---------------------------------------------------
 
@@ -145,7 +155,7 @@ class OnlinePlusAdapter:
         cached = _API_BASE_CACHE.get(self.code)
         if cached:
             return cached
-        api = f"https://api.{self.code}broker.ir"  # convention fallback
+        api = self._api_convention  # base_domain-derived or {code}broker.ir
         try:
             resp = await client.get(
                 f"{self._web_base}/Account/Login", timeout=_HTTP_TIMEOUT_S

@@ -20,7 +20,7 @@ so we skip it. When there are zero customers we emit just the header comment
 
 from __future__ import annotations
 
-from app.services.brokers.registry import UnknownBrokerError, family_of
+from app.services.brokers.registry import UnknownBrokerError, base_domain_of, family_of
 from app.services.rendering import StackRenderContext
 
 # Sentinel marking a COMPLETE config.ini. The bot's auto-sell hot-reload
@@ -90,6 +90,15 @@ def render_config_ini(ctx: StackRenderContext) -> str:
         except UnknownBrokerError:
             family = "ephoenix"
         lines.append(f"broker_family = {family}")
+        # OnlinePlus tenants don't share one host convention, so the bot needs
+        # the per-broker base domain (e.g. dnovinbr.ir) to build online.{domain}
+        # / api.{domain}. Emit it only for onlineplus + only when set; the bot
+        # falls back to the {code}broker.ir convention when absent. Additive —
+        # other families / older bot images ignore the key.
+        if family == "onlineplus":
+            domain = base_domain_of(c.broker)
+            if domain:
+                lines.append(f"onlineplus_base_domain = {domain}")
         lines.append(f"isin = {c.isin}")
         lines.append(f"side = {c.side}")
         # #110 auto-sell: emit only when armed. None AND 0 both mean "disabled"

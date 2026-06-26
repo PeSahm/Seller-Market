@@ -68,6 +68,7 @@ def _snapshot(broker: Broker) -> dict:
         "label": broker.label,
         "enabled": broker.enabled,
         "sort_order": broker.sort_order,
+        "base_domain": broker.base_domain,
     }
 
 
@@ -141,6 +142,7 @@ async def create_broker(
         label=data.label,
         enabled=data.enabled,
         sort_order=data.sort_order,
+        base_domain=data.base_domain,
     )
     db.add(broker)
     # The ``existing is None`` pre-check above narrows the duplicate window but
@@ -210,6 +212,10 @@ async def update_broker(
         broker.enabled = data.enabled
     if data.sort_order is not None:
         broker.sort_order = data.sort_order
+    # The broker form always submits ``base_domain`` (empty -> None via the
+    # schema validator), so set it unconditionally — this is how an operator
+    # CLEARS the domain (reverting an OnlinePlus broker to the code convention).
+    broker.base_domain = data.base_domain
 
     _record_audit(
         db,

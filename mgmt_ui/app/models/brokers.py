@@ -48,6 +48,13 @@ class Broker(Base):
     family: Mapped[str] = mapped_column(String(32), nullable=False)
     # Human-friendly label shown in dropdowns (e.g. "Ghadir Shahr (Ganjine)").
     label: Mapped[str] = mapped_column(String(255), nullable=False)
+    # OnlinePlus only: the tenant's bare base domain (e.g. "dnovinbr.ir" or
+    # "hafezbroker.ir"). OnlinePlus tenants don't share one host convention, so
+    # the adapter builds online.{base_domain} (web) + api.{base_domain} (api)
+    # from it. NULL for ephoenix/exir (and for an OnlinePlus broker whose code
+    # follows the legacy "{code}broker.ir" convention — the adapter falls back
+    # to that when this is NULL).
+    base_domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Disabled brokers stay in the table (and keep validating existing customers)
     # but drop out of the create-customer dropdown.
     enabled: Mapped[bool] = mapped_column(
