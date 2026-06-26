@@ -64,8 +64,9 @@ def _ext_targets(brokers: list[Broker]) -> list[dict]:
             targets.append({"group": "exir", "name": b.label or b.code,
                             "url": f"https://{b.code}.exirbroker.com/"})
         elif b.family == "onlineplus":
+            _domain = b.base_domain or f"{b.code}broker.ir"
             targets.append({"group": "onlineplus", "name": b.label or b.code,
-                            "url": f"https://api.{b.code}broker.ir/"})
+                            "url": f"https://api.{_domain}/"})
         elif b.family == "ephoenix" and b.code != "ib":
             targets.append({"group": "ephoenix", "name": b.label or b.code,
                             "url": f"https://api-{b.code}.ephoenix.ir/"})

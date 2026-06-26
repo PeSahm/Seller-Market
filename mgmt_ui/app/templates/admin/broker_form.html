@@ -55,6 +55,20 @@
   </div>
 
   <div class="field">
+    <label class="label" for="base_domain">Base domain <span class="text-muted">(OnlinePlus only)</span></label>
+    <input class="input" id="base_domain" name="base_domain"
+           value="{{ fv.base_domain|default('') }}"
+           placeholder="e.g. dnovinbr.ir" maxlength="255">
+    <p class="text-small text-muted">
+      <strong>OnlinePlus only.</strong> The tenant's bare domain — e.g.
+      <code>dnovinbr.ir</code> or <code>hafezbroker.ir</code> (no <code>https://</code>,
+      no path). The adapter builds <code>online.{domain}</code> + <code>api.{domain}</code>.
+      Leave blank for ephoenix/exir, or for an OnlinePlus broker whose code follows
+      the <code>{code}broker.ir</code> convention (e.g. code <code>hafez</code>).
+    </p>
+  </div>
+
+  <div class="field">
     <label class="label" for="label">Label</label>
     <input class="input" id="label" name="label" required dir="auto"
            value="{{ fv.label|default('') }}"
