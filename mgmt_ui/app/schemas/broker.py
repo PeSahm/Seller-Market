@@ -14,7 +14,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 # The broker families we have adapters for. Extend only alongside a new adapter.
-BrokerFamily = Literal["ephoenix", "exir"]
+BrokerFamily = Literal["ephoenix", "exir", "onlineplus"]
 
 # Broker codes are lowercased + trimmed so "Khobregan" and "khobregan " collide
 # on the UNIQUE index instead of creating a dup the dropdown can't tell apart.

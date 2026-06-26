@@ -111,4 +111,8 @@ def get_adapter(code: str):
         from app.services.brokers.exir import ExirAdapter
 
         return ExirAdapter(code)
+    if family == "onlineplus":
+        from app.services.brokers.onlineplus import OnlinePlusAdapter
+
+        return OnlinePlusAdapter(code)
     raise UnknownBrokerError(f"no adapter for family {family!r} (code {code!r})")

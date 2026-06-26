@@ -1059,18 +1059,18 @@ async def admin_customer_verify_isin(
             "admin/partials/customer_verify_isin_result.html", ctx
         )
 
-    # Exir's verify_isin uses the PUBLIC market-data backend (no broker login),
-    # so it doesn't need the typed password the way ephoenix does (ephoenix logs
-    # in to obtain the Bearer token market_data requires). Resolve the family to
-    # decide whether the password is required; default to requiring it on an
-    # unknown/cold code (the ephoenix-safe behavior).
+    # Exir AND onlineplus verify_isin both use the PUBLIC RLC market-data backend
+    # (no broker login), so they don't need the typed password the way ephoenix
+    # does (ephoenix logs in to obtain the Bearer token market_data requires).
+    # Resolve the family to decide whether the password is required; default to
+    # requiring it on an unknown/cold code (the ephoenix-safe behavior).
     try:
         await brokers_registry.ensure_family_cache(db)
         family = brokers_registry.family_of(effective_broker)
     except brokers_registry.UnknownBrokerError:
         family = "ephoenix"
 
-    if family != "exir" and not password:
+    if family not in ("exir", "onlineplus") and not password:
         # Same reason as verify-credentials: we can't reuse the stored
         # ciphertext, and login requires a real password to obtain the
         # Bearer token that market_data needs.

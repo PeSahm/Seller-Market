@@ -34,7 +34,7 @@ from app.schemas.broker import BrokerCreate, BrokerUpdate
 logger = logging.getLogger(__name__)
 
 # Family display order for the grouped dropdown helper.
-_FAMILY_ORDER = ["ephoenix", "exir"]
+_FAMILY_ORDER = ["ephoenix", "exir", "onlineplus"]
 
 
 def _record_audit(

@@ -133,6 +133,8 @@ def map_getorders_row(row: dict, customer: Customer) -> dict:
         fam = "ephoenix"
     if fam == "exir":
         return _map_exir_row(row, customer)
+    if fam == "onlineplus":
+        return _map_onlineplus_row(row, customer)
     return _map_ephoenix_row(row, customer)
 
 
@@ -270,6 +272,85 @@ def _map_exir_row(row: dict, customer: Customer) -> dict:
         "placed_date": _derive_placed_date(entry_dt, None, None),
         "created_at_broker": entry_dt,
         "execution_date": None,  # no execution timestamp in the orderbook feed
+        "raw_json": row,
+    }
+
+
+def _map_onlineplus_row(row: dict, customer: Customer) -> dict:
+    """Map one OnlinePlus ``GetOrderList`` row to ``broker_orders`` column values.
+
+    Returns the SAME dict shape as :func:`_map_ephoenix_row` /
+    :func:`_map_exir_row`. Field sources are the OnlinePlus ``GetOrderList``
+    wire keys (live-confirmed envelope ``Data.Result[]``; per-row fields from
+    the decompiled client — confirm against a real executed order in Phase 2):
+
+    * ``OrderId`` → dedup ``tracking_number`` (per-account day sequence; the
+      composite ``(broker, account_username, tracking_number, placed_date)``
+      key keeps it unique). No distinct broker order id / serial.
+    * ``SymbolIsin`` → ISIN (``SymbolISIN`` accepted defensively).
+    * ``OrderSide`` is a Persian string (خرید/فروش) → 1/2 (match first letter,
+      Arabic-vs-Persian yeh agnostic).
+    * ``OrderDate`` is **Jalali** ``YYYY/MM/DD`` + ``OrderTime`` ``HH:mm:ss``;
+      combined and parsed to tz-aware Gregorian then RE-LABELED UTC without
+      shifting the wall-clock numerals (matches the ephoenix/exir convention so
+      the UTC-boundary date filters classify all families consistently).
+    """
+    tracking = _int_or_zero(row.get("OrderId"))
+    isin = row.get("SymbolIsin") or row.get("SymbolISIN") or ""
+    side_name = str(row.get("OrderSide", ""))
+    order_side = 1 if side_name.startswith("خ") else (2 if side_name.startswith("ف") else 0)
+    # Combine the Jalali date + time into the "YYYY/MM/DD-HH:mm:ss" shape
+    # parse_jalali_datetime expects; re-label UTC (keep the wall-clock numerals).
+    order_date = str(row.get("OrderDate") or "").strip()
+    order_time = str(row.get("OrderTime") or "").strip()
+    placed_at = None
+    if order_date:
+        placed_at = parse_jalali_datetime(
+            f"{order_date}-{order_time}" if order_time else f"{order_date}-00:00:00"
+        )
+        if placed_at is not None:
+            placed_at = placed_at.replace(tzinfo=timezone.utc)
+    executed_volume = _int_or_zero(row.get("ExcutedAmount") or row.get("ExecutedAmount"))
+    volume = _int_or_zero(row.get("Quantity"))
+    # Fully filled when the executed qty reaches the ordered qty (GetOrderList
+    # gives no explicit "remaining" field). When the ordered volume is unknown
+    # (0), any execution counts as done.
+    is_done = executed_volume > 0 and (volume == 0 or executed_volume >= volume)
+    return {
+        "customer_id": customer.id,
+        "agent_id": customer.agent_id,
+        "broker": customer.broker,
+        "account_username": customer.username,
+        # GetOrderList rows carry no account/pam field — attribution is by the
+        # queried customer (we logged in as them), so pam_code stays None (and
+        # the foreign-account skip never fires for this family).
+        "pam_code": None,
+        "tracking_number": tracking,
+        "broker_order_id": tracking or None,
+        "serial_number": None,  # OnlinePlus GetOrderList carries no serial
+        "isin": isin,
+        # OnlinePlus ``Symbol`` is the short ticker; there is no separate title
+        # in this feed, so leave symbol_title None.
+        "symbol": row.get("Symbol") or None,
+        "symbol_title": None,
+        "order_side": order_side,
+        "price": _decimal_from(row.get("OrderPrice")),
+        "volume": volume,
+        "executed_volume": executed_volume,
+        # No per-order fee / traded-value fields in GetOrderList; the fee report
+        # COALESCEs NULLs, so None is safe.
+        "total_fee": None,
+        "executed_amount": None,
+        "net_traded_value": None,
+        # We only ingest filled rows for the report; stamp state=3 (canonical
+        # "filled") to satisfy profit_report's ``state == 3`` filter.
+        "state": 3,
+        "state_desc": row.get("OrderState") or None,
+        "is_done": is_done,
+        "placed_at": placed_at,
+        "placed_date": _derive_placed_date(placed_at, None, None),
+        "created_at_broker": placed_at,
+        "execution_date": None,  # no separate execution timestamp in this feed
         "raw_json": row,
     }
 
