@@ -64,6 +64,7 @@ GROUP_ORDER: list[tuple[str, str]] = [
     ("ephoenix-legacy", "ephoenix (legacy)"),
     ("ibtrader", "ibtrader"),
     ("exir", "Exir"),
+    ("onlineplus", "OnlinePlus"),
     ("rlc", "RLC (tadbir)"),
     ("auth-ephoenix", "Authenticated · ephoenix (real login)"),
     ("auth-exir", "Authenticated · Exir (real login)"),
@@ -182,6 +183,13 @@ async def build_targets(db: AsyncSession) -> list[Target]:
             targets.append(Target(
                 f"exir:{b.code}", "exir", b.label or b.code,
                 f"https://{b.code}.exirbroker.com/captcha", "jpeg",
+            ))
+        elif b.family == "onlineplus":
+            # OnlinePlus serves its JSON API on api.{code}broker.ir; any HTTP
+            # response there = the host answered = reachable.
+            targets.append(Target(
+                f"onlineplus:{b.code}", "onlineplus", b.label or b.code,
+                f"https://api.{b.code}broker.ir/", "any",
             ))
         elif b.family == "ephoenix" and b.code != "ib":
             label = b.label or b.code

@@ -17,15 +17,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import logging
 import time
-import urllib.parse
 from typing import Optional
 
 import httpx
 
 from app.services.brokers._jalali import gregorian_str_to_jalali_str
+from app.services.brokers._rlc import rlc_instrument as _rlc_instrument
 from app.services.brokers.base import CredStatus, IsinInfo, VerifyResult
 from app.services.brokers.exir_token import build_app_n
 
@@ -33,48 +32,10 @@ logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT_S = 20.0
 
-# Public RLC / Tadbir market-data backend — the SAME source the bot prices Exir
-# orders on (``SellerMarket/rlc_price`` / ``rlc_market``). ``getstockprice2`` is
-# public (no auth) and keyed by ISIN (``nc``), returning the symbol (``sf``),
-# Persian name (``cn``), price band (``hap`` ceiling / ``lap`` floor), max order
-# qty (``mxqo``) and prices (``ltp``/``cp``/``pcp``). The doubled slash after the
-# host reproduces the official client's URL exactly. ``trust_env=False`` (set on
-# the client) so a foreign HTTP proxy on the mgmt host never intercepts the
-# Iranian endpoint.
-_RLC_STOCK_INFO_URL = "https://core.tadbirrlc.com//StockInformationHandler"
-_RLC_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-)
-
-
-def _rlc_blob(params: dict) -> str:
-    """RLC-style single-quoted JSON-ish blob, URL-encoded, with the trailing
-    ``&jsoncallback=`` (mirrors ``SellerMarket/rlc_market._blob``)."""
-    inner = "{" + ",".join(f"'{k}':'{v}'" for k, v in params.items()) + "}"
-    return urllib.parse.quote(inner) + "&jsoncallback="
-
-
-async def _rlc_instrument(isin: str) -> Optional[dict]:
-    """Return the public ``getstockprice2`` market-data row for ``isin`` (the
-    dict whose ``nc`` equals the ISIN), or ``None`` if the backend doesn't know
-    it. Raises on a transport/HTTP failure (the caller turns that into a
-    graceful ``ok=False`` rather than a 500)."""
-    url = _RLC_STOCK_INFO_URL + "?" + _rlc_blob(
-        {"Type": "getstockprice2", "la": "Fa", "arr": isin}
-    )
-    async with httpx.AsyncClient(
-        timeout=_HTTP_TIMEOUT_S, trust_env=False
-    ) as client:
-        resp = await client.get(url, headers={"User-Agent": _RLC_UA})
-        resp.raise_for_status()
-        rows = json.loads(resp.text)
-    if not isinstance(rows, list):
-        return None
-    for row in rows:
-        if isinstance(row, dict) and row.get("nc") == isin:
-            return row
-    return None
+# The public RLC / Tadbir market-data lookup (``getstockprice2``) lives in
+# ``app.services.brokers._rlc`` now (shared with the onlineplus family). It is
+# imported above as ``_rlc_instrument`` so the existing patch target
+# ``exir._rlc_instrument`` keeps working unchanged in tests.
 
 
 def _traded_qty(row: object) -> int:

@@ -955,6 +955,12 @@ async def verify_credentials(
         return await ExirAdapter(broker_code).verify_credentials(
             username, password, ocr_service_url
         )
+    if family == "onlineplus":
+        from app.services.brokers.onlineplus import OnlinePlusAdapter
+
+        return await OnlinePlusAdapter(broker_code).verify_credentials(
+            username, password, ocr_service_url
+        )
     return await _ephoenix_verify_credentials(
         broker_code, username, password, ocr_service_url
     )
@@ -982,6 +988,12 @@ async def verify_isin(
         from app.services.brokers.exir import ExirAdapter
 
         return await ExirAdapter(broker_code).verify_isin(
+            username, password, isin, ocr_service_url
+        )
+    if family == "onlineplus":
+        from app.services.brokers.onlineplus import OnlinePlusAdapter
+
+        return await OnlinePlusAdapter(broker_code).verify_isin(
             username, password, isin, ocr_service_url
         )
     return await _ephoenix_verify_isin(
@@ -1012,10 +1024,13 @@ async def get_orders(
         family = await _family(broker_code)
     except Exception as exc:  # noqa: BLE001 — surface, don't misroute the sweep
         return [], f"could not resolve broker family for {broker_code!r}: {exc}"
-    if family == "exir":
-        from app.services.brokers.exir import ExirAdapter
+    if family in ("exir", "onlineplus"):
+        if family == "exir":
+            from app.services.brokers.exir import ExirAdapter as _Adapter
+        else:
+            from app.services.brokers.onlineplus import OnlinePlusAdapter as _Adapter
 
-        return await ExirAdapter(broker_code).get_orders(
+        return await _Adapter(broker_code).get_orders(
             username,
             password,
             ocr_service_url,
@@ -1064,6 +1079,12 @@ async def get_holdings(
         from app.services.brokers.exir import ExirAdapter
 
         return await ExirAdapter(broker_code).get_holdings(
+            username, password, isin, ocr_service_url=ocr_service_url
+        )
+    if family == "onlineplus":
+        from app.services.brokers.onlineplus import OnlinePlusAdapter
+
+        return await OnlinePlusAdapter(broker_code).get_holdings(
             username, password, isin, ocr_service_url=ocr_service_url
         )
     return await _ephoenix_get_holdings(
