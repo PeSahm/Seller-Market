@@ -25,7 +25,7 @@ async def _fake_session_cm():
 def _patch_common(monkeypatch, customers, verify_results, recorder):
     """Wire up the module-level imports _sweep_once pulls in at call time."""
     import app.db as db_mod
-    from app.services import broker_client, settings_store
+    from app.services import broker_verify, settings_store
     from app.services import customers as customers_svc
 
     monkeypatch.setattr(db_mod, "AsyncSessionLocal", lambda: _fake_session_cm())
@@ -39,10 +39,13 @@ def _patch_common(monkeypatch, customers, verify_results, recorder):
         customers_svc, "decrypt_password", AsyncMock(return_value="pw")
     )
 
-    async def _verify(*, broker_code, username, password, ocr_service_url):
+    # The checker verifies through the resilient helper (mgmt-direct with a
+    # trading-host proxy fallback for unreachable brokers); stub it directly so
+    # these tests stay hermetic and focus on the per-customer verdict mapping.
+    async def _verify(*, db, broker_code, username, password, ocr_service_url, isin=None):
         return verify_results[username]
 
-    monkeypatch.setattr(broker_client, "verify_credentials", _verify)
+    monkeypatch.setattr(broker_verify, "verify_credentials_resilient", _verify)
 
     async def _set(db, cid, status, message=None, *, actor_id=None):
         recorder.append((cid, status))
