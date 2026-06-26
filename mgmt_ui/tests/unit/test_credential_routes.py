@@ -88,6 +88,49 @@ def test_verify_blank_username_skips_broker(app_client, monkeypatch, route, dep_
 
 
 # --------------------------------------------------------------------------
+# The verify button routes through the resilient helper (mgmt-direct +
+# trading-host proxy fallback) so brokers unreachable from mgmt (ideal) verify.
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "route,dep_name,role",
+    [
+        ("/agent/customers/verify-credentials", "get_current_user", "agent"),
+        ("/admin/customers/verify-credentials", "require_admin", "admin"),
+    ],
+)
+def test_verify_button_uses_resilient(app_client, monkeypatch, route, dep_name, role):
+    app, get_current_user, require_admin = app_client
+    dep = {"get_current_user": get_current_user, "require_admin": require_admin}[dep_name]
+    app.dependency_overrides[dep] = lambda: _user(role)
+
+    from app.services import broker_verify, broker_client
+    from app.services.brokers.base import CredStatus, VerifyResult
+
+    # The mgmt-direct path must NOT be called by the route directly — it goes
+    # through the resilient orchestrator, which decides direct-vs-proxy.
+    direct_spy = AsyncMock(side_effect=AssertionError("route must call resilient, not direct"))
+    monkeypatch.setattr(broker_client, "verify_credentials", direct_spy)
+    resilient = AsyncMock(return_value=VerifyResult(
+        ok=True, status=CredStatus.VALID, full_name="Verified Person"))
+    monkeypatch.setattr(broker_verify, "verify_credentials_resilient", resilient)
+
+    import app.routers.admin as admin_mod
+    import app.routers.agent as agent_mod
+    for mod in (admin_mod, agent_mod):
+        monkeypatch.setattr(mod.settings_store, "get_setting", AsyncMock(return_value="http://ocr"))
+
+    with TestClient(app) as client:
+        r = _csrf_post(client, route, {
+            "broker": "ideal", "username": "1263381952", "password": "pw",
+            "broker_fallback": "", "username_fallback": "",
+        })
+    assert r.status_code == 200
+    assert "Verified Person" in r.text
+    resilient.assert_awaited_once()
+    direct_spy.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------
 # F4 — admin list whitelists garbage cred/status to "no filter" (no 500)
 # --------------------------------------------------------------------------
 def test_admin_customers_whitelists_bad_filters(app_client, monkeypatch):

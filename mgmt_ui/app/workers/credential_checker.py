@@ -39,12 +39,17 @@ _DEFAULT_HOUR = 12  # noon Tehran
 async def _verify_one(db, cust, ocr_service_url):
     """Verify one customer against its broker and persist the verdict; return
     the :class:`CredStatus`."""
-    from app.services import broker_client
+    from app.services import broker_verify
     from app.services import customers as customers_svc
     from app.services.brokers.base import resolve_cred_status
 
     password = await customers_svc.decrypt_password(cust)
-    result = await broker_client.verify_credentials(
+    # Resilient verify: mgmt-direct when the broker is reachable, otherwise (or on
+    # an inconclusive result) proxied through a trading host that can reach it —
+    # so brokers on networks the mgmt host can't route to (e.g. ``ideal`` on
+    # AS214751) still get a real valid/invalid verdict instead of stuck-transient.
+    result = await broker_verify.verify_credentials_resilient(
+        db=db,
         broker_code=cust.broker,
         username=cust.username,
         password=password,

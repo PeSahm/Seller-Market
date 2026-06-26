@@ -57,6 +57,7 @@ from app.services import agents as services_agents
 from app.services import audit as services_audit
 from app.services import auto_sell_view as services_auto_sell_view
 from app.services import broker_client
+from app.services import broker_verify
 from app.services import brokers_admin
 from app.services import close_positions_view as services_close_positions
 from app.services import close_prices as services_close_prices
@@ -1350,7 +1351,10 @@ async def agent_customer_verify_credentials(
         ))
 
     ocr_service_url = await settings_store.get_setting(db, "ocr_service_url")
-    result = await broker_client.verify_credentials(
+    # Resilient: mgmt-direct when the broker is reachable, else proxied through a
+    # trading host that can reach it (e.g. ``ideal`` on AS214751, unroutable here).
+    result = await broker_verify.verify_credentials_resilient(
+        db=db,
         broker_code=effective_broker,
         username=effective_username,
         password=password,
