@@ -164,6 +164,9 @@ def get_adapter(
             password=password,
             captcha_decoder=captcha_decoder,
             cache=cache,
+            # OnlinePlus reads its per-broker base_domain from the rendered
+            # config.ini section (tenants don't share a host convention).
+            config_section=config_section,
         )
 
     # Default / "ephoenix": preserve today's behaviour for every known broker.

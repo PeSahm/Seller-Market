@@ -132,6 +132,24 @@ def test_order_body_sell_encoding():
 
 
 # --------------------------------------------------------------------------
+# per-broker base_domain (OnlinePlus tenants don't share a host convention)
+# --------------------------------------------------------------------------
+def test_base_domain_from_config_section():
+    a = onlineplus_adapter.OnlinePlusAdapter(
+        "dnovin", "u", "p",
+        config_section={"onlineplus_base_domain": "dnovinbr.ir"},
+    )
+    assert a._web_base == "https://online.dnovinbr.ir"
+    assert a._api_convention == "https://api.dnovinbr.ir"
+
+
+def test_base_domain_absent_uses_code_convention():
+    a = onlineplus_adapter.OnlinePlusAdapter("hafez", "u", "p")
+    assert a._web_base == "https://online.hafezbroker.ir"
+    assert a._api_convention == "https://api.hafezbroker.ir"
+
+
+# --------------------------------------------------------------------------
 # BUY
 # --------------------------------------------------------------------------
 def test_buy_cookie_only_no_bearer_no_signer(monkeypatch):

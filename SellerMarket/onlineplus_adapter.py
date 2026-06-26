@@ -126,18 +126,29 @@ class OnlinePlusAdapter(BrokerAdapter):
         password: str,
         captcha_decoder: Optional[Callable[..., str]] = None,
         cache: Optional[Any] = None,
+        config_section: Optional[dict] = None,
     ):
         self.broker_code = broker_code
         self.username = username
         self.password = password
         self.captcha_decoder = captcha_decoder or _default_decode_captcha
         self.cache = cache  # unused (no shared cache schema); kept for signature parity
-        # Web host (the API base is scraped from / convention-derived off it).
-        # Both overridable via the DB-pushed [runtime] section so a non-standard
-        # tenant can be redirected fleet-wide with NO image rebuild.
-        self._web_base = runtime_config.get(
-            f"onlineplus_web_{broker_code}", f"https://online.{broker_code}broker.ir"
-        ).rstrip("/")
+        # OnlinePlus tenants don't share one host convention (Hafez =
+        # hafezbroker.ir, but dnovin = dnovinbr.ir), so the mgmt UI renders the
+        # per-broker domain into config.ini as ``onlineplus_base_domain``.
+        # Resolve order: the rendered base_domain -> the [runtime]
+        # ``onlineplus_web_<code>`` override -> the legacy ``{code}broker.ir``
+        # convention. The API base is scraped off the web host (see _api_base);
+        # ``_api_convention`` is the fallback when the scrape fails.
+        domain = str((config_section or {}).get("onlineplus_base_domain") or "").strip()
+        if domain:
+            self._web_base = f"https://online.{domain}"
+            self._api_convention = f"https://api.{domain}"
+        else:
+            self._web_base = runtime_config.get(
+                f"onlineplus_web_{broker_code}", f"https://online.{broker_code}broker.ir"
+            ).rstrip("/")
+            self._api_convention = f"https://api.{broker_code}broker.ir"
 
     @staticmethod
     def _ocr_path() -> str:
@@ -160,7 +171,7 @@ class OnlinePlusAdapter(BrokerAdapter):
         if override:
             api = override.rstrip("/")
         else:
-            api = f"https://api.{self.broker_code}broker.ir"  # convention fallback
+            api = self._api_convention  # base_domain-derived or {code}broker.ir
             try:
                 resp = session.get(f"{self._web_base}/Account/Login", timeout=TIMEOUT)
                 m = _API_BASE_RE.search(resp.text or "")
