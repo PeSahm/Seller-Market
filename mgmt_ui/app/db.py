@@ -17,11 +17,45 @@ logger = logging.getLogger(__name__)
 
 _settings = get_settings()
 
-engine = create_async_engine(
-    _settings.database_url,
-    pool_pre_ping=True,
-    future=True,
-)
+# ---------------------------------------------------------------------------
+# asyncpg prepared-statement cache MUST be disabled (statement_cache_size=0).
+#
+# asyncpg caches each statement's server-side prepared PLAN. When the shared
+# external database's schema changes under a live pooled connection — e.g. one
+# mgmt instance runs ``alembic upgrade head`` on deploy while the OTHER
+# instance's pooled connections still hold plans cached against the old schema,
+# or after a failover/restore onto the warm spare — those cached plans go stale
+# and the NEXT query raises ``asyncpg.InvalidCachedStatementError`` ("cached
+# statement plan is invalid due to a database schema or configuration change").
+# That surfaces as an intermittent HTTP 500 (seen live on POST .../trade-
+# instructions) which "self-heals" only because asyncpg evicts its cache AFTER
+# the failed request. With two app instances on ONE Postgres + a migration on
+# every deploy, it recurs on each schema change. Disabling the cache makes
+# every connection immune, at a negligible re-prepare cost for this low-traffic
+# admin UI. ``prepared_statement_cache_size=0`` does the same for SQLAlchemy's
+# own prepared-statement name cache (belt-and-suspenders, e.g. behind a pooler).
+# ---------------------------------------------------------------------------
+_ASYNCPG_CONNECT_ARGS = {
+    "statement_cache_size": 0,
+    "prepared_statement_cache_size": 0,
+}
+
+
+def _build_engine(dsn: str):
+    """Create an async engine hardened against asyncpg cached-plan staleness.
+
+    Used for BOTH the main engine and the failover spare so they behave
+    identically (see ``_ASYNCPG_CONNECT_ARGS``).
+    """
+    return create_async_engine(
+        dsn,
+        pool_pre_ping=True,
+        future=True,
+        connect_args=dict(_ASYNCPG_CONNECT_ARGS),
+    )
+
+
+engine = _build_engine(_settings.database_url)
 
 AsyncSessionLocal = async_sessionmaker(
     engine,
@@ -44,10 +78,6 @@ AsyncSessionLocal = async_sessionmaker(
 
 _active_db = "main"
 spare_engine = None  # built lazily on first failover
-
-
-def _build_engine(dsn: str):
-    return create_async_engine(dsn, pool_pre_ping=True, future=True)
 
 
 def active_db() -> str:
