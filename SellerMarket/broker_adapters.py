@@ -29,6 +29,21 @@ from typing import Any, Callable, Optional
 from broker_enum import BrokerCode
 
 
+def cookies_to_dict(jar) -> dict:
+    """Flatten a cookie jar to ``{name: value}`` WITHOUT triggering a
+    CookieConflict.
+
+    ``dict(jar)`` (and ``jar.items()``) reach the jar through its name-keyed
+    mapping interface, which RAISES ``CookieConflictError``/``CookieConflict``
+    when a load balancer set two cookies with the SAME name on different
+    paths/domains — exactly the F5 BIG-IP ``f5avr…_session_`` pair in front of
+    Hafez (OnlinePlus). Iterating the jar's ``Cookie`` objects directly is
+    duplicate-safe; the unique-named auth cookie (e.g. ``AuthCookie_OnlineCookie``
+    / exir's session cookie) is preserved. Accepts any ``requests`` /
+    ``http.cookiejar`` jar (iterating yields ``Cookie`` objects)."""
+    return {c.name: c.value for c in jar}
+
+
 @dataclass
 class PreparedOrder:
     """Family-agnostic description of a single ready-to-fire order request.

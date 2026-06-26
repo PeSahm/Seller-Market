@@ -11,6 +11,8 @@ from __future__ import annotations
 import base64
 import json
 
+import requests
+
 import ephoenix_adapter
 import exir_adapter
 from broker_adapters import PreparedOrder, resolve_family, get_adapter, is_auto_sell_only
@@ -84,16 +86,14 @@ class _FakeResp:
             raise RuntimeError(f"HTTP {self.status_code}")
 
 
-class _FakeCookieJar(dict):
-    def set(self, k, v):
-        self[k] = v
-
-
 class _FakeSession:
-    """Minimal stand-in for requests.Session used by ExirAdapter._login."""
+    """Minimal stand-in for requests.Session used by ExirAdapter._login.
+
+    Uses a REAL ``RequestsCookieJar`` (not a dict) so the cookie producer
+    (``cookies_to_dict``) iterates real ``Cookie`` objects, matching production."""
 
     def __init__(self):
-        self.cookies = _FakeCookieJar()
+        self.cookies = requests.cookies.RequestsCookieJar()
         self.headers = {}
 
     def get(self, url, timeout=None, **kw):

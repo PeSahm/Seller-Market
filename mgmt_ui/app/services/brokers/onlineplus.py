@@ -40,6 +40,7 @@ from typing import Optional
 import httpx
 
 from app.services.brokers import _rlc, registry
+from app.services.brokers._cookies import cookies_to_dict
 from app.services.brokers.base import CredStatus, IsinInfo, VerifyResult
 
 logger = logging.getLogger(__name__)
@@ -268,7 +269,10 @@ class OnlinePlusAdapter:
                 first = (data.get("CustomerName") or "").strip()
                 return {
                     "api": api,
-                    "cookies": dict(client.cookies),
+                    # F5 BIG-IP fronts Hafez and sets two same-name
+                    # ``f5avr…_session_`` cookies → ``dict(client.cookies)``
+                    # raises httpx.CookieConflict. Flatten duplicate-safe.
+                    "cookies": cookies_to_dict(client.cookies.jar),
                     "customer_name": first or None,
                     "bourse": data.get("BourseCode") or None,
                     "otp_required": bool(data.get("ActiveOtp") or data.get("ActiveSms")),

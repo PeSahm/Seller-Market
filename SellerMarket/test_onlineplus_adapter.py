@@ -38,21 +38,18 @@ class _FakeResp:
             raise requests.HTTPError(f"HTTP {self.status_code}")
 
 
-class _FakeCookieJar(dict):
-    def set(self, k, v, **kw):
-        self[k] = v
-
-
 class _FakeSession:
     """Stand-in for requests.Session used by OnlinePlusAdapter._login.
 
     ``.get`` answers the login-page scrape + the captcha; ``.post`` answers the
-    login. ``captcha`` is whatever the (faked) decoder should solve to.
+    login. ``captcha`` is whatever the (faked) decoder should solve to. Uses a
+    REAL ``RequestsCookieJar`` so the cookie producer iterates real ``Cookie``
+    objects, matching production (and able to model F5 duplicate-name cookies).
     """
 
     def __init__(self, login_payload):
         self.headers = {}
-        self.cookies = _FakeCookieJar()
+        self.cookies = requests.cookies.RequestsCookieJar()
         self.trust_env = True
         self._login_payload = login_payload
 
@@ -261,6 +258,40 @@ def test_bad_captcha_retries_then_fails(monkeypatch):
     with pytest.raises(RuntimeError) as ei:
         _adapter().prepare_order(isin="IRO1SROD0001", side=1, config_section={})
     assert not isinstance(ei.value, InvalidCredentialsError)
+
+
+# --------------------------------------------------------------------------
+# cookie jar — F5 BIG-IP duplicate-name cookies (Hafez)
+# --------------------------------------------------------------------------
+def _f5_dup_jar():
+    """A real requests jar mimicking Hafez behind an F5 BIG-IP: the unique auth
+    cookie + TWO same-name ``f5avr…_session_`` persistence cookies on different
+    paths (the live shape that crashed verify/login)."""
+    jar = requests.cookies.RequestsCookieJar()
+    jar.set("AuthCookie_OnlineCookie", "auth-token",
+            domain="api.hafezbroker.ir", path="/")
+    jar.set("f5avraaaaaaaaaaaaaaaa_session_", "v-root",
+            domain="api.hafezbroker.ir", path="/")
+    jar.set("f5avraaaaaaaaaaaaaaaa_session_", "v-web",
+            domain="api.hafezbroker.ir", path="/Web")
+    return jar
+
+
+def test_dict_on_f5_dup_jar_raises_documents_bug():
+    """Root cause: ``dict(jar)`` flattens via the name-keyed mapping, which
+    raises CookieConflictError on two cookies with the same name."""
+    with pytest.raises(requests.cookies.CookieConflictError):
+        dict(_f5_dup_jar())
+
+
+def test_cookies_to_dict_survives_f5_duplicates():
+    """The fix must flatten a dup-name jar WITHOUT raising and keep the auth
+    cookie (the unique-named one F5's persistence cookie shadows)."""
+    from broker_adapters import cookies_to_dict
+
+    out = cookies_to_dict(_f5_dup_jar())
+    assert out["AuthCookie_OnlineCookie"] == "auth-token"
+    assert out["f5avraaaaaaaaaaaaaaaa_session_"] in {"v-root", "v-web"}
 
 
 # --------------------------------------------------------------------------

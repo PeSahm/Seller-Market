@@ -41,7 +41,7 @@ import requests
 
 import rlc_price
 import runtime_config
-from broker_adapters import BrokerAdapter, PreparedOrder, SellContext
+from broker_adapters import BrokerAdapter, PreparedOrder, SellContext, cookies_to_dict
 from captcha_utils import decode_captcha as _default_decode_captcha
 from cred_errors import InvalidCredentialsError, exir_login_is_invalid_credentials
 from exir_token import build_app_n, make_signer, pw_fingerprint
@@ -202,7 +202,9 @@ class ExirAdapter(BrokerAdapter):
                 except (TypeError, ValueError):
                     ttl = _MIN_TTL_SECONDS
                 descriptor = {
-                    "cookies": dict(session.cookies),
+                    # Duplicate-safe flatten (a load balancer can set two
+                    # same-name cookies → ``dict(jar)`` would CookieConflict).
+                    "cookies": cookies_to_dict(session.cookies),
                     "nt": nt,
                     "broker_id": broker_id,
                     "expires_at": time.monotonic() + ttl,

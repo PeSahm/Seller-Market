@@ -23,6 +23,7 @@ from typing import Optional
 
 import httpx
 
+from app.services.brokers._cookies import cookies_to_dict
 from app.services.brokers._jalali import gregorian_str_to_jalali_str
 from app.services.brokers._rlc import rlc_instrument as _rlc_instrument
 from app.services.brokers.base import CredStatus, IsinInfo, VerifyResult
@@ -227,7 +228,9 @@ class ExirAdapter:
                 account_list[0].get("bourseAccountName")
             )
             return {
-                "cookies": dict(client.cookies),
+                # Duplicate-safe flatten (a load balancer can set two same-name
+                # cookies → ``dict(client.cookies)`` would raise CookieConflict).
+                "cookies": cookies_to_dict(client.cookies.jar),
                 "nt": body["nt"],
                 "authToken": body.get("authToken"),
                 "bourse": bourse,

@@ -43,7 +43,7 @@ import requests
 
 import rlc_price
 import runtime_config
-from broker_adapters import BrokerAdapter, PreparedOrder, SellContext
+from broker_adapters import BrokerAdapter, PreparedOrder, SellContext, cookies_to_dict
 from captcha_utils import decode_captcha as _default_decode_captcha
 from cred_errors import InvalidCredentialsError, onlineplus_login_is_invalid_credentials
 from exir_token import pw_fingerprint
@@ -267,7 +267,10 @@ class OnlinePlusAdapter(BrokerAdapter):
                 )
                 return {
                     "api": api,
-                    "cookies": dict(session.cookies),
+                    # F5 BIG-IP fronts Hafez and sets two same-name
+                    # ``f5avr…_session_`` cookies → ``dict(jar)`` raises
+                    # CookieConflictError. Flatten duplicate-safe.
+                    "cookies": cookies_to_dict(session.cookies),
                     "customer_name": data.get("CustomerName"),
                     "expires_at": time.monotonic() + _SESSION_TTL_S,
                 }

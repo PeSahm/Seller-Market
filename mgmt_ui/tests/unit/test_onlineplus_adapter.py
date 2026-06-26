@@ -66,6 +66,43 @@ def test_is_invalid_captcha():
 
 
 # --------------------------------------------------------------------------
+# cookie jar — F5 BIG-IP duplicate-name cookies (Hafez)
+# --------------------------------------------------------------------------
+def _f5_dup_cookies():
+    """An httpx jar mimicking Hafez behind an F5 BIG-IP: the unique auth cookie
+    + TWO same-name ``f5avr…_session_`` persistence cookies on different paths
+    (the live shape that crashed verify with 'Multiple cookies exist')."""
+    import httpx
+
+    c = httpx.Cookies()
+    c.set("AuthCookie_OnlineCookie", "auth-token",
+          domain="api.hafezbroker.ir", path="/")
+    c.set("f5avraaaaaaaaaaaaaaaa_session_", "v-root",
+          domain="api.hafezbroker.ir", path="/")
+    c.set("f5avraaaaaaaaaaaaaaaa_session_", "v-web",
+          domain="api.hafezbroker.ir", path="/Web")
+    return c
+
+
+def test_dict_on_dup_httpx_cookies_raises_documents_bug():
+    """Root cause: ``dict(httpx.Cookies)`` goes through ``.get(name)`` and
+    raises CookieConflict on two cookies sharing a name."""
+    import httpx
+
+    with pytest.raises(httpx.CookieConflict):
+        dict(_f5_dup_cookies())
+
+
+def test_cookies_to_dict_survives_dup():
+    """The fix flattens a dup-name jar without raising + keeps the auth cookie."""
+    from app.services.brokers._cookies import cookies_to_dict
+
+    out = cookies_to_dict(_f5_dup_cookies().jar)
+    assert out["AuthCookie_OnlineCookie"] == "auth-token"
+    assert "f5avraaaaaaaaaaaaaaaa_session_" in out
+
+
+# --------------------------------------------------------------------------
 # registry routing
 # --------------------------------------------------------------------------
 @pytest.fixture
