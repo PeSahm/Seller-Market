@@ -5,7 +5,7 @@ holdings), and the RLC price band are all faked. Asserts the cookie-only order
 shape (no Bearer, no signer), fee-adjusted BUY sizing, SELL-from-holdings, the
 max-order-qty / max_volume caps, the invalid-creds + OTP skips, and the auto-sell
 SellContext. The live wire shape these assert against was confirmed by the
-Phase-0 read-only spike against Hafez (account 4580090306).
+Phase-0 read-only spike against Hafez (the operator's own account).
 
 Run: ``python -m pytest test_onlineplus_adapter.py -q``.
 """
@@ -71,8 +71,8 @@ class _FakeSession:
 def _ok_login(**overrides):
     data = {
         "Token": "JWT",
-        "CustomerName": "مصطفی اسماعیلی",
-        "BourseCode": "اسمـ50113",
+        "CustomerName": "Test User",
+        "BourseCode": "TEST123",
         "ActiveSms": False,
         "ActiveOtp": False,
         "MustChangePassword": False,
@@ -100,7 +100,8 @@ def _install(monkeypatch, *, login_payload=None, purchasing_power=6_000_000,
             return _FakeResp(200, {"Data": holdings_rows if holdings_rows is not None else []})
         raise AssertionError(f"unexpected GET {url}")
 
-    monkeypatch.setattr(onlineplus_adapter.requests, "get", fake_get)
+    # _get() uses the proxy-bypassed module read session, not requests.get.
+    monkeypatch.setattr(onlineplus_adapter._READ_SESSION, "get", fake_get)
     monkeypatch.setattr(
         onlineplus_adapter.rlc_price, "get_price_band", lambda isin, timeout=15: band
     )
@@ -110,7 +111,7 @@ def _install(monkeypatch, *, login_payload=None, purchasing_power=6_000_000,
     return sess
 
 
-def _adapter(code="hafez", user="4580090306", pw="pw"):
+def _adapter(code="hafez", user="1111111111", pw="pw"):
     return onlineplus_adapter.OnlinePlusAdapter(code, user, pw)
 
 
@@ -213,6 +214,13 @@ def test_sell_no_holdings_raises(monkeypatch):
     _install(monkeypatch, holdings_rows=[], band=(9930, 9370))
     with pytest.raises(ValueError):
         _adapter().prepare_order(isin="IRO1SROD0001", side=2, config_section={})
+
+
+def test_invalid_side_fails_closed(monkeypatch):
+    """A malformed side must raise, NOT silently fall through to a SELL."""
+    _install(monkeypatch, purchasing_power=6_000_000, band=(9930, 9370))
+    with pytest.raises(ValueError):
+        _adapter().prepare_order(isin="IRO1SROD0001", side=3, config_section={})
 
 
 def test_holdings_isin_casing_fallback(monkeypatch):

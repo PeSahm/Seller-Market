@@ -10,7 +10,7 @@ signature. Its 4-digit captcha is solved by the dedicated OCR CNN route
 (the daily price band) is the SAME public RLC backend exir uses
 (:mod:`rlc_price`) — so BUY fires at the ceiling, SELL at the floor, identically.
 
-Confirmed live (read-only spike against Hafez, account 4580090306 — no orders):
+Confirmed live (read-only spike against Hafez, the operator's own account — no orders):
 * web host ``online.{code}broker.ir`` embeds ``var ApiBaseURl = '...'`` →
   ``api.{code}broker.ir``.
 * ``GET {api}/Web/V1/Authenticate/GetCaptchaImage/Captcha`` →
@@ -85,6 +85,14 @@ _API_BASE_RE = re.compile(r"ApiBaseURl\s*=\s*['\"]([^'\"]+)['\"]", re.IGNORECASE
 # {"api","cookies","customer_name","expires_at"}.
 _SESSION_CACHE: dict = {}
 _API_BASE_CACHE: dict = {}
+
+# Dedicated read session with ``trust_env=False`` so the cookie-auth reads
+# (buying power / holdings) reach the Iranian broker host DIRECTLY, never via a
+# foreign HTTP proxy in the host env — same hardening rlc_price / direct_sell
+# use. Cookies are passed per-call (not stored on the session), so it carries no
+# cross-account state.
+_READ_SESSION = requests.Session()
+_READ_SESSION.trust_env = False
 
 
 def _order_body(isin: str, side: int, price: float, volume: int) -> str:
@@ -164,24 +172,26 @@ class OnlinePlusAdapter(BrokerAdapter):
         ``api.{code}broker.ir``. Cached module-level so multiple accounts on one
         stack don't each scrape.
         """
+        # The DB-pushed [runtime] override wins ALWAYS — even over a cached
+        # scrape — so a fleet-wide onlineplus_api_<code> redirect takes effect
+        # without a process restart (checked BEFORE the sticky cache).
+        override = runtime_config.get(f"onlineplus_api_{self.broker_code}", "")
+        if override:
+            return override.rstrip("/")
         cached = _API_BASE_CACHE.get(self.broker_code)
         if cached:
             return cached
-        override = runtime_config.get(f"onlineplus_api_{self.broker_code}", "")
-        if override:
-            api = override.rstrip("/")
-        else:
-            api = self._api_convention  # base_domain-derived or {code}broker.ir
-            try:
-                resp = session.get(f"{self._web_base}/Account/Login", timeout=TIMEOUT)
-                m = _API_BASE_RE.search(resp.text or "")
-                if m:
-                    api = m.group(1).strip().rstrip("/")
-            except Exception as exc:  # noqa: BLE001 — fall back to the convention
-                logger.warning(
-                    "onlineplus %s: could not scrape ApiBaseURl (%s); using %s",
-                    self.broker_code, exc, api,
-                )
+        api = self._api_convention  # base_domain-derived or {code}broker.ir
+        try:
+            resp = session.get(f"{self._web_base}/Account/Login", timeout=TIMEOUT)
+            m = _API_BASE_RE.search(resp.text or "")
+            if m:
+                api = m.group(1).strip().rstrip("/")
+        except Exception as exc:  # noqa: BLE001 — fall back to the convention
+            logger.warning(
+                "onlineplus %s: could not scrape ApiBaseURl (%s); using %s",
+                self.broker_code, exc, api,
+            )
         _API_BASE_CACHE[self.broker_code] = api
         return api
 
@@ -302,8 +312,11 @@ class OnlinePlusAdapter(BrokerAdapter):
     # ---- cookie reads -----------------------------------------------------
 
     def _get(self, path: str, descriptor: dict) -> Any:
-        """Cookie-authed ``GET base+path`` → parsed JSON. Raises on HTTP error."""
-        resp = requests.get(
+        """Cookie-authed ``GET base+path`` → parsed JSON. Raises on HTTP error.
+
+        Uses the module ``_READ_SESSION`` (``trust_env=False``) so the request
+        reaches the Iranian host directly, never via a foreign proxy."""
+        resp = _READ_SESSION.get(
             descriptor["api"] + path,
             headers={"Accept": "application/json", "User-Agent": UA},
             cookies=descriptor["cookies"],
@@ -343,6 +356,10 @@ class OnlinePlusAdapter(BrokerAdapter):
     def prepare_order(self, *, isin: str, side: int, config_section: dict) -> PreparedOrder:
         """Prepare one OnlinePlus order; may raise on any auth/sizing/config failure."""
         side = int(side)
+        # Fail closed on a malformed side: 1=BUY, 2=SELL only. Never let an
+        # unknown value silently fall through to a real SELL order.
+        if side not in (1, 2):
+            raise ValueError(f"onlineplus {isin}: invalid order side {side!r} (expected 1 or 2)")
         config_section = config_section or {}
 
         # Daily allowed price band from the broker's own RLC gateway (same source
