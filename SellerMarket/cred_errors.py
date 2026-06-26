@@ -57,3 +57,27 @@ def exir_login_is_invalid_credentials(body: object) -> bool:
         isinstance(body, dict)
         and body.get("errorCode") == _EXIR_ERRCODE_INVALID_CREDENTIALS
     )
+
+
+# OnlinePlus / Tadbir Online+ (Hafez et al.): the login is HTTP 200 in every
+# case; the body's string ``MessageCode`` is the language-independent
+# discriminator (LIVE-confirmed on Hafez — see CRED_STATUS_FINDINGS.md):
+#   IsSuccessfull:true + Data.Token → success
+#   oms_1000       → wrong username/password → INVALID_CREDENTIALS
+#   InvalidCaptcha → wrong captcha           → retry
+# We key on the code (case-insensitive), not the Persian ``MessageDesc``.
+_ONLINEPLUS_MSGCODE_INVALID_CREDENTIALS = "oms_1000"
+
+
+def onlineplus_login_is_invalid_credentials(body: object) -> bool:
+    """True iff an OnlinePlus login body is a high-confidence wrong-password
+    reject. Conservative: only ``MessageCode == 'oms_1000'`` (case-insensitive)
+    on a non-success body qualifies; everything else (incl. ``InvalidCaptcha``)
+    returns False so the caller keeps retrying the captcha."""
+    if not isinstance(body, dict) or body.get("IsSuccessfull"):
+        return False
+    code = body.get("MessageCode")
+    return (
+        isinstance(code, str)
+        and code.strip().lower() == _ONLINEPLUS_MSGCODE_INVALID_CREDENTIALS
+    )

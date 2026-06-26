@@ -17,6 +17,7 @@ from cred_errors import (
     InvalidCredentialsError,
     ephoenix_login_is_invalid_credentials,
     exir_login_is_invalid_credentials,
+    onlineplus_login_is_invalid_credentials,
 )
 
 
@@ -55,6 +56,23 @@ def test_ephoenix_classifier(body, expected):
 )
 def test_exir_classifier(body, expected):
     assert exir_login_is_invalid_credentials(body) is expected
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ({"IsSuccessfull": False, "MessageCode": "oms_1000"}, True),    # wrong password
+        ({"IsSuccessfull": False, "MessageCode": "OMS_1000"}, True),    # case-insensitive
+        ({"IsSuccessfull": False, "MessageCode": "InvalidCaptcha"}, False),  # wrong captcha
+        ({"IsSuccessfull": True, "MessageCode": "oms_1000"}, False),    # success body wins
+        ({"IsSuccessfull": False, "MessageCode": "OMS_2080"}, False),   # other business error
+        ({}, False),
+        (None, False),
+        ("نام کاربری /رمز عبور نامعتبر می باشد.", False),               # bare string is not a body
+    ],
+)
+def test_onlineplus_classifier(body, expected):
+    assert onlineplus_login_is_invalid_credentials(body) is expected
 
 
 # --------------------------------------------------------------------------
@@ -152,3 +170,21 @@ def test_exir_prepare_order_still_wraps_generic_errors(monkeypatch):
     monkeypatch.setattr(a, "_session", _raise(ConnectionError("network down")))
     with pytest.raises(RuntimeError):
         a.prepare_order(isin="IRO3SMBZ0001", side=1, config_section={"price": "200"})
+
+
+def test_onlineplus_prepare_order_propagates_invalid_credentials(monkeypatch):
+    """The onlineplus adapter must let InvalidCredentialsError through (not
+    re-wrap it as RuntimeError) so the caller's skip branch fires."""
+    import onlineplus_adapter
+    a = onlineplus_adapter.OnlinePlusAdapter("hafez", "user", "pw")
+    monkeypatch.setattr(a, "_session", _raise(InvalidCredentialsError("rejected")))
+    with pytest.raises(InvalidCredentialsError):
+        a.prepare_order(isin="IRO1SROD0001", side=1, config_section={"price": "200"})
+
+
+def test_onlineplus_prepare_order_still_wraps_generic_errors(monkeypatch):
+    import onlineplus_adapter
+    a = onlineplus_adapter.OnlinePlusAdapter("hafez", "user", "pw")
+    monkeypatch.setattr(a, "_session", _raise(ConnectionError("network down")))
+    with pytest.raises(RuntimeError):
+        a.prepare_order(isin="IRO1SROD0001", side=1, config_section={"price": "200"})

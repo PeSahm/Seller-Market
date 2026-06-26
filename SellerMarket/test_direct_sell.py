@@ -46,6 +46,28 @@ def test_ephoenix_sends_bearer_no_cookies():
     assert "cookies" not in kwargs                         # ephoenix sends no cookies
 
 
+def test_onlineplus_sends_cookies_no_bearer_no_signature():
+    """onlineplus: cookie session only — no Bearer, no X-App-N."""
+    p = PreparedOrder(
+        order_url="https://api.hafezbroker.ir/Web/V1/Order/Post",
+        body='{"isin":"IRO1X","orderSide":86}',
+        bearer_token=None,
+        signer=None,
+        cookies={"AuthCookie_OnlineCookie": "abc"},
+        price=5,
+        volume=100,
+    )
+    sess = _FakeSession()
+    status, body = send_prepared_order(p, session=sess)
+    assert status == 200
+    url, kwargs = sess.calls[0]
+    assert url == p.order_url
+    assert kwargs["data"] == p.body
+    assert kwargs["cookies"] == {"AuthCookie_OnlineCookie": "abc"}   # cookie auth
+    assert "authorization" not in kwargs["headers"]                  # no Bearer
+    assert "X-App-N" not in kwargs["headers"]                        # no signature
+
+
 def test_exir_sends_cookies_and_fresh_signature():
     sign_calls = {"n": 0}
 

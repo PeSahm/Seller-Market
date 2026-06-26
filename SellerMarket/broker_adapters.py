@@ -155,6 +155,20 @@ def get_adapter(
             cache=cache,
         )
 
+    if family == "onlineplus":
+        from onlineplus_adapter import OnlinePlusAdapter
+
+        return OnlinePlusAdapter(
+            broker_code=broker_code,
+            username=username,
+            password=password,
+            captcha_decoder=captcha_decoder,
+            cache=cache,
+            # OnlinePlus reads its per-broker base_domain from the rendered
+            # config.ini section (tenants don't share a host convention).
+            config_section=config_section,
+        )
+
     # Default / "ephoenix": preserve today's behaviour for every known broker.
     from ephoenix_adapter import EphoenixAdapter
 

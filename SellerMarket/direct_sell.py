@@ -6,9 +6,10 @@ out-of-burst action, so it places orders directly with ``requests`` instead of
 the locust client — but with the BYTE-IDENTICAL request shape so behaviour
 matches the proven path:
 
-* ephoenix → ``Authorization: Bearer <token>`` header.
-* exir     → session ``cookies`` + a FRESH ``X-App-N`` signature (``signer()``)
+* ephoenix   → ``Authorization: Bearer <token>`` header.
+* exir       → session ``cookies`` + a FRESH ``X-App-N`` signature (``signer()``)
   recomputed at send time, second-granular.
+* onlineplus → session ``cookies`` only (no Bearer, no signer).
 
 The body is the pre-encoded JSON string from ``prepare_order`` /
 ``prepare_chunk`` and is sent as ``data=`` (not ``json=``), exactly like the
@@ -46,22 +47,14 @@ def send_prepared_order(
     """POST one ``PreparedOrder`` directly. Returns ``(status_code, body_bytes)``.
 
     Dispatches on which auth field the family populated (mirrors
-    ``locustfile_new.place_order``): ``signer is None`` ⇒ ephoenix Bearer, else
-    exir cookies + a fresh ``X-App-N`` header computed at send time. Raises
-    ``requests.RequestException`` on a transport failure (the caller logs +
-    treats the chunk as not-fired; it re-fires on the next push).
+    ``locustfile_new.place_order``): ``signer`` set ⇒ exir cookies + a fresh
+    ``X-App-N`` header; else ``cookies`` set ⇒ onlineplus cookie-only; else ⇒
+    ephoenix static Bearer. Raises ``requests.RequestException`` on a transport
+    failure (the caller logs + treats the chunk as not-fired; it re-fires on the
+    next push).
     """
     poster = (session or _DIRECT).post
-    if prepared.signer is None:
-        # ephoenix — static Bearer.
-        headers = {
-            "authorization": f"Bearer {prepared.bearer_token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": _UA,
-        }
-        resp = poster(prepared.order_url, data=prepared.body, headers=headers, timeout=timeout)
-    else:
+    if prepared.signer is not None:
         # exir — cookies + a fresh per-request X-App-N (recomputed NOW).
         headers = {
             "Content-Type": "application/json",
@@ -76,6 +69,29 @@ def send_prepared_order(
             cookies=prepared.cookies,
             timeout=timeout,
         )
+    elif prepared.cookies is not None:
+        # onlineplus — cookie session only (NO Bearer, NO signer).
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": _UA,
+        }
+        resp = poster(
+            prepared.order_url,
+            data=prepared.body,
+            headers=headers,
+            cookies=prepared.cookies,
+            timeout=timeout,
+        )
+    else:
+        # ephoenix — static Bearer.
+        headers = {
+            "authorization": f"Bearer {prepared.bearer_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": _UA,
+        }
+        resp = poster(prepared.order_url, data=prepared.body, headers=headers, timeout=timeout)
     return resp.status_code, resp.content
 
 
