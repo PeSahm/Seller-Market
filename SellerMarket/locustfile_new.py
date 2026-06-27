@@ -525,7 +525,16 @@ class TradingUser(HttpUser):
                 url=self.order_url,
                 name=f"{self.username}@{self.broker_code}",
                 data=self.order_json,
-                headers=headers
+                headers=headers,
+                # Cookie-auth families (exir, onlineplus) authenticate via the
+                # session cookies — send them EXPLICITLY per request. Cookies put
+                # on self.client in on_start are domainless, so requests won't
+                # attach them to the order host: onlineplus (whose ONLY auth is
+                # the cookie) got HTTP 401. None for ephoenix (Bearer header) →
+                # byte-identical to before. exir already works via its X-App-N
+                # signature; sending its cookies too is harmless + matches
+                # direct_sell (which sends cookies explicitly and succeeds).
+                cookies=self.exir_cookies,
             )
 
             if response.status_code == 200:
