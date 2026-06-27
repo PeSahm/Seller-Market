@@ -2006,3 +2006,33 @@ Bot **297 passed** (incl. 2 new F5-dup tests); mgmt onlineplus+exir adapter suit
 - **A login can SUCCEED at the broker yet the CLIENT crash serializing the jar** — the failure presents as a verify/login error although auth worked. When a cookie-auth verify "fails," check the client-side jar handling, not just the credentials.
 - **Test doubles must honor the real type's contract** — a `dict`-subclass cookie jar can't model duplicate-name cookies (the actual bug) and yields strings not Cookie objects, so it both HID the bug and BROKE the fix. Use real `RequestsCookieJar`/`httpx.Cookies` in cookie-auth fakes.
 - **One reported symptom = a whole latent class**: the same `dict(jar)` anti-pattern lived in all 4 cookie-producer sites (2 onlineplus + 2 exir) — fix every instance of the root cause (defense-in-depth), not just the one that fired.
+
+---
+
+## Session 38 — scheduled runs stuck "running" + "no orders" FLEET-WIDE: ParsPack `run_logs` was root-owned and it became worker-leader after my dual-api restart
+
+Operator (morning after the S37 deploy): scheduled `run_trading`/`cache_warmup` runs **stuck in `running`, state never changes**, and **"many users don't have orders."** Root-caused, fixed (ops, no code), restored PouyanIt as the worker-leader. **The bots were FINE the whole time — the mgmt leader was blind.**
+
+### Root cause (one permission + a leadership flip)
+- The mgmt ingestor workers (`scheduled_run_ingestor`, `trade_ingestor`, `fire_log_ingestor`) are **leader-gated** — only the **worker-leader** instance runs them. Leader = a **startup-time, fail-open advisory-lock** election (`hash_lock_key("mgmt","worker-leader")`) with **NO pinning**: whoever boots and grabs the free lock wins.
+- **My S37 mgmt deploy restarted BOTH api containers** (PouyanIt then ParsPack). The re-election handed the lock to **ParsPack** (it acquired last while free). PouyanIt → standby (startup-only election ⇒ a standby never re-acquires without a restart).
+- **ParsPack's host dir `/var/lib/sm-mgmt/run_logs` was `root:root`** (auto-created by root when its api-only compose was first set up in S25). The api runs as **uid 999 (`app`)**. PouyanIt's same dir is `app`-owned, so it never hit it. The ingestors only **write run-log archives when they are the leader** (`scheduled_run_ingestor._archive_log_if_final` → open `/var/lib/run_logs/<run_id>.log`), so the root-owned dir was a **dormant landmine that only detonated once ParsPack became leader**.
+- Chain: ParsPack-leader ingestor reads the marker → `_archive_log_if_final` → **`PermissionError: /var/lib/run_logs/<id>.log`** → the upsert throws BEFORE finalizing → run never leaves `running` AND the host marker is never deleted (it deletes only after a successful upsert). Same write failure starved `trade_ingestor` → **no `trade_results` ingested → UI shows "no orders"** even though the bots fired (hamid `.189` had `order_fires_20260627.jsonl` + a complete `on_test_stop` at 08:45:53 + the finish marker `scheduled_run_*.json` still sitting on the host, unprocessed).
+
+### Fix (pure ops — no code, no migration)
+1. **`chown -R 999:999 /var/lib/sm-mgmt/run_logs` on ParsPack** (+ `chmod 700` to match PouyanIt). The current leader's ingestor cleared the whole backlog on its next 30 s tick — **stuck `running` 17 → 0**, markers deleted, `trade_results` ingesting again. **This is the real fix: both hosts now have a writable `run_logs`, so a future leader flip can't re-break ingestion.** (gid shows as `systemd-journal` because that's gid 999's host name — the OWNER uid 999 = `app` is what matters; write test passed.)
+2. **Restored PouyanIt as leader (operator's standing preference)** — deterministic transfer: `docker stop` ParsPack api (releases lock → advisory_locks 0) → `docker restart` PouyanIt api (boots, grabs the free lock → leader) → `docker start` ParsPack api (lock held → standby). Verified the worker-leader advisory lock's `client_addr = 5.10.248.55` (PouyanIt); ParsPack holds 0 → standby.
+
+### RULES (operator: "never change the leader" + "put it in skills")
+- **Do NOT restart both mgmt api containers in a way that flips the worker-leader.** Leadership is startup-elected + fail-open with **no pin** — restarting both (or restarting the current leader) can hand the lease to the other instance. When deploying mgmt: restart the **standby** instance only, OR, if the leader must restart, do the **deterministic transfer** above to keep **PouyanIt** the leader, then VERIFY via the advisory-lock `client_addr`.
+- **PouyanIt (`5.10.248.55`) is the intended worker-leader.** ParsPack is the UI/DB-spare standby (weak 1.97 GB box, also OCR-failover) — running fleet-wide SSH ingestion on it is undesirable AND was the landmine host.
+- **Any mgmt-data dir that the api WRITES must be `chown 999:999` on EVERY instance** (`run_logs`; `backups` is root-owned but only the root cron writes it + the api just READS the manifest, so that one is fine). A host-created bind-mount source defaults to root → a latent permission landmine that only fires when that instance becomes leader. Audit on both PouyanIt + ParsPack.
+- **Diagnose this class via the LEADER's `docker logs` traceback** (the app logger's exceptions DO reach stdout — that's how the `PermissionError ... _archive_log_if_final` was found) + the host-side undeleted `scheduled_run_*.json` markers (present marker + `running` row = ingestor failed mid-tick). `advisory_locks` count + the lock's `client_addr` = who's leader.
+- **A `failed`-exit `run_trading` row is NORMAL** (locust exits non-zero from the broker order-spam rejections; S7/S15) — it means the run FINISHED, not that orders didn't fire. "Stuck `running`" (no `finished_at`, marker still on host) is the real anomaly.
+
+### Follow-ups (Session 38)
+| # | Title | Why |
+|---|---|---|
+| — | **Pin the worker-leader / add a leader control to `/admin/ha`** | Operator wants the leader to never drift. Today it's startup-elected with no pin (`/admin/ha` SHOWS the leader but can't SET it). Candidate: a `WORKER_LEADER_PREFERENCE` env/setting (PouyanIt preferred) so election favours it, or a UI button to force-transfer. Code feature — confirm scope before building. |
+| — | Audit run_logs/data-dir perms on any FUTURE mgmt instance | The root-owned bind-mount landmine recurs whenever a new mgmt instance's compose is stood up; bake `chown 999:999` into the add-mgmt-instance runbook. |
+| — | Confirm per-customer order firing if operator still sees gaps | The acute "no orders" was the blind leader (now fixed; trades ingesting). If specific customers still show none, investigate the bot fire path separately (fire-log shows the bot DID fire on the sampled stack). |
