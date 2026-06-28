@@ -506,10 +506,18 @@ class TradingUser(HttpUser):
             elif self.exir_cookies:
                 # ONLINEPLUS — cookie session only (carried onto self.client in
                 # on_start). NO Bearer, NO signer; a vanilla JSON POST.
+                # MUST send the FULL browser User-Agent: OnlinePlus sits behind an
+                # F5 BIG-IP that 401s a truncated/non-browser UA (live-confirmed:
+                # short UA -> 401, full UA -> 200). It also must match the UA used
+                # at login (onlineplus_adapter / direct_sell use this exact string;
+                # the decompiled OnlinePlusWebApi uses the same full Chrome UA).
                 headers = {
                     'Content-Type': 'application/json',
                     'Accept': 'application/json',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'User-Agent': (
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                        '(KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+                    ),
                 }
             else:
                 # EPHOENIX — static Bearer header (unchanged from before the split).
