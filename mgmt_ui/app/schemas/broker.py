@@ -15,7 +15,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 # The broker families we have adapters for. Extend only alongside a new adapter.
-BrokerFamily = Literal["ephoenix", "exir", "onlineplus"]
+BrokerFamily = Literal["ephoenix", "exir", "onlineplus", "mofid"]
 
 # A bare DNS-ish domain like ``dnovinbr.ir`` / ``hafezbroker.ir`` — at least one
 # dot, no scheme/slashes/spaces. Used for the OnlinePlus per-broker base domain.

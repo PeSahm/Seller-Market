@@ -62,6 +62,11 @@ class PreparedOrder:
     cookies: Optional[dict]                   # exir: session cookies for self.client; ephoenix: None
     price: float
     volume: int
+    # Extra request headers the family REQUIRES on the order POST (merged LAST by
+    # direct_sell / place_order). ephoenix/exir/onlineplus pass None → byte-identical
+    # to before. Mofid sets {"Referer","User-Agent"} (its api host enforces them,
+    # like the OnlinePlus F5/UA fix in S38).
+    extra_headers: Optional[dict] = None
 
 
 @dataclass
@@ -112,6 +117,16 @@ class BrokerAdapter(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not support auto-sell"
         )
+
+    def validate(self, *, isin: str, side: int, config_section: dict) -> PreparedOrder:
+        """Pre-open health check used by cache_warmup — login + sizing, NO order.
+
+        For exir/onlineplus, ``prepare_order`` already has no side effect (it just
+        builds the order body), so the default delegates to it. A family whose
+        ``prepare_order`` DOES have a side effect (Mofid creates server-side draft
+        orders) overrides this to do login + sizing WITHOUT the side effect.
+        """
+        return self.prepare_order(isin=isin, side=side, config_section=config_section)
 
 
 def resolve_family(broker_code: str, config_section: dict) -> str:
@@ -181,6 +196,18 @@ def get_adapter(
             cache=cache,
             # OnlinePlus reads its per-broker base_domain from the rendered
             # config.ini section (tenants don't share a host convention).
+            config_section=config_section,
+        )
+
+    if family == "mofid":
+        from mofid_adapter import MofidAdapter
+
+        return MofidAdapter(
+            broker_code=broker_code,
+            username=username,
+            password=password,
+            captcha_decoder=captcha_decoder,
+            cache=cache,
             config_section=config_section,
         )
 

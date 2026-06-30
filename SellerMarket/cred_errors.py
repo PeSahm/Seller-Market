@@ -81,3 +81,41 @@ def onlineplus_login_is_invalid_credentials(body: object) -> bool:
         isinstance(code, str)
         and code.strip().lower() == _ONLINEPLUS_MSGCODE_INVALID_CREDENTIALS
     )
+
+
+# Mofid / Orbis (easytrader.ir): the OAuth login is an HTML form on
+# login.emofid.com — failures come back as Persian text inside a
+# ``<div class="validation-summary-errors">``. We key on the Persian markers
+# (the only discriminator the HTML gives — there is no numeric code on this page;
+# LIVE-confirmed shapes from the decompiled CheetahPlus EasyTraderWebApi + the
+# Phase-0 spike, see scratch/MOFID_FINDINGS.md):
+#   "نام کاربری یا کلمه عبور نادرست است" → wrong username/password → INVALID_CREDENTIALS
+#   "کد امنیتی را وارد کنید."           → captcha required (retry WITH a captcha)
+#   "کد امنیتی اشتباه است"              → wrong captcha (retry)
+_MOFID_MARK_INVALID_CREDENTIALS = "نام کاربری یا کلمه عبور نادرست است"
+_MOFID_MARK_CAPTCHA_REQUIRED = "کد امنیتی را وارد کنید"
+_MOFID_MARK_WRONG_CAPTCHA = "کد امنیتی اشتباه است"
+
+
+def mofid_login_reject(html: object) -> str | None:
+    """Classify a Mofid login-page reject from its HTML body.
+
+    Returns ``"invalid_credentials"`` | ``"captcha_required"`` | ``"wrong_captcha"``
+    | ``None`` (no recognised marker). Conservative: the creds marker is checked
+    FIRST (it's only shown once captcha passes, so it's the high-confidence
+    reject); captcha markers mean "retry". Anything else → ``None`` (retry)."""
+    if not isinstance(html, str):
+        return None
+    if _MOFID_MARK_INVALID_CREDENTIALS in html:
+        return "invalid_credentials"
+    if _MOFID_MARK_WRONG_CAPTCHA in html:
+        return "wrong_captcha"
+    if _MOFID_MARK_CAPTCHA_REQUIRED in html:
+        return "captcha_required"
+    return None
+
+
+def mofid_login_is_invalid_credentials(html: object) -> bool:
+    """True iff a Mofid login HTML body is a high-confidence wrong-password
+    reject. Conservative: only the exact wrong-credentials marker qualifies."""
+    return mofid_login_reject(html) == "invalid_credentials"

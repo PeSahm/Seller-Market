@@ -47,6 +47,12 @@ def _infer_mgmt_job_name(parsed_command) -> Optional[str]:
         for arg in parsed_command[1:]:
             if arg.endswith("cache_warmup.py"):
                 return "cache_warmup"
+            # The Mofid firer (python run_mofid.py) IS a trading run for the
+            # Mofid family (it can't ride locust — see run_mofid.py). Surface it
+            # in the mgmt Runs list under the existing run_trading enum so no
+            # mgmt-side runs.job_name migration is needed.
+            if arg.endswith("run_mofid.py"):
+                return "run_trading"
     if executable == "locust":
         return "run_trading"
     return None

@@ -961,6 +961,12 @@ async def verify_credentials(
         return await OnlinePlusAdapter(broker_code).verify_credentials(
             username, password, ocr_service_url
         )
+    if family == "mofid":
+        from app.services.brokers.mofid import MofidAdapter
+
+        return await MofidAdapter(broker_code).verify_credentials(
+            username, password, ocr_service_url
+        )
     return await _ephoenix_verify_credentials(
         broker_code, username, password, ocr_service_url
     )
@@ -996,6 +1002,12 @@ async def verify_isin(
         return await OnlinePlusAdapter(broker_code).verify_isin(
             username, password, isin, ocr_service_url
         )
+    if family == "mofid":
+        from app.services.brokers.mofid import MofidAdapter
+
+        return await MofidAdapter(broker_code).verify_isin(
+            username, password, isin, ocr_service_url
+        )
     return await _ephoenix_verify_isin(
         broker_code, username, password, isin, ocr_service_url
     )
@@ -1024,9 +1036,11 @@ async def get_orders(
         family = await _family(broker_code)
     except Exception as exc:  # noqa: BLE001 — surface, don't misroute the sweep
         return [], f"could not resolve broker family for {broker_code!r}: {exc}"
-    if family in ("exir", "onlineplus"):
+    if family in ("exir", "onlineplus", "mofid"):
         if family == "exir":
             from app.services.brokers.exir import ExirAdapter as _Adapter
+        elif family == "mofid":
+            from app.services.brokers.mofid import MofidAdapter as _Adapter
         else:
             from app.services.brokers.onlineplus import OnlinePlusAdapter as _Adapter
 
@@ -1085,6 +1099,12 @@ async def get_holdings(
         from app.services.brokers.onlineplus import OnlinePlusAdapter
 
         return await OnlinePlusAdapter(broker_code).get_holdings(
+            username, password, isin, ocr_service_url=ocr_service_url
+        )
+    if family == "mofid":
+        from app.services.brokers.mofid import MofidAdapter
+
+        return await MofidAdapter(broker_code).get_holdings(
             username, password, isin, ocr_service_url=ocr_service_url
         )
     return await _ephoenix_get_holdings(

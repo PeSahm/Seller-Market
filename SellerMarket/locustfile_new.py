@@ -822,26 +822,38 @@ def _read_locust_users(path: str = "locust_config.json", default: int = 10) -> i
 def _create_user_classes():
     """Create user classes in a function scope to avoid variable leakage to globals."""
     import sys
-    from broker_adapters import is_auto_sell_only
+    from broker_adapters import is_auto_sell_only, resolve_family
     current_module = sys.modules[__name__]
     user_classes = []
 
-    # Auto-sell-only sections arm the auto-sell monitor for an EXISTING holding
-    # — they must NEVER fire an order at open, so they get no locust user. They
-    # are also excluded from the fixed_count math below: counting watch-only
-    # sections would dilute every tradeable section's share (e.g. 3 tradeable +
-    # 2 watch-only at users=9 → 9//5=1 instead of 9//3=3).
-    eligible = [s for s in config.sections() if not is_auto_sell_only(dict(config[s]))]
+    # Two kinds of section get NO locust user (and are excluded from the
+    # fixed_count math, which would otherwise dilute every tradeable section's
+    # share):
+    #   * auto_sell_only — arm the monitor for an EXISTING holding; never fire at open.
+    #   * mofid family — fires via the dedicated bounded firer (run_mofid.py), NOT
+    #     the locust spam (Mofid's 1500-requests/hour cap forbids it). Excluding it
+    #     here also prevents prepare_order_data from creating draft orders.
+    def _locust_excluded(name: str) -> Optional[str]:
+        sec = dict(config[name])
+        if is_auto_sell_only(sec):
+            return "auto_sell_only"
+        if resolve_family(sec.get("broker", ""), sec) == "mofid":
+            return "mofid (fires via run_mofid.py)"
+        return None
+
+    eligible = [s for s in config.sections() if _locust_excluded(s) is None]
     for section_name in config.sections():
-        if section_name not in eligible:
+        reason = _locust_excluded(section_name)
+        if reason is not None:
             logger.info(
-                f"section {section_name}: auto_sell_only — no locust user (won't fire at open)"
+                f"section {section_name}: {reason} — no locust user (won't fire at open)"
             )
     if not eligible and config.sections():
         # Clean exit → green scheduled-run marker (mirrors the no-config exit(1)
         # precedent above): nothing here is supposed to fire at open.
         logger.info(
-            f"all {len(config.sections())} sections are auto-sell-only — nothing to fire at open"
+            f"all {len(config.sections())} section(s) are excluded from locust firing "
+            "(auto-sell-only and/or mofid) — nothing to fire here at open"
         )
         exit(0)
 

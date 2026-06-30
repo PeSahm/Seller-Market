@@ -84,7 +84,11 @@ def _warmup_via_adapter(config_section: Dict[str, str], cache: TradingCache) -> 
             captcha_decoder=decode_captcha,
             cache=cache,
         )
-        prepared = adapter.prepare_order(isin=isin, side=side, config_section=config_section)
+        # validate(), not prepare_order(): for Mofid, prepare_order CREATES
+        # server-side draft orders (a side effect) — the warmup must only
+        # login + size. The base validate() delegates to prepare_order for
+        # exir/onlineplus (which have no side effect), so they're unchanged.
+        prepared = adapter.validate(isin=isin, side=side, config_section=config_section)
         logger.info(
             f"✓ {family} prepare OK: {username}@{broker_code} "
             f"{'Buy' if side == 1 else 'Sell'} {isin} "

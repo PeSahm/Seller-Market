@@ -138,4 +138,8 @@ def get_adapter(code: str):
         from app.services.brokers.onlineplus import OnlinePlusAdapter
 
         return OnlinePlusAdapter(code)
+    if family == "mofid":
+        from app.services.brokers.mofid import MofidAdapter
+
+        return MofidAdapter(code)
     raise UnknownBrokerError(f"no adapter for family {family!r} (code {code!r})")

@@ -18,6 +18,7 @@ customer would mis-attribute money data).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from dataclasses import dataclass
@@ -135,6 +136,8 @@ def map_getorders_row(row: dict, customer: Customer) -> dict:
         return _map_exir_row(row, customer)
     if fam == "onlineplus":
         return _map_onlineplus_row(row, customer)
+    if fam == "mofid":
+        return _map_mofid_row(row, customer)
     return _map_ephoenix_row(row, customer)
 
 
@@ -351,6 +354,85 @@ def _map_onlineplus_row(row: dict, customer: Customer) -> dict:
         "placed_date": _derive_placed_date(placed_at, None, None),
         "created_at_broker": placed_at,
         "execution_date": None,  # no separate execution timestamp in this feed
+        "raw_json": row,
+    }
+
+
+def _mofid_tracking(order_id: object) -> int:
+    """Coerce a Mofid order id to a stable ``BigInteger`` dedup key.
+
+    Mofid order ids are **ULID strings** (e.g. ``01KWBWKJHF75B5ANFPM7Z6QB3J`` —
+    confirmed live: the draft id + the decompiled ``CancelOrder(string orderId)``),
+    which ``_int_or_zero`` would map to 0 → every order would collide on the
+    ``(broker, account_username, tracking_number, placed_date)`` key. So: a numeric
+    id is used directly; a non-numeric (ULID) id is hashed to a 60-bit int
+    (deterministic → idempotent upserts; collision-negligible; the original ULID
+    is preserved in ``raw_json`` + ``state_desc`` is unaffected)."""
+    if order_id is None:
+        return 0
+    try:
+        return int(order_id)
+    except (ValueError, TypeError):
+        return int(hashlib.sha1(str(order_id).encode("utf-8")).hexdigest()[:15], 16)
+
+
+def _map_mofid_row(row: dict, customer: Customer) -> dict:
+    """Map one Mofid ``GET /core/api/order`` row to ``broker_orders`` values.
+
+    Returns the SAME dict shape as the other families. Mofid wire keys (decompiled
+    EasyTraderWebApi + the Phase-0 spike; confirm field details against a real
+    fill at the canary):
+
+    * ``id`` → dedup ``tracking_number`` (per-account order id; the composite
+      ``(broker, account_username, tracking_number, placed_date)`` key + the
+      ``serial_number=None`` → date-based reconcile, which Mofid placement needs
+      since its sync response carries NO order id).
+    * ``symbolIsin`` → ISIN, ``symbolName`` → symbol.
+    * **``side`` is NUMERIC: 0 = buy → 1, 1 = sell → 2.** NOT the Persian-string
+      ``startswith("خ")`` the cookie families use — a copy-paste of that would
+      silently mislabel every Mofid order and corrupt profit matching.
+    * ``createDateTime`` → placement timestamp (ISO-Gregorian or Jalali; both
+      handled, re-labeled UTC like the other families).
+    """
+    tracking = _mofid_tracking(row.get("id"))  # ULID id → stable BigInteger
+    isin = row.get("symbolIsin") or row.get("SymbolIsin") or ""
+    raw_side = row.get("side")
+    order_side = 1 if raw_side == 0 else (2 if raw_side == 1 else 0)
+    placed_at = _parse_dt(row.get("createDateTime"))
+    if placed_at is None and row.get("createDateTime"):
+        # Fall back to a Jalali timestamp; re-label UTC keeping the wall-clock.
+        placed_at = parse_jalali_datetime(str(row.get("createDateTime")))
+        if placed_at is not None:
+            placed_at = placed_at.replace(tzinfo=timezone.utc)
+    executed_volume = _int_or_zero(row.get("executedQuantity"))
+    volume = _int_or_zero(row.get("quantity"))
+    is_done = executed_volume > 0 and (volume == 0 or executed_volume >= volume)
+    return {
+        "customer_id": customer.id,
+        "agent_id": customer.agent_id,
+        "broker": customer.broker,
+        "account_username": customer.username,
+        "pam_code": None,  # attribution is by the queried customer
+        "tracking_number": tracking,
+        "broker_order_id": tracking or None,
+        "serial_number": None,  # Mofid placement carries no order id → date reconcile
+        "isin": isin,
+        "symbol": row.get("symbolName") or None,
+        "symbol_title": None,
+        "order_side": order_side,
+        "price": _decimal_from(row.get("price")),
+        "volume": volume,
+        "executed_volume": executed_volume,
+        "total_fee": None,
+        "executed_amount": None,
+        "net_traded_value": None,
+        "state": 3,  # we ingest filled rows only (executedQuantity>0)
+        "state_desc": row.get("orderStateStr") or None,
+        "is_done": is_done,
+        "placed_at": placed_at,
+        "placed_date": _derive_placed_date(placed_at, None, None),
+        "created_at_broker": placed_at,
+        "execution_date": None,
         "raw_json": row,
     }
 
