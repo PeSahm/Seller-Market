@@ -62,6 +62,7 @@ def send_prepared_order(
             "User-Agent": _UA,
         }
         headers.update(prepared.signer())
+        headers.update(prepared.extra_headers or {})
         resp = poster(
             prepared.order_url,
             data=prepared.body,
@@ -76,6 +77,7 @@ def send_prepared_order(
             "Accept": "application/json",
             "User-Agent": _UA,
         }
+        headers.update(prepared.extra_headers or {})
         resp = poster(
             prepared.order_url,
             data=prepared.body,
@@ -84,13 +86,15 @@ def send_prepared_order(
             timeout=timeout,
         )
     else:
-        # ephoenix — static Bearer.
+        # ephoenix — static Bearer. (mofid also lands here: bearer_token set,
+        # signer/cookies None; its extra_headers carry the Referer + Chrome-131 UA.)
         headers = {
             "authorization": f"Bearer {prepared.bearer_token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": _UA,
         }
+        headers.update(prepared.extra_headers or {})
         resp = poster(prepared.order_url, data=prepared.body, headers=headers, timeout=timeout)
     return resp.status_code, resp.content
 

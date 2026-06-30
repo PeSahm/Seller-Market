@@ -69,15 +69,17 @@ try:
     from cache_manager import TradingCache
     from cred_errors import InvalidCredentialsError
     cache = TradingCache()
-    if fam == "exir":
+    if fam in ("exir", "mofid", "onlineplus"):
         from broker_adapters import get_adapter
         cs = {"broker": code, "username": user, "password": pw,
-              "isin": isin, "side": "1", "broker_family": "exir"}
+              "isin": isin, "side": "1", "broker_family": fam}
         adapter = get_adapter(code, username=user, password=pw,
                               config_section=cs, captcha_decoder=decode_captcha, cache=cache)
         try:
-            adapter.prepare_order(isin=isin, side=1, config_section=cs)
-            _out("valid", "exir login ok")
+            # validate() = login + sizing, NO side effect (mofid's prepare_order
+            # would create real draft orders; validate skips them).
+            adapter.validate(isin=isin, side=1, config_section=cs)
+            _out("valid", fam + " login ok")
         except InvalidCredentialsError as e:
             _out("invalid_credentials", str(e) or "broker rejected credentials")
     else:
@@ -119,6 +121,8 @@ def _probe_url(broker_code: str, family: str) -> Optional[str]:
         return broker_client._endpoints_for(broker_code)["captcha"]
     if family == "exir":
         return f"https://{broker_code}.exirbroker.com/captcha"
+    if family == "mofid":
+        return "https://api-mts.orbis.easytrader.ir/"
     return None
 
 

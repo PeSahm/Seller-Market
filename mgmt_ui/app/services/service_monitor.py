@@ -65,6 +65,7 @@ GROUP_ORDER: list[tuple[str, str]] = [
     ("ibtrader", "ibtrader"),
     ("exir", "Exir"),
     ("onlineplus", "OnlinePlus"),
+    ("mofid", "Mofid / Orbis"),
     ("rlc", "RLC (tadbir)"),
     ("auth-ephoenix", "Authenticated · ephoenix (real login)"),
     ("auth-exir", "Authenticated · Exir (real login)"),
@@ -192,6 +193,18 @@ async def build_targets(db: AsyncSession) -> list[Target]:
             targets.append(Target(
                 f"onlineplus:{b.code}", "onlineplus", b.label or b.code,
                 f"https://api.{_domain}/", "any",
+            ))
+        elif b.family == "mofid":
+            # Mofid is a single broker on fixed hosts (no per-tenant domain): the
+            # MTS API + the eMofid OAuth host. Any HTTP response = reachable.
+            label = b.label or b.code
+            targets.append(Target(
+                f"mofid:api:{b.code}", "mofid", f"{label} · api",
+                "https://api-mts.orbis.easytrader.ir/", "any",
+            ))
+            targets.append(Target(
+                f"mofid:oauth:{b.code}", "mofid", f"{label} · oauth",
+                "https://login.emofid.com/", "any",
             ))
         elif b.family == "ephoenix" and b.code != "ib":
             label = b.label or b.code
