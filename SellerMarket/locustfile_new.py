@@ -852,7 +852,8 @@ def _create_user_classes():
         # Clean exit → green scheduled-run marker (mirrors the no-config exit(1)
         # precedent above): nothing here is supposed to fire at open.
         logger.info(
-            f"all {len(config.sections())} sections are auto-sell-only — nothing to fire at open"
+            f"all {len(config.sections())} section(s) are excluded from locust firing "
+            "(auto-sell-only and/or mofid) — nothing to fire here at open"
         )
         exit(0)
 

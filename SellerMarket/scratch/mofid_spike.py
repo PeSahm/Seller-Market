@@ -51,11 +51,15 @@ def _pkce():
     return verifier, challenge
 
 
+_OCR_SESSION = requests.Session()
+_OCR_SESSION.trust_env = False  # reach the OCR host DIRECTLY (never via a proxy)
+
+
 def _solve_captcha(img_bytes):
     b64 = base64.b64encode(img_bytes).decode()
-    r = requests.post(OCR, json={"base64": b64},
-                      headers={"accept": "text/plain", "Content-Type": "application/json"},
-                      timeout=20)
+    r = _OCR_SESSION.post(OCR, json={"base64": b64},
+                          headers={"accept": "text/plain", "Content-Type": "application/json"},
+                          timeout=20)
     return r.text.strip().strip('"')
 
 

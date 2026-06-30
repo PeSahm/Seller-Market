@@ -309,17 +309,26 @@ class MofidAdapter:
             session = await self._session(username, password, ocr_service_url)
             name = None
             bourse = None
-            try:
-                async with self._read_client(session) as client:
-                    resp = await client.get(session["api"] + "/easy/api/account/user-info")
-                if resp.status_code == 200:
-                    info = resp.json() or {}
-                    bourse = info.get("bourseCode") or None
-                    name = (
-                        f"{info.get('name', '')} {info.get('family', '')}".strip() or None
-                    )
-            except Exception:  # noqa: BLE001 — a valid login is success even if the
-                pass           # bonus user-info read fails (separate host/perm).
+            # The login already proved the credentials; user-info is a bonus
+            # (name/bourse). Retry ONCE with a fresh login on a 401/403 — a cached
+            # bearer can go stale within the TTL.
+            for _attempt in range(2):
+                try:
+                    async with self._read_client(session) as client:
+                        resp = await client.get(session["api"] + "/easy/api/account/user-info")
+                    if resp.status_code in (401, 403):
+                        self._invalidate_session(username, password)
+                        session = await self._session(username, password, ocr_service_url)
+                        continue
+                    if resp.status_code == 200:
+                        info = resp.json() or {}
+                        bourse = info.get("bourseCode") or None
+                        name = (
+                            f"{info.get('name', '')} {info.get('family', '')}".strip() or None
+                        )
+                    break
+                except Exception:  # noqa: BLE001 — bonus read; login already valid
+                    break
             return VerifyResult(
                 ok=True, status=CredStatus.VALID,
                 full_name=name or bourse, national_id=None,
@@ -396,14 +405,18 @@ class MofidAdapter:
         self, username: str, password: str, isin: str, *, ocr_service_url: str
     ) -> int:
         """Whole-share holding for ``isin`` via ``GET /core/api/portfolio/true``.
-        Absent ISIN is a VALID answer (holds nothing) → 0. Raises on a non-200."""
-        session = await self._session(username, password, ocr_service_url)
-        async with self._read_client(session) as client:
-            resp = await client.get(session["api"] + "/core/api/portfolio/true")
-        if resp.status_code != 200:
+        Absent ISIN is a VALID answer (holds nothing) → 0. Retries once with a
+        fresh login on a non-200 (stale bearer); raises if it still fails."""
+        last = 0
+        for _attempt in range(2):
+            session = await self._session(username, password, ocr_service_url)
+            async with self._read_client(session) as client:
+                resp = await client.get(session["api"] + "/core/api/portfolio/true")
+            if resp.status_code == 200:
+                for row in (resp.json() or {}).get("portfolioItems") or []:
+                    if isinstance(row, dict) and row.get("isin") == isin:
+                        return int(row.get("asset") or 0)
+                return 0
+            last = resp.status_code
             self._invalidate_session(username, password)
-            raise httpx.HTTPError(f"mofid portfolio HTTP {resp.status_code}")
-        for row in (resp.json() or {}).get("portfolioItems") or []:
-            if isinstance(row, dict) and row.get("isin") == isin:
-                return int(row.get("asset") or 0)
-        return 0
+        raise httpx.HTTPError(f"mofid portfolio HTTP {last}")

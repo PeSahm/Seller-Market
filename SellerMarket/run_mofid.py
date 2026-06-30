@@ -18,7 +18,13 @@ import json
 import logging
 import threading
 
+import mofid_firer
+import order_fire_log
+from broker_adapters import get_adapter, is_auto_sell_only, resolve_family
+from captcha_utils import decode_captcha
+from cred_errors import InvalidCredentialsError
 from log_rotation import rotate_and_truncate
+from runtime_config import drop_non_customer_sections
 
 rotate_and_truncate("run_mofid.log")
 logging.basicConfig(
@@ -30,13 +36,6 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
-
-import mofid_firer
-import order_fire_log
-from broker_adapters import get_adapter, is_auto_sell_only, resolve_family
-from captcha_utils import decode_captcha
-from cred_errors import InvalidCredentialsError
-from runtime_config import drop_non_customer_sections
 
 # Per-section join timeout: cover the worst case of waiting from process start
 # (~08:44) to the fire window (~08:45) plus login + drafts + the attempt budget.
@@ -113,7 +112,12 @@ def main() -> None:
             continue
         if resolve_family(section.get("broker", ""), section) != "mofid":
             continue
-        if int(section.get("side", 1)) != 1:
+        try:
+            side = int(section.get("side", 1))
+        except (TypeError, ValueError):
+            logger.warning("mofid section %s: bad side %r — skipped", name, section.get("side"))
+            continue
+        if side != 1:
             logger.info("mofid section %s is SELL — skipped (sells go via auto-sell)", name)
             continue
         targets.append((name, section))
@@ -130,10 +134,10 @@ def main() -> None:
         t = threading.Thread(
             target=lambda n=name, s=section: results.__setitem__(n, fire_section(n, s)),
             name=f"mofid-{name}",
-            daemon=True,
-        )
-        t.start()
-        threads.append(t)
+            daemon=False,  # NON-daemon: a fire in flight must never be abruptly
+        )                  # killed when main returns. The firer is internally
+        t.start()          # bounded (window + max_attempts) and the scheduler's
+        threads.append(t)  # subprocess timeout is the ultimate backstop.
     for t in threads:
         t.join(timeout=_JOIN_TIMEOUT_S)
 

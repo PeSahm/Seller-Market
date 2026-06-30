@@ -3,7 +3,7 @@ classifier, the PKCE vector, the ``GET /core/api/order`` row mapper (the NUMERIC
 side mapping is the highest-risk field), registry routing, verify_isin via the
 shared RLC backend, and verify_credentials / get_orders with the OAuth login
 mocked. All pure/sync or mocked — no DB, no network. Wire shapes confirmed by the
-Phase-0 spike (account 4580090306) — see SellerMarket/scratch/MOFID_FINDINGS.md.
+Phase-0 spike (a synthetic account) — see SellerMarket/scratch/MOFID_FINDINGS.md.
 """
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def _mofid_row(**over):
 
 
 def _customer():
-    return SimpleNamespace(id=uuid4(), agent_id=uuid4(), broker="mofid", username="4580090306")
+    return SimpleNamespace(id=uuid4(), agent_id=uuid4(), broker="mofid", username="1111111111")
 
 
 def test_map_mofid_side_buy_is_1():

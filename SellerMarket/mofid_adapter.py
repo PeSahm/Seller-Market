@@ -469,7 +469,7 @@ class MofidAdapter(BrokerAdapter):
         side = int(side)
         if side not in (1, 2):
             raise ValueError(f"mofid {isin}: invalid order side {side!r} (expected 1 or 2)")
-        self.config_section = config_section or self.config_section
+        self.config_section = config_section if config_section is not None else self.config_section
         try:
             descriptor = self._session()
             price, volume = self._size(isin, side, descriptor)
@@ -537,7 +537,7 @@ class MofidAdapter(BrokerAdapter):
         side = int(side)
         if side not in (1, 2):
             raise ValueError(f"mofid {isin}: invalid order side {side!r} (expected 1 or 2)")
-        self.config_section = config_section or self.config_section
+        self.config_section = config_section if config_section is not None else self.config_section
         try:
             descriptor = self._session()
             price, volume = self._size(isin, side, descriptor)
@@ -572,7 +572,7 @@ class MofidAdapter(BrokerAdapter):
         """Auto-sell (#110): floor = RLC ``lap``, cap = ``mxqo``. SELL chunks use
         the single immediate ``/core/api/v2/order`` (spaced ≥0.35s — far from any
         burst, so the draft/batch overhead buys nothing here)."""
-        self.config_section = config_section or self.config_section
+        self.config_section = config_section if config_section is not None else self.config_section
         override = self.config_section.get("price")
         if override:
             floor = int(float(override))

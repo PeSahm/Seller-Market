@@ -1071,8 +1071,8 @@ async def admin_customer_verify_isin(
     try:
         await brokers_registry.ensure_family_cache(db)
         family = brokers_registry.family_of(effective_broker)
-    except brokers_registry.UnknownBrokerError:
-        family = "ephoenix"
+    except Exception:  # noqa: BLE001 — UnknownBrokerError OR a DB/cache-warm blip:
+        family = "ephoenix"  # degrade to the password-required (ephoenix-safe) flow
 
     if family not in ("exir", "onlineplus", "mofid") and not password:
         # Same reason as verify-credentials: we can't reuse the stored

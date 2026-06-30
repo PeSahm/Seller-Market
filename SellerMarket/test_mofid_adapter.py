@@ -136,7 +136,7 @@ def _install(monkeypatch, *, reject=None, captcha=False, buy_power=31_224_500,
     return sess, read
 
 
-def _adapter(code="mofid", user="4580090306", pw="pw", **kw):
+def _adapter(code="mofid", user="1111111111", pw="pw", **kw):
     return mofid_adapter.MofidAdapter(code, user, pw, **kw)
 
 

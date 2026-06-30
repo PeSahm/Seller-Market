@@ -82,6 +82,11 @@ try:
             _out("valid", fam + " login ok")
         except InvalidCredentialsError as e:
             _out("invalid_credentials", str(e) or "broker rejected credentials")
+        except ValueError as e:
+            # Login SUCCEEDED but order sizing didn't (no price / no holdings /
+            # zero buying power). This probe is about CREDENTIALS only — a valid
+            # login with no buy-power is still a valid login.
+            _out("valid", fam + " login ok (sizing n/a: " + str(e)[:80] + ")")
     else:
         from broker_enum import get_endpoints_for
         from api_client import EphoenixAPIClient
