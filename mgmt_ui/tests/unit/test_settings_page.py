@@ -119,6 +119,37 @@ def test_bot_rt_fee_bounds():
         SettingsUpdate(**_base(bot_rt_exir_fallback_buy_fee=0.5))   # lt=0.1
 
 
+# --- bot_rt_mofid_* firing knobs (drafts + fire window) ----------------------
+
+
+def test_bot_rt_mofid_defaults_match_hardcoded():
+    s = SettingsUpdate(**_base())
+    assert s.bot_rt_mofid_draft_count == 1
+    assert s.bot_rt_mofid_window_start == "08:44:58.450"
+    assert s.bot_rt_mofid_window_end == "08:45:00.900"
+
+
+def test_bot_rt_mofid_draft_count_bounds():
+    s = SettingsUpdate(**_base(bot_rt_mofid_draft_count=10))
+    assert s.bot_rt_mofid_draft_count == 10
+    with pytest.raises(ValidationError):
+        SettingsUpdate(**_base(bot_rt_mofid_draft_count=0))     # ge=1
+    with pytest.raises(ValidationError):
+        SettingsUpdate(**_base(bot_rt_mofid_draft_count=51))    # le=50
+
+
+def test_bot_rt_mofid_window_time_format():
+    # HH:MM:SS and HH:MM:SS.mmm both accepted (the operator's "08:44:59").
+    a = SettingsUpdate(**_base(bot_rt_mofid_window_start="08:44:59"))
+    assert a.bot_rt_mofid_window_start == "08:44:59"
+    b = SettingsUpdate(**_base(bot_rt_mofid_window_end="08:45:00.900"))
+    assert b.bot_rt_mofid_window_end == "08:45:00.900"
+    with pytest.raises(ValidationError):
+        SettingsUpdate(**_base(bot_rt_mofid_window_start="08:44"))      # needs seconds
+    with pytest.raises(ValidationError):
+        SettingsUpdate(**_base(bot_rt_mofid_window_end="notatime"))
+
+
 # --- Advanced raw editor (escape hatch) --------------------------------------
 
 

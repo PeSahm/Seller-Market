@@ -119,6 +119,14 @@ DEFAULTS: dict[str, str] = {
     # correctly detected as "no change" (no spurious fleet push).
     "bot_rt_auto_sell_window": "09:00-12:30",
     "bot_rt_auto_sell_confirm_secs": "5.0",
+    # Mofid / Orbis firing knobs. Read by run_mofid / mofid_firer at FIRE time,
+    # so a change applies on the next open after the fleet config push — no
+    # redeploy. The firer creates N identical full-volume drafts and batch-sends
+    # them in the [window_start, window_end] open window (more drafts = better
+    # queue odds; can't over-buy, only one fills). Defaults == the bot's literals.
+    "bot_rt_mofid_draft_count": "1",
+    "bot_rt_mofid_window_start": "08:44:58.450",
+    "bot_rt_mofid_window_end": "08:45:00.900",
 }
 
 # Settings whose value is rendered into the bot's config.ini ``[runtime]``

@@ -163,6 +163,40 @@
     </div>
   </div>
 
+  <h3 class="h3" style="margin-top:20px;">Mofid / Orbis firing</h3>
+  <p class="text-small text-muted" style="margin-bottom:10px;">
+    Mofid can't ride the locust spam (1500 req/hr cap), so each Mofid BUY creates
+    <em>N identical full-volume drafts</em> and batch-sends them in the open
+    window. More drafts = better odds of landing in the queue;
+    <strong>it can't over-buy</strong> — only one fills, the rest reject for
+    insufficient buying power. Read fresh at fire time, so a change applies on the
+    <strong>next open</strong> after Save — no redeploy.
+  </p>
+  <div class="field-row">
+    <div class="field field--narrow">
+      <label class="label" for="bot_rt_mofid_draft_count">drafts per order</label>
+      <input class="input" id="bot_rt_mofid_draft_count" name="bot_rt_mofid_draft_count"
+             type="number" step="1" min="1" max="50"
+             value="{{ settings_values.bot_rt_mofid_draft_count }}" required>
+      <p class="text-small text-muted">How many drafts to create &amp; batch-send (1–50).</p>
+    </div>
+    <div class="field field--narrow">
+      <label class="label" for="bot_rt_mofid_window_start">fire time (window start)</label>
+      <input class="input" id="bot_rt_mofid_window_start" name="bot_rt_mofid_window_start"
+             value="{{ settings_values.bot_rt_mofid_window_start }}"
+             placeholder="08:44:58.450" maxlength="16" required>
+      <p class="text-small text-muted">When the batch send starts (broker server time).
+        E.g. <code>08:44:59</code> for the open.</p>
+    </div>
+    <div class="field field--narrow">
+      <label class="label" for="bot_rt_mofid_window_end">fire deadline (window end)</label>
+      <input class="input" id="bot_rt_mofid_window_end" name="bot_rt_mofid_window_end"
+             value="{{ settings_values.bot_rt_mofid_window_end }}"
+             placeholder="08:45:00.900" maxlength="16" required>
+      <p class="text-small text-muted">Stop retrying after this (HH:MM:SS[.mmm]).</p>
+    </div>
+  </div>
+
   <details style="margin-top:8px;">
     <summary class="text-small">Advanced runtime overrides (escape hatch)</summary>
     <div class="field" style="margin-top:8px;">
