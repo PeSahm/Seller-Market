@@ -26,16 +26,25 @@ from cred_errors import InvalidCredentialsError
 from log_rotation import rotate_and_truncate
 from runtime_config import drop_non_customer_sections
 
-rotate_and_truncate("run_mofid.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("run_mofid.log", mode="a", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
 logger = logging.getLogger(__name__)
+
+
+def _setup_logging() -> None:
+    """Configure file+stdout logging for the standalone run (called from main()).
+
+    Kept OUT of module scope so importing run_mofid — e.g. bot_entrypoint's gate
+    calling ``mofid_buy_targets`` — has NO side effects: no log rotation, and no
+    reconfiguration of the long-lived bot process's root logger.
+    """
+    rotate_and_truncate("run_mofid.log")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler("run_mofid.log", mode="a", encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
 
 # Per-section join timeout: cover the worst case of waiting from process start
 # (~08:44) to the fire window (~08:45) plus login + drafts + the attempt budget.
@@ -98,9 +107,22 @@ def fire_section(name: str, section: dict) -> bool:
         return False
 
 
-def main() -> None:
+def mofid_buy_targets(config_path: str = "config.ini") -> list:
+    """The Mofid BUY sections ``[(name, section_dict), …]`` in ``config_path``.
+
+    Shared by ``main()`` (to fire) and ``bot_entrypoint._start_mofid_scheduler``
+    (to decide whether to launch the independent Mofid scheduler at all). A
+    section qualifies iff it is a customer row (has ``username``), is NOT
+    auto-sell-only, resolves to family ``mofid``, and is a BUY (``side == 1``).
+    Never raises — a malformed config or bad section is skipped (``[]`` on an
+    unreadable file), so the gate can call it safely at bot startup.
+    """
     config = configparser.ConfigParser()
-    config.read("config.ini")
+    try:
+        config.read(config_path)
+    except Exception:  # noqa: BLE001 — a malformed config must not crash the gate
+        logger.exception("run_mofid: failed to read %s", config_path)
+        return []
     drop_non_customer_sections(config)
 
     targets = []
@@ -121,7 +143,12 @@ def main() -> None:
             logger.info("mofid section %s is SELL — skipped (sells go via auto-sell)", name)
             continue
         targets.append((name, section))
+    return targets
 
+
+def main() -> None:
+    _setup_logging()
+    targets = mofid_buy_targets("config.ini")
     if not targets:
         logger.info("run_mofid: no Mofid BUY sections — nothing to fire")
         return
