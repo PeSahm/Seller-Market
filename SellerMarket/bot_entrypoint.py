@@ -14,6 +14,7 @@ FLAT package layout — top-level module (Dockerfile ``COPY *.py ./``).
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -46,6 +47,63 @@ def _start_scheduler() -> None:
         logger.exception("failed to start scheduler")
 
 
+def _start_mofid_scheduler() -> None:
+    """Launch a SECOND, independent JobScheduler for the Mofid firer when this
+    stack has Mofid BUY sections.
+
+    Mofid can't ride the locust spam (its 1500-requests/hour cap) and can't share
+    the single sequential main scheduler — ``run_mofid`` would serialize with the
+    blocking ``run_trading`` subprocess and miss its open window. So it gets its
+    OWN scheduler thread that fires ``run_mofid.py`` at the open, CONCURRENT with
+    (and never blocking) ``run_trading``. ``run_mofid`` itself pre-creates the
+    drafts then batch-sends them in the server-time-synced window, so a start a
+    minute before the open is exactly right.
+
+    Gated on Mofid sections being present → a byte-identical no-op on every
+    non-Mofid stack (no extra thread, no marker noise in /admin/runs). Adding the
+    first Mofid customer to a running stack needs a redeploy to activate this
+    (the gate runs once at container start), the same as any compose-level change.
+    """
+    try:
+        config_ini = os.environ.get("CONFIG_INI", "/app/config.ini")
+        import run_mofid
+
+        targets = run_mofid.mofid_buy_targets(config_ini)
+        if not targets:
+            return  # no Mofid BUY sections → don't launch the second scheduler
+
+        # run_mofid STARTS here (login + pre-create drafts), then waits for the
+        # mofid_firer window (~08:44:58 server-time) to batch-send. Default a
+        # minute before the open for ample OAuth/captcha headroom; DB-tunable.
+        run_time = runtime_config.get("mofid_run_time", "08:44:00")
+        cfg = {
+            "enabled": True,
+            "jobs": [{
+                "name": "run_mofid",
+                "time": run_time,
+                "command": "python run_mofid.py",
+                "enabled": True,
+            }],
+        }
+        cfg_path = os.environ.get(
+            "MOFID_SCHEDULER_CONFIG", "/app/mofid_scheduler_config.json"
+        )
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+
+        from scheduler import JobScheduler
+
+        sched = JobScheduler(cfg_path)
+        threading.Thread(target=sched.run, daemon=True, name="MofidScheduler").start()
+        logger.info(
+            "mofid scheduler started — %d section(s), run_time=%s "
+            "(independent of run_trading)",
+            len(targets), run_time,
+        )
+    except Exception:  # noqa: BLE001 — never let the Mofid scheduler crash the container
+        logger.exception("failed to start mofid scheduler")
+
+
 def _idle() -> None:
     while True:
         time.sleep(3600)
@@ -56,6 +114,7 @@ def main() -> None:
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
     _start_scheduler()
+    _start_mofid_scheduler()
 
     from auto_sell_monitor import AutoSellMonitor, load_auto_sell_targets
 

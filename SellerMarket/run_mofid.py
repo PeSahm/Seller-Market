@@ -16,7 +16,10 @@ from __future__ import annotations
 import configparser
 import json
 import logging
+import os
+import re
 import threading
+from datetime import datetime
 
 import mofid_firer
 import order_fire_log
@@ -26,20 +29,74 @@ from cred_errors import InvalidCredentialsError
 from log_rotation import rotate_and_truncate
 from runtime_config import drop_non_customer_sections
 
-rotate_and_truncate("run_mofid.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("run_mofid.log", mode="a", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
 logger = logging.getLogger(__name__)
+
+
+def _setup_logging() -> None:
+    """Configure file+stdout logging for the standalone run (called from main()).
+
+    Kept OUT of module scope so importing run_mofid — e.g. bot_entrypoint's gate
+    calling ``mofid_buy_targets`` — has NO side effects: no log rotation, and no
+    reconfiguration of the long-lived bot process's root logger.
+    """
+    rotate_and_truncate("run_mofid.log")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler("run_mofid.log", mode="a", encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
 
 # Per-section join timeout: cover the worst case of waiting from process start
 # (~08:44) to the fire window (~08:45) plus login + drafts + the attempt budget.
 _JOIN_TIMEOUT_S = 480.0
+
+# Cross-restart idempotency. The scheduler re-runs a due job for 120s after its
+# time, so a container restart inside 08:44:00–08:46:00 would re-launch run_mofid.
+# To stop a re-created draft from DOUBLE-FIRING a real BUY, drop a per-(account,
+# isin)-per-day marker in run_results/ (bind-mounted → survives a restart) once
+# we've been through the fire window, and skip that section on any re-run.
+_RUN_RESULTS_DIR = os.path.join(os.path.dirname(__file__), "run_results")
+
+
+def _fire_latch_path(account: str, isin: str) -> str:
+    today = datetime.now().strftime("%Y%m%d")
+    key = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{account}_{isin}")
+    return os.path.join(_RUN_RESULTS_DIR, f"mofid_fired_{key}_{today}.marker")
+
+
+def _fired_today(account: str, isin: str) -> bool:
+    try:
+        return os.path.exists(_fire_latch_path(account, isin))
+    except Exception:  # noqa: BLE001 — a latch-read failure must never block firing
+        return False
+
+
+def _mark_fired_today(account: str, isin: str) -> None:
+    try:
+        os.makedirs(_RUN_RESULTS_DIR, exist_ok=True)
+        with open(_fire_latch_path(account, isin), "w", encoding="utf-8") as f:
+            f.write(datetime.now().isoformat())
+    except OSError:
+        logger.warning("mofid: failed to write fire latch for %s/%s", account, isin)
+
+
+def _prune_fire_latches(max_age_days: int = 7) -> None:
+    """Delete ``mofid_fired_*.marker`` older than ``max_age_days`` (housekeeping)."""
+    import glob
+
+    try:
+        cutoff = datetime.now().timestamp() - max_age_days * 86400
+        for path in glob.glob(os.path.join(_RUN_RESULTS_DIR, "mofid_fired_*.marker")):
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001 — housekeeping must never block firing
+        pass
 
 
 def fire_section(name: str, section: dict) -> bool:
@@ -48,6 +105,12 @@ def fire_section(name: str, section: dict) -> bool:
     broker = section.get("broker", "?")
     isin = section.get("isin", "?")
     side = int(section.get("side", 1))
+    if _fired_today(username, isin):
+        logger.info(
+            "mofid %s (%s@%s): already handled today — skip (cross-restart idempotency)",
+            isin, username, broker,
+        )
+        return False
     try:
         adapter = get_adapter(
             broker,
@@ -72,6 +135,12 @@ def fire_section(name: str, section: dict) -> bool:
             max_attempts=max_attempts,
             interval_ms=interval,
         )
+        # Latch as soon as the batch has gone through the window — BEFORE we even
+        # evaluate success — so a restart can never re-fire this (account, isin)
+        # today, even if the broker accepted but our process died before we
+        # recorded it. A pre-fire failure (login/draft) raises above this line and
+        # is NOT latched, so a genuine early failure can still retry on a re-run.
+        _mark_fired_today(username, isin)
         if result.fired:
             try:
                 resp = json.loads((result.body or b"").decode("utf-8", "replace") or "null")
@@ -98,9 +167,23 @@ def fire_section(name: str, section: dict) -> bool:
         return False
 
 
-def main() -> None:
+def mofid_buy_targets(config_path: str = "config.ini") -> list:
+    """The Mofid BUY sections ``[(name, section_dict), …]`` in ``config_path``.
+
+    Shared by ``main()`` (to fire) and ``bot_entrypoint._start_mofid_scheduler``
+    (to decide whether to launch the independent Mofid scheduler at all). A
+    section qualifies iff it is a customer row (has ``username``), is NOT
+    auto-sell-only, resolves to family ``mofid``, and is a BUY (``side == 1``).
+    Never raises — a missing file yields no sections (``configparser`` skips it
+    silently), and a malformed/unparseable config is caught → ``[]``. So the gate
+    can call it safely at bot startup.
+    """
     config = configparser.ConfigParser()
-    config.read("config.ini")
+    try:
+        config.read(config_path)
+    except Exception:  # noqa: BLE001 — a malformed config must not crash the gate
+        logger.exception("run_mofid: failed to read %s", config_path)
+        return []
     drop_non_customer_sections(config)
 
     targets = []
@@ -121,7 +204,13 @@ def main() -> None:
             logger.info("mofid section %s is SELL — skipped (sells go via auto-sell)", name)
             continue
         targets.append((name, section))
+    return targets
 
+
+def main() -> None:
+    _setup_logging()
+    _prune_fire_latches()
+    targets = mofid_buy_targets("config.ini")
     if not targets:
         logger.info("run_mofid: no Mofid BUY sections — nothing to fire")
         return
