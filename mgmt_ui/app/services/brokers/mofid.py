@@ -165,9 +165,8 @@ class MofidAdapter:
 
         Returns ``{"token","api"}``. Raises :class:`_MofidInvalidCredentials` on
         the wrong-password marker; retries on a captcha marker; ``RuntimeError``
-        if every attempt fails. NOTE: deliberately does NOT call ``same-login`` —
-        that device registration may evict the bot's live session, and verify is
-        read-only.
+        if every attempt fails. ``_finish_oauth`` then calls ``same-login`` (it is
+        REQUIRED — the authed reads 403 without it).
         """
         verifier, challenge = _pkce()
         r = await client.get(
@@ -254,6 +253,21 @@ class MofidAdapter:
         at = tok.get("access_token")
         if not at:
             raise RuntimeError(f"mofid token failed: {tok.get('error')}")
+        # Device registration is REQUIRED for the authed reads — without it
+        # /easy/api/account/user-info and /core/api/* return 403 "You do not have
+        # permission to view this object" (live-confirmed). Best-effort; the bot
+        # adapter calls it too, so it is not a verify-only side effect. (Mofid's
+        # "same-login" permits concurrent same-account logins, registering this
+        # session rather than evicting others.)
+        try:
+            await client.post(
+                _API_HOST + "/easy/api/account/same-login",
+                json={"uuid": "sm-mgmt", "appBuildNo": "16872", "width": 1536,
+                      "height": 729, "devicePlatform": "Desktop", "platformInfo": _UA},
+                headers={"Authorization": f"Bearer {at}", "User-Agent": _UA, "Referer": _REFERER},
+            )
+        except Exception:  # noqa: BLE001 — same-login best-effort
+            logger.debug("mofid same-login failed (non-fatal)")
         return {"token": at, "api": _API_HOST}
 
     def _session_key(self, username: str, password: str) -> tuple[str, str, str]:
