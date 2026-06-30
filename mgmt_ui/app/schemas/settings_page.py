@@ -23,6 +23,8 @@ _FORBIDDEN_TAG_CHARS = frozenset(" \t;&|$`<>\"'\\")
 # monitor reads with an INTERPOLATING ConfigParser (a lone ``%`` would raise).
 _FORBIDDEN_HOSTISH_CHARS = frozenset(" \t;&|$`<>\"'\\%/")
 _WINDOW_RE = re.compile(r"^\d{1,2}:\d{2}-\d{1,2}:\d{2}$")
+# Mofid fire-window times: HH:MM:SS with optional milliseconds (".450").
+_HMS_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}(\.\d{1,3})?$")
 # Advanced editor keys: a strict allowlist (prefix-scoped) so the raw textarea
 # can never write an arbitrary settings row.
 _BOT_RT_KEY_RE = re.compile(r"^bot_rt_[a-z0-9_]+$")
@@ -86,6 +88,10 @@ class SettingsUpdate(BaseModel):
     bot_rt_exir_fallback_buy_fee: float = Field(default=0.005, gt=0, lt=0.1)
     bot_rt_auto_sell_window: str = Field(default="09:00-12:30", max_length=32)
     bot_rt_auto_sell_confirm_secs: float = Field(default=5.0, ge=0)
+    # Mofid / Orbis firing: how many drafts to create + the batch-send window.
+    bot_rt_mofid_draft_count: int = Field(default=1, ge=1, le=50)
+    bot_rt_mofid_window_start: str = Field(default="08:44:58.450", max_length=16)
+    bot_rt_mofid_window_end: str = Field(default="08:45:00.900", max_length=16)
 
     @field_validator("ocr_service_url")
     @classmethod
@@ -154,4 +160,12 @@ class SettingsUpdate(BaseModel):
         v = (v or "").strip()
         if not _WINDOW_RE.match(v):
             raise ValueError("window must look like HH:MM-HH:MM")
+        return v
+
+    @field_validator("bot_rt_mofid_window_start", "bot_rt_mofid_window_end")
+    @classmethod
+    def _check_hms(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not _HMS_RE.match(v):
+            raise ValueError("fire time must look like HH:MM:SS or HH:MM:SS.mmm")
         return v
