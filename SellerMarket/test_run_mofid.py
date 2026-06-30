@@ -98,3 +98,28 @@ def test_bad_side_is_skipped_not_raised(tmp_path):
         side = notanint
     """)
     assert run_mofid.mofid_buy_targets(cfg) == []
+
+
+# ------------------------------------------- cross-restart idempotency latch
+def test_fire_latch_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_mofid, "_RUN_RESULTS_DIR", str(tmp_path))
+    acct, isin = "4580090306", "IRO1DPAK0001"
+    assert run_mofid._fired_today(acct, isin) is False
+    run_mofid._mark_fired_today(acct, isin)
+    assert run_mofid._fired_today(acct, isin) is True
+    # a different isin / account is independent (per-(account,isin)-per-day)
+    assert run_mofid._fired_today(acct, "IRO1DZAH0001") is False
+    assert run_mofid._fired_today("9999999999", isin) is False
+
+
+def test_fire_section_skips_when_already_fired(monkeypatch):
+    """A latched (account, isin) must NOT log in or create a draft again — the
+    core guard against a restart-in-window double BUY."""
+    monkeypatch.setattr(run_mofid, "_fired_today", lambda _a, _i: True)
+    called = []
+    monkeypatch.setattr(run_mofid, "get_adapter", lambda *a, **k: called.append(1))
+    out = run_mofid.fire_section(
+        "s1", {"username": "u", "broker": "mofid", "isin": "X", "side": "1"}
+    )
+    assert out is False
+    assert called == []  # never reached get_adapter → no login, no draft, no POST
