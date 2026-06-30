@@ -96,6 +96,20 @@ def test_map_mofid_fields():
     assert out["state"] == 3 and out["is_done"] is True
 
 
+def test_map_mofid_ulid_id_hashed_stable():
+    """Mofid order ids are ULID strings → must map to a stable, non-zero
+    BigInteger (not 0 via int-coerce, which would collide every order)."""
+    from app.services.broker_orders import _map_mofid_row, _mofid_tracking
+    ulid = "01KWBWKJHF75B5ANFPM7Z6QB3J"
+    t1 = _map_mofid_row(_mofid_row(id=ulid), _customer())["tracking_number"]
+    t2 = _map_mofid_row(_mofid_row(id=ulid), _customer())["tracking_number"]
+    assert t1 == t2 and t1 != 0          # deterministic + non-zero
+    assert 0 < t1 < 2 ** 63              # fits a signed BigInteger
+    assert _mofid_tracking("01ZZZ0000000000000000000Z") != t1  # distinct ULIDs differ
+    # a numeric id is still used directly
+    assert _mofid_tracking(987654) == 987654
+
+
 def test_map_mofid_same_keyset_as_ephoenix():
     from app.services.broker_orders import _map_ephoenix_row, _map_mofid_row
     cust = _customer()

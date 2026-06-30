@@ -18,6 +18,7 @@ customer would mis-attribute money data).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from dataclasses import dataclass
@@ -357,6 +358,24 @@ def _map_onlineplus_row(row: dict, customer: Customer) -> dict:
     }
 
 
+def _mofid_tracking(order_id: object) -> int:
+    """Coerce a Mofid order id to a stable ``BigInteger`` dedup key.
+
+    Mofid order ids are **ULID strings** (e.g. ``01KWBWKJHF75B5ANFPM7Z6QB3J`` —
+    confirmed live: the draft id + the decompiled ``CancelOrder(string orderId)``),
+    which ``_int_or_zero`` would map to 0 → every order would collide on the
+    ``(broker, account_username, tracking_number, placed_date)`` key. So: a numeric
+    id is used directly; a non-numeric (ULID) id is hashed to a 60-bit int
+    (deterministic → idempotent upserts; collision-negligible; the original ULID
+    is preserved in ``raw_json`` + ``state_desc`` is unaffected)."""
+    if order_id is None:
+        return 0
+    try:
+        return int(order_id)
+    except (ValueError, TypeError):
+        return int(hashlib.sha1(str(order_id).encode("utf-8")).hexdigest()[:15], 16)
+
+
 def _map_mofid_row(row: dict, customer: Customer) -> dict:
     """Map one Mofid ``GET /core/api/order`` row to ``broker_orders`` values.
 
@@ -375,7 +394,7 @@ def _map_mofid_row(row: dict, customer: Customer) -> dict:
     * ``createDateTime`` → placement timestamp (ISO-Gregorian or Jalali; both
       handled, re-labeled UTC like the other families).
     """
-    tracking = _int_or_zero(row.get("id"))
+    tracking = _mofid_tracking(row.get("id"))  # ULID id → stable BigInteger
     isin = row.get("symbolIsin") or row.get("SymbolIsin") or ""
     raw_side = row.get("side")
     order_side = 1 if raw_side == 0 else (2 if raw_side == 1 else 0)
