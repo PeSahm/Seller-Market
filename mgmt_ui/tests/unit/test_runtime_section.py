@@ -75,10 +75,12 @@ def test_build_runtime_escape_hatch_keys_pass_through():
 def test_build_runtime_mofid_knobs():
     out = build_runtime_section({
         "bot_rt_mofid_draft_count": "10",            # != default "1" → rendered
+        "bot_rt_mofid_run_time": "08:43:00",         # != default → rendered
         "bot_rt_mofid_window_start": "08:44:59",     # != default → rendered
         "bot_rt_mofid_window_end": "08:45:00.900",   # == default → omitted
     })
     assert out["mofid_draft_count"] == "10"          # wire key the bot reads
+    assert out["mofid_run_time"] == "08:43:00"
     assert out["mofid_window_start"] == "08:44:59"
     assert "mofid_window_end" not in out             # default → omitted
 
@@ -98,6 +100,7 @@ def test_defaults_carry_the_disaster_set():
     assert DEFAULTS["bot_rt_auto_sell_confirm_secs"] == "5.0"
     # Mofid firing knobs (== the bot's hardcoded literals)
     assert DEFAULTS["bot_rt_mofid_draft_count"] == "1"
+    assert DEFAULTS["bot_rt_mofid_run_time"] == "08:44:00"
     assert DEFAULTS["bot_rt_mofid_window_start"] == "08:44:58.450"
     assert DEFAULTS["bot_rt_mofid_window_end"] == "08:45:00.900"
 

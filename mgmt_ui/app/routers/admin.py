@@ -3071,6 +3071,7 @@ async def admin_settings_save(
     bot_rt_auto_sell_window: str = Form("09:00-12:30"),
     bot_rt_auto_sell_confirm_secs: float = Form(5.0),
     bot_rt_mofid_draft_count: int = Form(1),
+    bot_rt_mofid_run_time: str = Form("08:44:00"),
     bot_rt_mofid_window_start: str = Form("08:44:58.450"),
     bot_rt_mofid_window_end: str = Form("08:45:00.900"),
     bot_rt_advanced: str = Form(""),
@@ -3102,6 +3103,7 @@ async def admin_settings_save(
         "bot_rt_auto_sell_window": bot_rt_auto_sell_window,
         "bot_rt_auto_sell_confirm_secs": bot_rt_auto_sell_confirm_secs,
         "bot_rt_mofid_draft_count": bot_rt_mofid_draft_count,
+        "bot_rt_mofid_run_time": bot_rt_mofid_run_time,
         "bot_rt_mofid_window_start": bot_rt_mofid_window_start,
         "bot_rt_mofid_window_end": bot_rt_mofid_window_end,
     }
@@ -3150,6 +3152,7 @@ async def admin_settings_save(
         "bot_rt_auto_sell_window": validated.bot_rt_auto_sell_window,
         "bot_rt_auto_sell_confirm_secs": str(validated.bot_rt_auto_sell_confirm_secs),
         "bot_rt_mofid_draft_count": str(validated.bot_rt_mofid_draft_count),
+        "bot_rt_mofid_run_time": validated.bot_rt_mofid_run_time,
         "bot_rt_mofid_window_start": validated.bot_rt_mofid_window_start,
         "bot_rt_mofid_window_end": validated.bot_rt_mofid_window_end,
     }

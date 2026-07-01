@@ -125,6 +125,11 @@ DEFAULTS: dict[str, str] = {
     # them in the [window_start, window_end] open window (more drafts = better
     # queue odds; can't over-buy, only one fills). Defaults == the bot's literals.
     "bot_rt_mofid_draft_count": "1",
+    # run_time = when run_mofid starts (login + create the drafts), a minute
+    # before the fire window. The Mofid scheduler reads it LIVE from [runtime]
+    # each loop, so — like the window/draft_count knobs — a change applies on the
+    # next open with NO redeploy.
+    "bot_rt_mofid_run_time": "08:44:00",
     "bot_rt_mofid_window_start": "08:44:58.450",
     "bot_rt_mofid_window_end": "08:45:00.900",
 }

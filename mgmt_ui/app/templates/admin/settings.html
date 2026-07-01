@@ -169,8 +169,8 @@
     <em>N identical full-volume drafts</em> and batch-sends them in the open
     window. More drafts = better odds of landing in the queue;
     <strong>it can't over-buy</strong> — only one fills, the rest reject for
-    insufficient buying power. Read fresh at fire time, so a change applies on the
-    <strong>next open</strong> after Save — no redeploy.
+    insufficient buying power. <strong>All of these apply on the next open</strong>
+    after Save — no redeploy (the bot reads them live).
   </p>
   <div class="field-row">
     <div class="field field--narrow">
@@ -180,6 +180,16 @@
              value="{{ settings_values.bot_rt_mofid_draft_count }}" required>
       <p class="text-small text-muted">How many drafts to create &amp; batch-send (1–50).</p>
     </div>
+    <div class="field field--narrow">
+      <label class="label" for="bot_rt_mofid_run_time">draft-creation start</label>
+      <input class="input" id="bot_rt_mofid_run_time" name="bot_rt_mofid_run_time"
+             value="{{ settings_values.bot_rt_mofid_run_time }}"
+             placeholder="08:44:00" maxlength="16" required>
+      <p class="text-small text-muted">When the bot logs in &amp; creates the drafts,
+        before the fire window (bot local time, HH:MM:SS).</p>
+    </div>
+  </div>
+  <div class="field-row">
     <div class="field field--narrow">
       <label class="label" for="bot_rt_mofid_window_start">fire time (window start)</label>
       <input class="input" id="bot_rt_mofid_window_start" name="bot_rt_mofid_window_start"

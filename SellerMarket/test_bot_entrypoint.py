@@ -22,9 +22,9 @@ def test_market_data_url_empty_default(monkeypatch):
 
 
 # ----------------------------------------- independent Mofid scheduler (gating)
-def test_mofid_scheduler_not_started_without_sections(monkeypatch, tmp_path):
-    """No Mofid BUY sections → no second scheduler, no config file written
-    (byte-identical no-op on every non-Mofid stack)."""
+def test_mofid_scheduler_not_started_without_sections(monkeypatch):
+    """No Mofid BUY sections → no second scheduler (byte-identical no-op on
+    every non-Mofid stack)."""
     import run_mofid
 
     monkeypatch.setattr(run_mofid, "mofid_buy_targets", lambda _p: [])
@@ -33,33 +33,22 @@ def test_mofid_scheduler_not_started_without_sections(monkeypatch, tmp_path):
         bot_entrypoint.threading, "Thread",
         lambda *a, **k: threads.append(k.get("name")),
     )
-    cfg_path = tmp_path / "mofid_sched.json"
-    monkeypatch.setenv("MOFID_SCHEDULER_CONFIG", str(cfg_path))
-
     bot_entrypoint._start_mofid_scheduler()
-
     assert threads == []
-    assert not cfg_path.exists()
 
 
-def test_mofid_scheduler_started_with_sections(monkeypatch, tmp_path):
-    """With a Mofid BUY section → a second JobScheduler thread launches on a
-    generated run_mofid config (independent of run_trading)."""
-    import json
-
+def test_mofid_scheduler_started_with_sections(monkeypatch):
+    """With a Mofid BUY section → a MofidScheduler thread launches."""
     import run_mofid
     import scheduler as scheduler_mod
 
     monkeypatch.setattr(
         run_mofid, "mofid_buy_targets", lambda _p: [("s1", {"isin": "IRO1DPAK0001"})]
     )
-    monkeypatch.setattr(runtime_config, "_snapshot", lambda: {})  # default run_time
-
-    created = {}
 
     class _FakeSched:
         def __init__(self, path):
-            created["path"] = path
+            self.path = path
 
         def run(self):  # pragma: no cover - never actually run in the test
             pass
@@ -77,16 +66,21 @@ def test_mofid_scheduler_started_with_sections(monkeypatch, tmp_path):
 
     monkeypatch.setattr(bot_entrypoint.threading, "Thread", _FakeThread)
 
-    cfg_path = tmp_path / "mofid_sched.json"
-    monkeypatch.setenv("MOFID_SCHEDULER_CONFIG", str(cfg_path))
-
     bot_entrypoint._start_mofid_scheduler()
-
     assert started == ["MofidScheduler"]
-    assert created["path"] == str(cfg_path)
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+
+
+def test_mofid_schedule_config_reads_run_time_live(monkeypatch):
+    """The schedule's run_time is read LIVE from [runtime] each call, so editing
+    mofid_run_time in Settings applies on the next open with no redeploy."""
+    monkeypatch.setattr(runtime_config, "_snapshot", lambda: {})  # nothing set
+    cfg = bot_entrypoint._mofid_schedule_config()
     assert cfg["enabled"] is True
     job = cfg["jobs"][0]
     assert job["name"] == "run_mofid"
     assert job["command"] == "python run_mofid.py"
-    assert job["time"] == "08:44:00"
+    assert job["time"] == "08:44:00"  # default when unset
+    monkeypatch.setattr(
+        runtime_config, "_snapshot", lambda: {"mofid_run_time": "08:43:00"}
+    )
+    assert bot_entrypoint._mofid_schedule_config()["jobs"][0]["time"] == "08:43:00"

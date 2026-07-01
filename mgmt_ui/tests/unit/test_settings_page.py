@@ -125,6 +125,7 @@ def test_bot_rt_fee_bounds():
 def test_bot_rt_mofid_defaults_match_hardcoded():
     s = SettingsUpdate(**_base())
     assert s.bot_rt_mofid_draft_count == 1
+    assert s.bot_rt_mofid_run_time == "08:44:00"
     assert s.bot_rt_mofid_window_start == "08:44:58.450"
     assert s.bot_rt_mofid_window_end == "08:45:00.900"
 
@@ -144,10 +145,14 @@ def test_bot_rt_mofid_window_time_format():
     assert a.bot_rt_mofid_window_start == "08:44:59"
     b = SettingsUpdate(**_base(bot_rt_mofid_window_end="08:45:00.900"))
     assert b.bot_rt_mofid_window_end == "08:45:00.900"
+    r = SettingsUpdate(**_base(bot_rt_mofid_run_time="08:43:00"))
+    assert r.bot_rt_mofid_run_time == "08:43:00"
     with pytest.raises(ValidationError):
         SettingsUpdate(**_base(bot_rt_mofid_window_start="08:44"))      # needs seconds
     with pytest.raises(ValidationError):
         SettingsUpdate(**_base(bot_rt_mofid_window_end="notatime"))
+    with pytest.raises(ValidationError):
+        SettingsUpdate(**_base(bot_rt_mofid_run_time="8am"))            # bad run_time
 
 
 # --- Advanced raw editor (escape hatch) --------------------------------------
