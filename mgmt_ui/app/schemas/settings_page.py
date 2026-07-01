@@ -90,6 +90,7 @@ class SettingsUpdate(BaseModel):
     bot_rt_auto_sell_confirm_secs: float = Field(default=5.0, ge=0)
     # Mofid / Orbis firing: how many drafts to create + the batch-send window.
     bot_rt_mofid_draft_count: int = Field(default=1, ge=1, le=50)
+    bot_rt_mofid_run_time: str = Field(default="08:44:00", max_length=16)
     bot_rt_mofid_window_start: str = Field(default="08:44:58.450", max_length=16)
     bot_rt_mofid_window_end: str = Field(default="08:45:00.900", max_length=16)
 
@@ -162,7 +163,9 @@ class SettingsUpdate(BaseModel):
             raise ValueError("window must look like HH:MM-HH:MM")
         return v
 
-    @field_validator("bot_rt_mofid_window_start", "bot_rt_mofid_window_end")
+    @field_validator(
+        "bot_rt_mofid_run_time", "bot_rt_mofid_window_start", "bot_rt_mofid_window_end"
+    )
     @classmethod
     def _check_hms(cls, v: str) -> str:
         v = (v or "").strip()
