@@ -130,6 +130,21 @@ def test_window_math_subtracts_offset():
     assert end - start == 2450  # 08:45:00.900 - 08:44:58.450
 
 
+def test_window_end_local_ms(monkeypatch):
+    # Local epoch ms of today's fire-window END — used to size run_mofid's
+    # subprocess/join timeouts so an early run_time isn't killed before firing.
+    monkeypatch.setattr(
+        mofid_firer, "window_config",
+        lambda: ("08:44:58.450", "08:45:00.900", 40, 20),
+    )
+    fixed = datetime(2026, 7, 1, 6, 0, 0)
+    ms = mofid_firer.window_end_local_ms(now_fn=lambda: fixed)
+    expected = int(
+        fixed.replace(hour=8, minute=45, second=0, microsecond=900000).timestamp() * 1000
+    )
+    assert ms == expected
+
+
 if __name__ == "__main__":
     import sys
     import pytest
