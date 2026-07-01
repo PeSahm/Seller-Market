@@ -128,6 +128,16 @@ def window_config() -> Tuple[str, str, int, int]:
     )
 
 
+def window_end_local_ms(now_fn: Callable[[], datetime] = datetime.now) -> int:
+    """Local epoch ms of TODAY's fire-window END (offset 0 — a ~ms broker skew is
+    irrelevant here). Used to size run_mofid's subprocess + join timeouts so a
+    run_time set well before the window (e.g. 08:30 for a 08:45 window) isn't
+    killed by the default 600s cap BEFORE it ever reaches the window."""
+    _, end_hms, _, _ = window_config()
+    return _hms_to_local_epoch_ms(end_hms, now_fn)
+
+
 __all__ = [
-    "FireResult", "compute_local_window_ms", "fire_batch_in_window", "window_config",
+    "FireResult", "compute_local_window_ms", "fire_batch_in_window",
+    "window_config", "window_end_local_ms",
 ]

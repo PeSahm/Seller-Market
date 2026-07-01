@@ -215,6 +215,22 @@ def test_compute_job_timeout_follows_run_time():
     assert _compute_job_timeout([]) == 600
 
 
+def test_compute_job_timeout_run_mofid_covers_fire_window(monkeypatch):
+    """run_mofid waits IN-PROCESS from mofid_run_time until the fire window, so
+    its cap must reach window_end + grace. A run_time set well before the window
+    (e.g. 08:30 vs a 08:45 window) else gets killed at the 600s default BEFORE it
+    fires (the 2026-07-01 no-fire incident)."""
+    import mofid_firer
+    from datetime import datetime
+    now_ms = int(datetime.now().timestamp() * 1000)
+    monkeypatch.setattr(mofid_firer, "window_end_local_ms", lambda: now_ms + 900_000)
+    t = _compute_job_timeout(["python", "run_mofid.py"])
+    assert 1000 < t < 1120          # ~900s to the window + 180 grace
+    # a near/past window still keeps at least the default 600s floor
+    monkeypatch.setattr(mofid_firer, "window_end_local_ms", lambda: now_ms - 10_000)
+    assert _compute_job_timeout(["python", "run_mofid.py"]) == 600
+
+
 if __name__ == '__main__':
     try:
         test_locust_config_loading()

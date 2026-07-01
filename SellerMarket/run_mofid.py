@@ -227,8 +227,20 @@ def main() -> None:
         )                  # killed when main returns. The firer is internally
         t.start()          # bounded (window + max_attempts) and the scheduler's
         threads.append(t)  # subprocess timeout is the ultimate backstop.
+    # Join until the fire window CLOSES (+ buffer), not a fixed 480s — a run_time
+    # set well before the window (e.g. 08:30 for a 08:45 window) means the threads
+    # legitimately wait far longer than 8 min for their window; a short join would
+    # log a premature "0 fired" while the threads are still armed.
+    try:
+        join_timeout = max(
+            _JOIN_TIMEOUT_S,
+            (mofid_firer.window_end_local_ms() - int(datetime.now().timestamp() * 1000))
+            / 1000.0 + 60.0,
+        )
+    except Exception:  # noqa: BLE001
+        join_timeout = _JOIN_TIMEOUT_S
     for t in threads:
-        t.join(timeout=_JOIN_TIMEOUT_S)
+        t.join(timeout=join_timeout)
 
     fired = sum(1 for v in results.values() if v)
     logger.info("run_mofid: done — %d/%d fired", fired, len(targets))

@@ -247,7 +247,22 @@ def _compute_job_timeout(parsed_command: List[str],
     configured 599s trading run BEFORE locust's on_test_stop runs, losing the
     fire-log flush and order_results (the mgmt UI pushes operator-tunable
     run_time via locust_config.json, so the cap must follow it).
+
+    For the Mofid firer (python run_mofid.py) the cap must reach the FIRE WINDOW:
+    run_mofid starts at mofid_run_time, creates the drafts, then waits IN-PROCESS
+    until the (server-time-synced) window to batch-send. A run_time set well
+    before the window (e.g. 08:30 for a 08:45 window) exceeds the 600s default and
+    the subprocess is killed BEFORE it can fire — so cap at window_end + grace.
     """
+    if any(str(a).endswith("run_mofid.py") for a in parsed_command):
+        try:
+            import mofid_firer
+            secs = (mofid_firer.window_end_local_ms()
+                    - int(datetime.now().timestamp() * 1000)) / 1000.0
+            return max(default, int(secs) + grace)
+        except Exception:
+            logger.debug("run_mofid window-timeout compute failed", exc_info=True)
+            return max(default, 1800)  # generous fallback covers an early run_time
     try:
         for i, arg in enumerate(parsed_command):
             run_time = None
